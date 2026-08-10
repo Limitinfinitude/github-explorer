@@ -2,6 +2,7 @@
 data/model_configs.json
 data/memory.db
 data/*.db
+data/
 
 # Python
 __pycache__/

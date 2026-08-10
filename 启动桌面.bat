@@ -1,20 +1,44 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [错误] 未找到项目环境 .venv\Scripts\python.exe
+    echo [1/3] Creating virtual environment...
+    if exist "D:\anaconda3\python.exe" (
+        "D:\anaconda3\python.exe" -m venv .venv
+    ) else (
+        where py >nul 2>&1
+        if not errorlevel 1 (
+            py -3 -m venv .venv
+        ) else (
+            where python >nul 2>&1
+            if errorlevel 1 (
+                echo Python 3 was not found. Install Python 3.10 or newer.
+                pause
+                exit /b 1
+            )
+            python -m venv .venv
+        )
+    )
+    if errorlevel 1 (
+        echo Failed to create .venv.
+        pause
+        exit /b 1
+    )
+    echo [2/3] Installing dependencies...
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo Dependency installation failed. Check your network and retry.
+        pause
+        exit /b 1
+    )
+)
+
+echo [3/3] Starting GitHub Explorer...
+".venv\Scripts\python.exe" run_desktop.py
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" (
+    echo GitHub Explorer exited with code %EXIT_CODE%.
     pause
-    exit /b 1
 )
-
-curl -s -o nul -w "%%{http_code}" http://127.0.0.1:7788/ | findstr "200" >nul 2>&1
-if errorlevel 1 (
-    echo [1/2] 启动 127.0.0.1:7788...
-    start "" /b ".venv\Scripts\python.exe" src\main.py >nul 2>&1
-    timeout /t 3 /nobreak >nul
-)
-
-echo [2/2] 启动桌面应用...
-".venv\Scripts\python.exe" desktop\launcher.py
-pause
+exit /b %EXIT_CODE%
