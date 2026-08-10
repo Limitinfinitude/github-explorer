@@ -1,0 +1,18 @@
+{
+  "api": {
+    "provider": "custom",
+    "api_key": "",
+    "base_url": "https://api.xiaomimimo.com/anthropic",
+    "model": "mimo-v2.5",
+    "max_tokens": 2000,
+    "temperature": 0.7
+  },
+  "github": {
+    "token": ""
+  },
+  "ui": {
+    "theme": "light",
+    "language": "zh-CN",
+    "sidebar_collapsed": false
+  }
+}

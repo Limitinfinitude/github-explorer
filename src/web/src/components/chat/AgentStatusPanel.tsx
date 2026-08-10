@@ -1,0 +1,177 @@
+import React from 'react'
+import {
+  Activity, CheckCircle2, ChevronDown, CircleDashed, FileCode2,
+  GitBranch, Map, ShieldAlert, Square, TerminalSquare, XCircle,
+} from 'lucide-react'
+import type {
+  AgentApproval, AgentFileChange, AgentProcess, AgentVerification,
+} from '../../types'
+
+interface Props {
+  plan: string[]
+  repoMap?: string
+  fileChanges: AgentFileChange[]
+  verification: AgentVerification | null
+  processes: AgentProcess[]
+  approval?: AgentApproval | null
+  onAnswerApproval?: (approved: boolean) => void
+  onStopProcess?: (processId: string) => void
+  compact?: boolean
+}
+
+export function AgentStatusPanel({
+  plan,
+  repoMap = '',
+  fileChanges,
+  verification,
+  processes,
+  approval = null,
+  onAnswerApproval,
+  onStopProcess,
+  compact = false,
+}: Props) {
+  if (!plan.length && !repoMap && !fileChanges.length && !verification && !processes.length && !approval) return null
+
+  const fileCount = fileChanges.reduce((sum, item) => sum + item.files.length, 0)
+  const body = (
+    <>
+      {!compact && <header className="agent-run__header">
+        <div className="agent-run__title">
+          <Activity size={14} aria-hidden="true" />
+          <span>Agent 执行记录</span>
+        </div>
+        <span className="agent-run__count">{fileCount} 个文件</span>
+      </header>}
+
+      {plan.length > 0 && (
+        <div className="agent-run__section">
+          <div className="agent-run__label"><GitBranch size={13} />执行计划</div>
+          <ol className="agent-plan">
+            {plan.map((step, index) => (
+              <li key={`${step}-${index}`}>
+                <span>{index + 1}</span>
+                <p>{step}</p>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {repoMap && (
+        <details className="agent-run__section agent-details">
+          <summary>
+            <span className="agent-run__label"><Map size={13} />Repo Map</span>
+            <ChevronDown size={14} />
+          </summary>
+          <pre>{repoMap}</pre>
+        </details>
+      )}
+
+      {fileChanges.length > 0 && (
+        <div className="agent-run__section">
+          <div className="agent-run__label"><FileCode2 size={13} />文件变更</div>
+          <div className="agent-file-list">
+            {fileChanges.map((change, index) => (
+              <details key={`${change.files.join('-')}-${index}`} className="agent-details">
+                <summary>
+                  <span>{change.files.join(', ')}</span>
+                  <ChevronDown size={14} />
+                </summary>
+                {change.diff && <pre>{change.diff}</pre>}
+              </details>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {verification && (
+        <div className="agent-run__section agent-verification">
+          <div className={`agent-result ${verification.success ? 'is-success' : 'is-error'}`}>
+            {verification.success ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
+            <span>{verification.success ? '验证通过' : '验证失败'}</span>
+          </div>
+          <div className="agent-checks">
+            {verification.checks.map((check, index) => (
+              <span key={`${check.command}-${index}`}>{check.command}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {processes.length > 0 && (
+        <div className="agent-run__section">
+          <div className="agent-run__label"><TerminalSquare size={13} />后台进程</div>
+          <div className="agent-process-list">
+            {processes.map(process => (
+              <details key={process.processId} className="agent-process agent-details">
+                <summary>
+                  {process.status === 'running'
+                    ? <CircleDashed className="agent-process__pulse" size={14} />
+                    : <CheckCircle2 size={14} />}
+                  <span className="agent-process__command">{process.command || process.processId.slice(0, 12)}</span>
+                  <span className={`agent-process__status is-${process.status}`}>{process.status}</span>
+                  {process.status === 'running' && onStopProcess && (
+                    <button
+                      type="button"
+                      title="停止后台进程"
+                      aria-label="停止后台进程"
+                      onClick={event => { event.preventDefault(); onStopProcess(process.processId) }}
+                      className="agent-icon-button is-danger"
+                    >
+                      <Square size={11} fill="currentColor" />
+                    </button>
+                  )}
+                  <ChevronDown size={14} />
+                </summary>
+                <div className="agent-process__meta">
+                  <span>PID {process.pid ?? '—'}</span>
+                  <span>{process.cwd || '目录未知'}</span>
+                  {process.returncode !== null && process.returncode !== undefined && <span>退出码 {process.returncode}</span>}
+                </div>
+                <pre>{process.logs || '暂无日志输出'}</pre>
+              </details>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {approval && (
+        <div className="agent-approval">
+          <ShieldAlert size={18} />
+          <div>
+            <strong>需要确认：{approval.toolName}</strong>
+            <p>{approval.reason}</p>
+          </div>
+          <div className="agent-approval__actions">
+            <button type="button" onClick={() => onAnswerApproval?.(false)}>拒绝</button>
+            <button type="button" className="is-primary" onClick={() => onAnswerApproval?.(true)}>允许并继续</button>
+          </div>
+        </div>
+      )}
+    </>
+  )
+
+  if (compact) {
+    const StatusIcon = verification?.success === false ? XCircle : CheckCircle2
+    const statusText = verification?.success === false ? '执行未通过' : '执行完成'
+    const meta = [
+      fileCount ? `${fileCount} 个文件` : '无文件变更',
+      verification ? (verification.success ? '验证通过' : '验证失败') : null,
+      processes.length ? `${processes.length} 个进程` : null,
+    ].filter(Boolean).join(' · ')
+
+    return (
+      <details className="agent-run agent-run--compact">
+        <summary className="agent-run__compact-summary">
+          <StatusIcon size={14} />
+          <strong>{statusText}</strong>
+          <span>{meta}</span>
+          <ChevronDown size={14} />
+        </summary>
+        <div className="agent-run__compact-body">{body}</div>
+      </details>
+    )
+  }
+
+  return <section className="agent-run">{body}</section>
+}

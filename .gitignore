@@ -1,0 +1,37 @@
+# 敏感数据 / 本地配置
+data/model_configs.json
+data/memory.db
+data/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# 环境变量
+.env
+.env.*
+.mcp.json
+.claude/
+
+# 克隆仓库（体积大）
+cloned_repos/
+
+# 本地测试与项目推进记录（不上传）
+tests/
+项目推进记录/
+pytest_cache/
+*.log
+
+# 前端依赖
+node_modules/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Explorer</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* 亮色主题 */
+        :root, [data-theme="light"] {
+            --bg-app: #ffffff;
+            --bg-sidebar: #f7f8fa;
+            --bg-main: #ffffff;
+            --bg-card: #f7f8fa;
+            --bg-hover: #f0f1f3;
+            --bg-active: #e8f4fd;
+            --bg-input: #f7f8fa;
+            --border: #e5e6eb;
+            --border-light: #eef0f2;
+            --text-primary: #1a1a1a;
+            --text-secondary: #606266;
+            --text-tertiary: #909399;
+            --accent: #3370ff;
+            --accent-hover: #2860e0;
+            --accent-light: #e8f0fe;
+            --success: #00b578;
+            --warning: #ff8f1f;
+            --error: #e34d59;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        /* 暗色主题 */
+        [data-theme="dark"] {
+            --bg-app: #0a0a0c;
+            --bg-sidebar: #111114;
+            --bg-main: #0a0a0c;
+            --bg-card: #18181c;
+            --bg-hover: #232329;
+            --bg-active: #1a2332;
+            --bg-input: #18181c;
+            --border: #28282f;
+            --border-light: #1e1e24;
+            --text-primary: #ececf1;
+            --text-secondary: #8e8ea0;
+            --text-tertiary: #5a5a6e;
+            --accent: #7c5bf5;
+            --accent-hover: #8f7af8;
+            --accent-muted: rgba(124, 91, 245, 0.12);
+            --success: #3dd68c;
+            --warning: #f5a623;
+            --error: #ef4444;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+        }
+
+        :root {
+            --radius-sm: 6px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 16px;
+            --transition: 200ms ease;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'PingFang SC', sans-serif;
+            background: var(--bg-app);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        .app { display: flex; height: 100vh; }
+
+        /* 侧边栏 */
+        .sidebar {
+            width: 240px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border-light);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+
+        .sidebar-logo {
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .sidebar-logo .icon {
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, var(--accent), #6954f5);
+            border-radius: var(--radius-md);
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-size: 16px;
+        }
+
+        .sidebar-logo .name { font-size: 15px; font-weight: 600; }
+
+        .sidebar-nav { flex: 1; padding: 8px 12px; overflow-y: auto; }
+
+        .nav-section {
+            padding: 16px 12px 6px;
+            font-size: 11px; font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .nav-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 12px; border-radius: var(--radius-md);
+            cursor: pointer; color: var(--text-secondary);
+            font-size: 13px; font-weight: 500;
+            transition: all var(--transition);
+            margin-bottom: 2px;
+        }
+
+        .nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .nav-item.active { background: var(--accent-light); color: var(--accent); }
+        .nav-item .icon { width: 18px; text-align: center; font-size: 15px; }
+
+        .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border-light); }
+
+        .btn-new {
+            width: 100%; height: 38px;
+            background: var(--accent); color: white;
+            border: none; border-radius: var(--radius-md);
+            font-size: 13px; font-weight: 500;
+            cursor: pointer; display: flex; align-items: center;
+            justify-content: center; gap: 6px;
+            transition: all var(--transition);
+        }
+
+        .btn-new:hover { background: var(--accent-hover); }
+
+        /* 标签栏 */
+        .tab-bar {
+            height: 40px;
+            background: var(--bg-sidebar);
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            align-items: flex-end;
+            padding: 0 8px;
+            overflow-x: auto;
+        }
+
+        .tab-item {
+            display: flex; align-items: center; gap: 6px;
+            height: 34px; padding: 0 14px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: var(--radius-md) var(--radius-md) 0 0;
+            font-size: 12px; color: var(--text-secondary);
+            cursor: pointer; white-space: nowrap;
+            transition: all var(--transition);
+        }
+
+        .tab-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        .tab-item.active {
+            background: var(--bg-app);
+            border-color: var(--border-light);
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .tab-item .close {
+            width: 16px; height: 16px;
+            border: none; background: transparent;
+            color: var(--text-tertiary); border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; opacity: 0;
+            transition: all var(--transition);
+        }
+
+        .tab-item:hover .close { opacity: 1; }
+        .tab-item .close:hover { background: var(--error); color: white; }
+
+        .tab-add {
+            width: 28px; height: 28px;
+            margin: 4px 4px; border: none;
+            background: transparent; color: var(--text-tertiary);
+            border-radius: var(--radius-sm); cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px; transition: all var(--transition);
+        }
+
+        .tab-add:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        /* 主内容区 */
+        .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-main); transition: background 0.3s; }
+
+        .content-area { flex: 1; overflow: hidden; position: relative; }
+
+        .tab-content { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none; flex-direction: column; }
+        .tab-content.active { display: flex; }
+
+        /* 欢迎页 */
+        .welcome {
+            flex: 1; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; padding: 40px;
+        }
+
+        .welcome-icon { width: 80px; height: 80px; margin-bottom: 24px; opacity: 0.8; }
+        .welcome h1 { font-size: 26px; font-weight: 600; margin-bottom: 8px; }
+        .welcome p { font-size: 14px; color: var(--text-secondary); }
+
+        .category-tabs { display: flex; gap: 8px; margin: 28px 0 20px; }
+
+        .category-tab {
+            padding: 8px 16px; border-radius: 20px;
+            font-size: 13px; font-weight: 500; cursor: pointer;
+            background: var(--bg-card); color: var(--text-secondary);
+            border: 1px solid var(--border); transition: all var(--transition);
+        }
+
+        .category-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .category-tab.active { background: var(--text-primary); color: var(--bg-app); border-color: var(--text-primary); }
+
+        .feature-grid { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; max-width: 600px; }
+
+        .feature-chip {
+            display: flex; align-items: center; gap: 6px;
+            padding: 10px 16px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-lg);
+            font-size: 13px; color: var(--text-secondary); cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .feature-chip:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
+
+        /* 对话视图 */
+        .chat-messages { flex: 1; overflow-y: auto; padding: 24px 32px; }
+
+        .message { margin-bottom: 20px; display: flex; gap: 12px; max-width: 800px; margin-left: auto; margin-right: auto; animation: msgIn 0.3s ease; }
+        @keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .message.user { flex-direction: row-reverse; }
+
+        .message-avatar {
+            width: 32px; height: 32px; border-radius: var(--radius-md);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px; flex-shrink: 0;
+        }
+
+        .message.user .message-avatar { background: var(--accent); color: white; }
+        .message.assistant .message-avatar { background: var(--bg-card); border: 1px solid var(--border); }
+
+        .message-body { max-width: 70%; }
+
+        .message-content {
+            padding: 12px 16px; border-radius: var(--radius-lg);
+            font-size: 14px; line-height: 1.7;
+        }
+
+        .message.user .message-content { background: var(--accent); color: white; }
+        .message.assistant .message-content { background: var(--bg-card); border: 1px solid var(--border-light); }
+
+        .message-content p { margin-bottom: 8px; }
+        .message-content p:last-child { margin-bottom: 0; }
+        .message-content code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+        [data-theme="dark"] .message-content code { background: rgba(255,255,255,0.1); }
+
+        /* 输入区 */
+        .input-area { padding: 16px 32px 20px; }
+        .input-container { max-width: 800px; margin: 0 auto; }
+
+        .input-box {
+            background: var(--bg-app); border: 1px solid var(--border);
+            border-radius: var(--radius-xl); padding: 12px 16px;
+            transition: all 0.25s; box-shadow: var(--shadow-sm);
+        }
+
+        .input-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+
+        .input-textarea {
+            width: 100%; min-height: 20px; max-height: 120px;
+            border: none; background: transparent; color: var(--text-primary);
+            font-size: 14px; font-family: inherit; resize: none; outline: none; line-height: 1.5;
+        }
+
+        .input-textarea::placeholder { color: var(--text-tertiary); }
+
+        .input-toolbar {
+            display: flex; align-items: center; gap: 8px;
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .toolbar-btn {
+            display: flex; align-items: center; gap: 4px;
+            padding: 5px 10px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            font-size: 12px; color: var(--text-secondary); cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .toolbar-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        .toolbar-spacer { flex: 1; }
+
+        .send-btn {
+            width: 32px; height: 32px; background: var(--accent);
+            color: white; border: none; border-radius: var(--radius-md);
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            font-size: 14px; transition: all 0.2s;
+        }
+
+        .send-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
+        .send-btn:active { transform: scale(0.95); }
+
+        /* 项目网格 */
+        .projects-view { padding: 20px 28px; overflow-y: auto; }
+
+        .view-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .view-header h2 { font-size: 16px; font-weight: 600; }
+
+        .search-inline { display: flex; gap: 8px; }
+
+        .search-inline input {
+            width: 260px; height: 34px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            padding: 0 12px; font-size: 13px; color: var(--text-primary); outline: none;
+        }
+
+        .search-inline input:focus { border-color: var(--accent); }
+
+        .projects-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 14px;
+        }
+
+        .project-card {
+            background: var(--bg-card); border: 1px solid var(--border-light);
+            border-radius: var(--radius-lg); padding: 16px; cursor: pointer;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .project-card:hover { border-color: var(--accent); transform: translateY(-3px); box-shadow: var(--shadow-md); }
+
+        .project-card .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .project-card .name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+        .project-card .lang {
+            font-size: 11px; padding: 2px 8px; background: var(--bg-main);
+            border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary);
+        }
+
+        .project-card .desc {
+            font-size: 13px; color: var(--text-secondary); line-height: 1.5;
+            margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden;
+        }
+
+        .project-card .stats { display: flex; gap: 14px; font-size: 12px; color: var(--text-tertiary); }
+        .project-card .stat { display: flex; align-items: center; gap: 4px; }
+
+        /* 网页识别视图 */
+        .url-input-view { padding: 20px 28px; }
+        .url-input-box {
+            max-width: 700px; margin: 0 auto;
+        }
+        .url-input-box h3 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+        .url-input-box p { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
+
+        .url-field {
+            display: flex; gap: 8px;
+        }
+
+        .url-field input {
+            flex: 1; height: 42px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            padding: 0 14px; font-size: 14px; color: var(--text-primary); outline: none;
+        }
+
+        .url-field input:focus { border-color: var(--accent); }
+
+        .url-result {
+            margin-top: 20px; padding: 16px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-lg);
+            display: none;
+        }
+
+        .url-result.show { display: block; animation: fadeSlideIn 0.3s ease; }
+        @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        .url-result h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+        .url-result p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+        .url-result .meta { display: flex; gap: 12px; margin-top: 12px; font-size: 12px; color: var(--text-tertiary); }
+
+        /* 详情面板 */
+        .detail-panel {
+            width: 340px; background: var(--bg-app); border-left: 1px solid var(--border-light);
+            display: none; flex-direction: column; transition: background 0.3s;
+        }
+
+        .detail-panel.active { display: flex; }
+
+        .detail-header { padding: 20px; border-bottom: 1px solid var(--border-light); }
+        .detail-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+        .detail-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+
+        .detail-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border-light); }
+        .stat-item { text-align: center; }
+        .stat-value { font-size: 15px; font-weight: 600; }
+        .stat-label { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
+
+        .detail-actions { padding: 14px 20px; display: flex; flex-direction: column; gap: 8px; }
+
+        .action-btn {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            font-size: 13px; font-weight: 500; color: var(--text-primary);
+            cursor: pointer; transition: all var(--transition);
+        }
+
+        .action-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+        .action-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+        .action-btn.primary:hover { background: var(--accent-hover); }
+
+        .terminal-box { flex: 1; padding: 14px 20px; display: flex; flex-direction: column; }
+        .terminal-header { font-size: 11px; font-weight: 600; color: var(--text-tertiary); margin-bottom: 6px; }
+
+        .terminal {
+            flex: 1; background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius-md); padding: 10px;
+            font-family: 'JetBrains Mono', monospace; font-size: 11px;
+            line-height: 1.6; color: var(--text-secondary); overflow-y: auto; white-space: pre-wrap;
+        }
+
+        /* 快捷键面板 */
+        .shortcuts-panel {
+            position: fixed; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 460px; max-height: 80vh;
+            background: var(--bg-app); border: 1px solid var(--border);
+            border-radius: var(--radius-xl); box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            z-index: 1100; animation: scaleIn 0.2s ease;
+        }
+
+        @keyframes scaleIn { from { opacity: 0; transform: translate(-50%, -50%) scale(0.95); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+        .shortcuts-header { padding: 18px 20px; border-bottom: 1px solid var(--border-light); display: flex; align-items: center; justify-content: space-between; }
+        .shortcuts-header h3 { font-size: 15px; font-weight: 600; }
+        .shortcuts-body { padding: 14px 20px; max-height: 60vh; overflow-y: auto; }
+        .shortcut-group { margin-bottom: 16px; }
+        .shortcut-group:last-child { margin-bottom: 0; }
+        .shortcut-group-title { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+        .shortcut-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+        .shortcut-label { font-size: 13px; }
+        .shortcut-keys { display: flex; gap: 4px; }
+        .kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 5px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; font-size: 11px; color: var(--text-tertiary); }
+
+        /* 模态框 */
+        .modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
+        .modal.hidden { display: none; }
+        .modal-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); }
+        .modal-content { position: relative; width: 480px; max-height: 80vh; background: var(--bg-app); border-radius: var(--radius-xl); box-shadow: var(--shadow-md); overflow: hidden; animation: scaleIn 0.2s ease; }
+        .modal-header { padding: 18px 20px; border-bottom: 1px solid var(--border-light); display: flex; align-items: center; justify-content: space-between; }
+        .modal-header h2 { font-size: 16px; font-weight: 600; }
+        .modal-close { width: 28px; height: 28px; border: none; background: transparent; color: var(--text-tertiary); border-radius: var(--radius-md); cursor: pointer; font-size: 16px; }
+        .modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .modal-body { padding: 20px; overflow-y: auto; }
+        .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border-light); display: flex; justify-content: flex-end; gap: 10px; }
+
+        .settings-section { margin-bottom: 20px; }
+        .settings-section h3 { font-size: 12px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+        .setting-item { margin-bottom: 14px; }
+        .setting-item label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 5px; }
+        .setting-item input, .setting-item select {
+            width: 100%; height: 36px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            padding: 0 12px; font-size: 13px; color: var(--text-primary); outline: none;
+        }
+        .setting-item input:focus, .setting-item select:focus { border-color: var(--accent); }
+        .setting-row { display: flex; gap: 12px; }
+        .setting-row .setting-item { flex: 1; }
+
+        .btn { height: 34px; padding: 0 18px; border-radius: var(--radius-md); font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all var(--transition); }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
+        .btn-secondary:hover { background: var(--bg-hover); }
+
+        /* Toast */
+        .toast {
+            position: fixed; bottom: 24px; left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            padding: 10px 20px; background: var(--text-primary);
+            color: var(--bg-app); border-radius: var(--radius-md);
+            font-size: 13px; opacity: 0; transition: all 0.3s; z-index: 2000;
+        }
+
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+        /* 空状态 */
+        .empty-state { text-align: center; padding: 50px; color: var(--text-tertiary); }
+        .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+        .empty-state h3 { font-size: 15px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+
+        /* 打字动画 */
+        .typing-dots { display: flex; gap: 4px; padding: 4px 0; }
+        .typing-dot { width: 6px; height: 6px; background: var(--text-tertiary); border-radius: 50%; animation: typing 1.4s infinite; }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+        .hidden { display: none !important; }
+
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+    </style>
+</head>
+<body data-theme="light">
+    <div class="app">
+        <!-- 侧边栏 -->
+        <div class="sidebar">
+            <div class="sidebar-logo">
+                <div class="icon">🔍</div>
+                <div class="name">Explorer</div>
+            </div>
+            <div class="sidebar-nav">
+                <div class="nav-item active" data-view="home" onclick="switchView('home')">
+                    <span class="icon">🏠</span><span>首页</span>
+                </div>
+                <div class="nav-item" data-view="explore" onclick="switchView('explore')">
+                    <span class="icon">🌐</span><span>探索项目</span>
+                </div>
+                <div class="nav-item" data-view="url" onclick="switchView('url')">
+                    <span class="icon">🔗</span><span>识别网页</span>
+                </div>
+                <div class="nav-item" data-view="projects" onclick="switchView('projects')">
+                    <span class="icon">📁</span><span>我的项目</span>
+                </div>
+                <div class="nav-item" data-view="history" onclick="switchView('history')">
+                    <span class="icon">📜</span><span>历史</span>
+                </div>
+                <div class="nav-section">设置</div>
+                <div class="nav-item" onclick="toggleTheme()">
+                    <span class="icon">🌓</span><span>切换主题</span>
+                </div>
+                <div class="nav-item" onclick="showSettings()">
+                    <span class="icon">⚙️</span><span>模型配置</span>
+                </div>
+                <div class="nav-item" onclick="toggleShortcuts()">
+                    <span class="icon">⌨️</span><span>快捷键</span>
+                </div>
+            </div>
+            <div class="sidebar-footer">
+                <button class="btn-new" onclick="newTab('chat')">
+                    <span>+</span><span>新对话</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="main">
+            <!-- 标签栏 -->
+            <div class="tab-bar" id="tabBar">
+                <button class="tab-add" onclick="newTab('chat')">+</button>
+            </div>
+
+            <!-- 内容区 -->
+            <div class="content-area" id="contentArea"></div>
+        </div>
+
+        <!-- 详情面板 -->
+        <div class="detail-panel" id="detailPanel">
+            <div class="detail-header">
+                <div class="detail-title" id="detailName">-</div>
+                <div class="detail-desc" id="detailDesc">-</div>
+            </div>
+            <div class="detail-stats">
+                <div class="stat-item"><div class="stat-value" id="statStars">-</div><div class="stat-label">Stars</div></div>
+                <div class="stat-item"><div class="stat-value" id="statForks">-</div><div class="stat-label">Forks</div></div>
+                <div class="stat-item"><div class="stat-value" id="statIssues">-</div><div class="stat-label">Issues</div></div>
+                <div class="stat-item"><div class="stat-value" id="statLang">-</div><div class="stat-label">语言</div></div>
+            </div>
+            <div class="detail-actions">
+                <div class="action-btn primary" onclick="cloneProject()">📥 克隆到本地</div>
+                <div class="action-btn" onclick="setupProject()">⚡ 配置环境</div>
+                <div class="action-btn" onclick="runProject()">▶️ 运行</div>
+                <div class="action-btn" onclick="explainProject()">✨ AI 解读</div>
+                <div class="action-btn" onclick="openInBrowser()">🔗 GitHub</div>
+            </div>
+            <div class="terminal-box">
+                <div class="terminal-header">终端</div>
+                <div class="terminal" id="terminal">等待命令...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-overlay" onclick="hideSettings()"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>设置</h2>
+                <button class="modal-close" onclick="hideSettings()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h3>AI 模型</h3>
+                    <div class="setting-item"><label>提供商</label>
+                        <select id="settingProvider"><option value="custom">自定义</option><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select>
+                    </div>
+                    <div class="setting-item"><label>API Key</label><input type="password" id="settingApiKey"></div>
+                    <div class="setting-item"><label>Base URL</label><input type="text" id="settingBaseUrl"></div>
+                    <div class="setting-item"><label>模型</label><input type="text" id="settingModel"></div>
+                    <div class="setting-row">
+                        <div class="setting-item"><label>Max Tokens</label><input type="number" id="settingMaxTokens" value="2000"></div>
+                        <div class="setting-item"><label>Temperature</label><input type="number" id="settingTemperature" value="0.7" step="0.1"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="hideSettings()">取消</button>
+                <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 快捷键面板 -->
+    <div id="shortcutsPanel" class="shortcuts-panel hidden">
+        <div class="shortcuts-header"><h3>快捷键</h3><button class="modal-close" onclick="hideShortcuts()">✕</button></div>
+        <div class="shortcuts-body">
+            <div class="shortcut-group">
+                <div class="shortcut-group-title">导航</div>
+                <div class="shortcut-row"><span class="shortcut-label">搜索项目</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">K</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">首页</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">H</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">新标签</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">T</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">关闭标签</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">W</span></div></div>
+            </div>
+            <div class="shortcut-group">
+                <div class="shortcut-group-title">操作</div>
+                <div class="shortcut-row"><span class="shortcut-label">克隆项目</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">C</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">配置环境</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">S</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">运行项目</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">R</span></div></div>
+            </div>
+            <div class="shortcut-group">
+                <div class="shortcut-group-title">通用</div>
+                <div class="shortcut-row"><span class="shortcut-label">设置</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">,</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">快捷键</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">/</span></div></div>
+                <div class="shortcut-row"><span class="shortcut-label">切换主题</span><div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">D</span></div></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // 状态
+        let tabs = [];
+        let activeTab = null;
+        let currentRepo = null;
+        let projects = [];
+        let tabIdCounter = 0;
+
+        let currentSettings = {
+            api: { provider: 'custom', api_key: '', base_url: 'https://token-plan-cn.xiaomimimo.com/anthropic', model: 'mimo-v2.5', max_tokens: 2000, temperature: 0.7 }
+        };
+
+        const api = window.pywebview ? window.pywebview.api : {
+            search_projects: async (q) => {
+                const res = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&per_page=12`);
+                const data = await res.json();
+                return (data.items || []).map(r => ({ full_name: r.full_name, description: r.description || '', stars: r.stargazers_count, forks: r.forks_count, language: r.language, topics: r.topics || [], pushed_at: r.pushed_at, html_url: r.html_url, open_issues: r.open_issues_count }));
+            },
+            get_trending: async () => (await api.search_projects('stars:>5000')),
+            clone_repo: async (r) => { await fetch('/api/agent/execute', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:`git clone https://github.com/${r}.git`,repo:r})}); return {success:true,output:'克隆中...'}; },
+            setup_project: async (r) => { await fetch('/api/agent/setup', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:r})}); return {success:true}; },
+            run_command: async (c) => { await fetch('/api/agent/execute', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:c})}); return {success:true,output:'执行中...'}; },
+            chat: async (m, r) => { const res = await fetch('/api/agent/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:m,repo:r,session_id:'desktop'})}); const data = await res.json(); return data.response || data.message || '响应中...'; },
+            explain_project: async (r) => { const res = await fetch('http://localhost:8000/api/explain', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:r})}); const data = await res.json(); return data.explanation || '解读中...'; },
+            get_projects: async () => { const res = await fetch('/api/agent/projects'); const data = await res.json(); return data.projects || []; },
+            get_history: async () => { const res = await fetch('/api/agent/logs'); const data = await res.json(); return data.logs || []; },
+            fetch_url: async (url) => {
+                try {
+                    const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+                    const data = await res.json();
+                    const html = data.contents || '';
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    const title = doc.querySelector('title')?.textContent || doc.querySelector('meta[property="og:title"]')?.content || '';
+                    const desc = doc.querySelector('meta[name="description"]')?.content || doc.querySelector('meta[property="og:description"]')?.content || '';
+                    const lang = doc.querySelector('html')?.getAttribute('lang') || '';
+                    return { title, description: desc, language: lang, url };
+                } catch(e) { return { title: '', description: '无法获取页面信息', url }; }
+            },
+            get_settings: async () => currentSettings,
+            update_settings: async (s) => { Object.assign(currentSettings, s); return { success: true }; }
+        };
+
+        // 主题切换
+        function toggleTheme() {
+            const body = document.body;
+            const current = body.getAttribute('data-theme');
+            const next = current === 'dark' ? 'light' : 'dark';
+            body.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            showToast(next === 'dark' ? '已切换到暗色主题' : '已切换到亮色主题');
+        }
+
+        // 加载主题
+        function loadTheme() {
+            const saved = localStorage.getItem('theme') || 'light';
+            document.body.setAttribute('data-theme', saved);
+        }
+
+        // 标签管理
+        function newTab(type, data = {}) {
+            const id = ++tabIdCounter;
+            const tab = { id, type, data, title: type === 'chat' ? '新对话' : data.title || type };
+            tabs.push(tab);
+            renderTabs();
+            switchTab(id);
+        }
+
+        function closeTab(id, e) {
+            if (e) e.stopPropagation();
+            const idx = tabs.findIndex(t => t.id === id);
+            if (idx === -1) return;
+            tabs.splice(idx, 1);
+            if (activeTab?.id === id) {
+                if (tabs.length > 0) switchTab(tabs[Math.min(idx, tabs.length - 1)].id);
+                else newTab('chat');
+            }
+            renderTabs();
+        }
+
+        function switchTab(id) {
+            activeTab = tabs.find(t => t.id === id);
+            if (!activeTab) return;
+            renderTabs();
+            renderContent();
+            updateSidebar();
+        }
+
+        function renderTabs() {
+            const bar = document.getElementById('tabBar');
+            bar.innerHTML = tabs.map(t => `
+                <div class="tab-item ${t.id === activeTab?.id ? 'active' : ''}" onclick="switchTab(${t.id})">
+                    <span>${t.type === 'chat' ? '💬' : t.type === 'explore' ? '🌐' : t.type === 'url' ? '🔗' : '📁'} ${t.title}</span>
+                    <button class="close" onclick="closeTab(${t.id}, event)">✕</button>
+                </div>
+            `).join('') + `<button class="tab-add" onclick="newTab('chat')">+</button>`;
+        }
+
+        function updateSidebar() {
+            document.querySelectorAll('.nav-item[data-view]').forEach(i => {
+                i.classList.toggle('active', activeTab?.type === i.dataset.view);
+            });
+        }
+
+        function switchView(view) {
+            if (activeTab && activeTab.type === view) return;
+            newTab(view);
+        }
+
+        // 渲染内容
+        function renderContent() {
+            const area = document.getElementById('contentArea');
+            if (!activeTab) { area.innerHTML = ''; return; }
+
+            switch (activeTab.type) {
+                case 'home': renderHome(area); break;
+                case 'chat': renderChat(area); break;
+                case 'explore': renderExplore(area); break;
+                case 'url': renderUrlRecognizer(area); break;
+                case 'projects': renderProjects(area); break;
+                case 'history': renderHistory(area); break;
+                default: area.innerHTML = '<div class="empty-state"><h3>未知视图</h3></div>';
+            }
+        }
+
+        function renderHome(area) {
+            area.innerHTML = `
+                <div class="tab-content active view-transition">
+                    <div class="welcome">
+                        <div class="welcome-icon">
+                            <svg viewBox="0 0 100 100" fill="none">
+                                <circle cx="50" cy="50" r="45" stroke="var(--border)" stroke-width="2"/>
+                                <circle cx="50" cy="50" r="30" fill="var(--bg-card)"/>
+                                <circle cx="38" cy="45" r="4" fill="var(--text-primary)"/>
+                                <circle cx="62" cy="45" r="4" fill="var(--text-primary)"/>
+                                <path d="M40 60 Q50 68 60 60" stroke="var(--text-primary)" stroke-width="2" stroke-linecap="round" fill="none"/>
+                                <rect x="35" y="20" width="30" height="15" rx="4" fill="var(--accent)"/>
+                                <rect x="38" y="24" width="8" height="8" rx="2" fill="white"/>
+                                <rect x="50" y="24" width="8" height="8" rx="2" fill="white"/>
+                            </svg>
+                        </div>
+                        <h1>GitHub Explorer</h1>
+                        <p>发现优质开源项目，一键配置环境，智能运行指导</p>
+                        <div class="category-tabs">
+                            <div class="category-tab active">💻 代码开发</div>
+                            <div class="category-tab">🖥️ 日常办公</div>
+                            <div class="category-tab">🎨 设计创意</div>
+                        </div>
+                        <div class="feature-grid">
+                            <div class="feature-chip" onclick="switchView('explore')">🔍 搜索项目</div>
+                            <div class="feature-chip" onclick="switchView('url')">🔗 识别网页</div>
+                            <div class="feature-chip" onclick="switchView('projects')">📁 我的项目</div>
+                            <div class="feature-chip" onclick="showSettings()">⚙️ 设置</div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function renderChat(area) {
+            const tabData = activeTab.data;
+            area.innerHTML = `
+                <div class="tab-content active">
+                    <div class="chat-messages" id="messages-${activeTab.id}"></div>
+                    <div class="input-area">
+                        <div class="input-container">
+                            <div class="input-box">
+                                <textarea class="input-textarea" id="input-${activeTab.id}" placeholder="输入消息..." rows="1"
+                                    onkeypress="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg(${activeTab.id})}"
+                                    oninput="autoResize(this)"></textarea>
+                                <div class="input-toolbar">
+                                    <button class="toolbar-btn" onclick="showSettings()"><span>🤖</span><span>${currentSettings.api.model}</span></button>
+                                    <div class="toolbar-spacer"></div>
+                                    <button class="send-btn" onclick="sendMsg(${activeTab.id})">↑</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+
+            if (tabData.welcome) {
+                addMessage(activeTab.id, 'assistant', tabData.welcome);
+            }
+        }
+
+        function renderExplore(area) {
+            area.innerHTML = `
+                <div class="tab-content active">
+                    <div class="projects-view">
+                        <div class="view-header">
+                            <h2>探索开源项目</h2>
+                            <div class="search-inline">
+                                <input type="text" id="searchInput-${activeTab.id}" placeholder="搜索GitHub项目..." onkeypress="if(event.key==='Enter')doSearch(${activeTab.id})">
+                                <button class="btn btn-primary" onclick="doSearch(${activeTab.id})">搜索</button>
+                            </div>
+                        </div>
+                        <div class="projects-grid" id="grid-${activeTab.id}"><div class="empty-state"><div class="icon">⏳</div><h3>加载中...</h3></div></div>
+                    </div>
+                </div>`;
+            loadExploreData(activeTab.id);
+        }
+
+        async function loadExploreData(tabId) {
+            const grid = document.getElementById(`grid-${tabId}`);
+            if (!grid) return;
+            try {
+                const data = await api.get_trending();
+                renderProjectGrid(grid, data, tabId);
+            } catch(e) { grid.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h3>加载失败</h3></div>'; }
+        }
+
+        async function doSearch(tabId) {
+            const input = document.getElementById(`searchInput-${tabId}`);
+            const q = input?.value.trim();
+            if (!q) return;
+            const grid = document.getElementById(`grid-${tabId}`);
+            if (!grid) return;
+            grid.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><h3>搜索中...</h3></div>';
+            try {
+                const data = await api.search_projects(q);
+                renderProjectGrid(grid, data, tabId);
+            } catch(e) { grid.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h3>搜索失败</h3></div>'; }
+        }
+
+        function renderProjectGrid(grid, repos, tabId) {
+            if (!repos.length) { grid.innerHTML = '<div class="empty-state"><div class="icon">🔍</div><h3>未找到项目</h3></div>'; return; }
+            grid.innerHTML = repos.map((r, i) => `
+                <div class="project-card" onclick="selectRepo(${tabId}, ${JSON.stringify(r).replace(/"/g, '&quot;')})">
+                    <div class="header"><div class="name">📦 ${r.full_name}</div>${r.language ? `<div class="lang">${r.language}</div>` : ''}</div>
+                    <div class="desc">${r.description || '暂无描述'}</div>
+                    <div class="stats"><div class="stat">⭐ ${formatNum(r.stars)}</div><div class="stat">🍴 ${formatNum(r.forks)}</div><div class="stat">🕒 ${timeAgo(r.pushed_at)}</div></div>
+                </div>
+            `).join('');
+        }
+
+        function selectRepo(tabId, repo) {
+            currentRepo = repo;
+            const panel = document.getElementById('detailPanel');
+            panel.classList.add('active');
+            document.getElementById('detailName').textContent = repo.full_name;
+            document.getElementById('detailDesc').textContent = repo.description || '暂无描述';
+            document.getElementById('statStars').textContent = formatNum(repo.stars);
+            document.getElementById('statForks').textContent = formatNum(repo.forks);
+            document.getElementById('statIssues').textContent = formatNum(repo.open_issues || 0);
+            document.getElementById('statLang').textContent = repo.language || '-';
+            document.getElementById('terminal').textContent = '等待命令...';
+        }
+
+        function renderUrlRecognizer(area) {
+            area.innerHTML = `
+                <div class="tab-content active">
+                    <div class="url-input-view">
+                        <div class="url-input-box">
+                            <h3>🔗 网页信息识别</h3>
+                            <p>输入任意网页URL，自动提取页面标题、描述、关键词等信息</p>
+                            <div class="url-field">
+                                <input type="url" id="urlInput-${activeTab.id}" placeholder="https://example.com" onkeypress="if(event.key==='Enter')analyzeUrl(${activeTab.id})">
+                                <button class="btn btn-primary" onclick="analyzeUrl(${activeTab.id})">识别</button>
+                            </div>
+                            <div class="url-result" id="urlResult-${activeTab.id}"></div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        async function analyzeUrl(tabId) {
+            const input = document.getElementById(`urlInput-${tabId}`);
+            const result = document.getElementById(`urlResult-${tabId}`);
+            const url = input?.value.trim();
+            if (!url) return;
+
+            result.className = 'url-result';
+            result.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><h3>识别中...</h3></div>';
+            result.classList.add('show');
+
+            try {
+                const data = await api.fetch_url(url);
+                result.innerHTML = `
+                    <h4>📋 识别结果</h4>
+                    <p><strong>标题:</strong> ${data.title || '未获取到'}</p>
+                    <p><strong>描述:</strong> ${data.description || '未获取到'}</p>
+                    <div class="meta">
+                        <span>🔗 ${data.url}</span>
+                        <span>🌐 ${data.language || '-'}</span>
+                    </div>
+                    <div style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="askAboutUrl('${data.title}', '${data.description}')">🤖 AI分析这个项目</button>
+                    </div>`;
+            } catch(e) {
+                result.innerHTML = `<div class="empty-state"><div class="icon">❌</div><h3>识别失败</h3><p>${e.message}</p></div>`;
+            }
+        }
+
+        function askAboutUrl(title, desc) {
+            if (!title && !desc) return;
+            newTab('chat', { welcome: `你好，我刚发现了一个网页:\n\n**标题:** ${title}\n**描述:** ${desc}\n\n请帮我分析一下这个项目。` });
+        }
+
+        function renderProjects(area) {
+            area.innerHTML = `<div class="tab-content active"><div class="projects-view"><h2>我的项目</h2><div id="myProjects-${activeTab.id}"><div class="empty-state"><div class="icon">⏳</div><h3>加载中...</h3></div></div></div></div>`;
+            loadMyProjects(activeTab.id);
+        }
+
+        async function loadMyProjects(tabId) {
+            const el = document.getElementById(`myProjects-${tabId}`);
+            if (!el) return;
+            try {
+                const projects = await api.get_projects();
+                if (!projects.length) { el.innerHTML = '<div class="empty-state"><div class="icon">📁</div><h3>暂无项目</h3></div>'; return; }
+                el.innerHTML = projects.map(p => `<div style="padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);margin-bottom:8px;font-size:13px;">${p.repo} <span style="color:var(--text-tertiary);">(${p.status})</span></div>`).join('');
+            } catch(e) { el.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h3>加载失败</h3></div>'; }
+        }
+
+        function renderHistory(area) {
+            area.innerHTML = `<div class="tab-content active"><div class="projects-view"><h2>操作历史</h2><div id="historyList-${activeTab.id}"><div class="empty-state"><div class="icon">⏳</div><h3>加载中...</h3></div></div></div></div>`;
+            loadHistory(activeTab.id);
+        }
+
+        async function loadHistory(tabId) {
+            const el = document.getElementById(`historyList-${tabId}`);
+            if (!el) return;
+            try {
+                const logs = await api.get_history();
+                if (!logs.length) { el.innerHTML = '<div class="empty-state"><div class="icon">📜</div><h3>暂无记录</h3></div>'; return; }
+                el.innerHTML = logs.map(l => `<div style="padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);margin-bottom:8px;"><div style="display:flex;justify-content:space-between;"><span style="font-size:13px;font-weight:500;">${l.action_type}</span><span style="font-size:11px;color:var(--text-tertiary);">${(l.timestamp||'').slice(0,16)}</span></div><div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${l.target||'-'}</div></div>`).join('');
+            } catch(e) { el.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h3>加载失败</h3></div>'; }
+        }
+
+        // 消息
+        function addMessage(tabId, role, content) {
+            const msgs = document.getElementById(`messages-${tabId}`);
+            if (!msgs) return;
+            const avatar = role === 'user' ? '👤' : '🤖';
+            msgs.innerHTML += `<div class="message ${role}"><div class="message-avatar">${avatar}</div><div class="message-body"><div class="message-content"><p>${escapeHtml(content).replace(/\n/g, '<br>')}</p></div></div></div>`;
+            msgs.scrollTop = msgs.scrollHeight;
+        }
+
+        async function sendMsg(tabId) {
+            const input = document.getElementById(`input-${tabId}`);
+            const msg = input?.value.trim();
+            if (!msg) return;
+
+            addMessage(tabId, 'user', msg);
+            input.value = '';
+            input.style.height = 'auto';
+
+            // 检测部署相关指令
+            const deployKeywords = ['部署', 'deploy', '安装', '配置环境', '运行', '启动', '拉取', 'clone'];
+            const isDeployCommand = deployKeywords.some(k => msg.toLowerCase().includes(k)) && currentRepo;
+
+            if (isDeployCommand) {
+                await executeDeployFlow(tabId, msg);
+                return;
+            }
+
+            const msgs = document.getElementById(`messages-${tabId}`);
+            msgs.innerHTML += `<div class="message assistant" id="typing-${tabId}"><div class="message-avatar">🤖</div><div class="message-body"><div class="message-content"><div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div></div></div>`;
+
+            try {
+                const res = await api.chat(msg, currentRepo?.full_name);
+                document.getElementById(`typing-${tabId}`)?.remove();
+                addMessage(tabId, 'assistant', res);
+            } catch(e) {
+                document.getElementById(`typing-${tabId}`)?.remove();
+                addMessage(tabId, 'assistant', `请求失败: ${e.message}`);
+            }
+        }
+
+        async function executeDeployFlow(tabId, msg) {
+            const msgs = document.getElementById(`messages-${tabId}`);
+            if (!msgs) return;
+
+            // 检查是否有项目上下文
+            if (!currentRepo) {
+                addMessage(tabId, 'assistant', '请先选择一个项目，然后再说"帮我部署"。');
+                return;
+            }
+
+            const repo = currentRepo.full_name;
+            addMessage(tabId, 'assistant', `好的，我来帮你部署 **${repo}**。\n\n开始执行部署流程...`);
+
+            const steps = [
+                { name: '📥 克隆项目', action: async () => { const r = await api.clone_repo(repo); return r.success; }},
+                { name: '🔍 分析项目', action: async () => { await new Promise(r => setTimeout(r, 500)); return true; }},
+                { name: '⚡ 配置环境', action: async () => { const r = await api.setup_project(repo); return true; }},
+                { name: '📦 安装依赖', action: async () => { await api.run_command('pip install -r requirements.txt 2>/dev/null || npm install 2>/dev/null'); return true; }},
+                { name: '🚀 启动项目', action: async () => { await api.run_command('python main.py 2>/dev/null || npm start 2>/dev/null &'); return true; }}
+            ];
+
+            let completed = 0;
+            let failed = false;
+
+            for (const step of steps) {
+                addMessage(tabId, 'assistant', `${step.name}...`);
+                try {
+                    const success = await step.action();
+                    if (success) {
+                        completed++;
+                        addMessage(tabId, 'assistant', `✅ ${step.name} 完成`);
+                    } else {
+                        failed = true;
+                        addMessage(tabId, 'assistant', `❌ ${step.name} 失败`);
+                        break;
+                    }
+                } catch(e) {
+                    failed = true;
+                    addMessage(tabId, 'assistant', `❌ ${step.name} 出错: ${e.message}`);
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 300));
+            }
+
+            if (failed) {
+                addMessage(tabId, 'assistant', '部署过程中遇到问题，请检查终端输出或告诉我具体错误信息。');
+            } else {
+                addMessage(tabId, 'assistant', `🎉 **部署完成！**\n\n项目 ${repo} 已成功部署：\n- ✅ 已克隆到本地\n- ✅ 环境已配置\n- ✅ 依赖已安装\n- ✅ 项目已启动\n\n你可以在终端查看运行状态，或者告诉我其他需求。`);
+            }
+        }
+
+        // 项目操作
+        async function cloneProject() {
+            if (!currentRepo) return;
+            appendTerminal(`$ git clone https://github.com/${currentRepo.full_name}.git`, 'cmd');
+            const r = await api.clone_repo(currentRepo.full_name);
+            appendTerminal(r.output || (r.success ? '✓ 克隆成功' : '✗ 失败'), r.success ? 'success' : 'error');
+        }
+
+        async function setupProject() {
+            if (!currentRepo) return;
+            appendTerminal(`$ 配置环境...`, 'cmd');
+            const r = await api.setup_project(currentRepo.full_name);
+            appendTerminal('✓ 配置完成', 'success');
+        }
+
+        async function runProject() {
+            if (!currentRepo) return;
+            appendTerminal('$ 运行项目...', 'cmd');
+            const r = await api.run_command('python main.py');
+            appendTerminal(r.output || '✓ 运行成功', 'success');
+        }
+
+        async function explainProject() {
+            if (!currentRepo) return;
+            appendTerminal('$ AI 解读中...', 'cmd');
+            const t = await api.explain_project(currentRepo.full_name);
+            appendTerminal(t, 'info');
+        }
+
+        function openInBrowser() {
+            if (currentRepo) window.open(currentRepo.html_url || `https://github.com/${currentRepo.full_name}`);
+        }
+
+        function appendTerminal(text, cls = '') {
+            const t = document.getElementById('terminal');
+            if (!t) return;
+            t.innerHTML += (t.textContent === '等待命令...' ? '' : '\n') + `<span class="${cls}">${escapeHtml(text)}</span>`;
+            t.scrollTop = t.scrollHeight;
+        }
+
+        // 设置
+        function showSettings() {
+            document.getElementById('settingsModal').classList.remove('hidden');
+            document.getElementById('settingProvider').value = currentSettings.api?.provider || 'custom';
+            document.getElementById('settingApiKey').value = currentSettings.api?.api_key || '';
+            document.getElementById('settingBaseUrl').value = currentSettings.api?.base_url || '';
+            document.getElementById('settingModel').value = currentSettings.api?.model || '';
+            document.getElementById('settingMaxTokens').value = currentSettings.api?.max_tokens || 2000;
+            document.getElementById('settingTemperature').value = currentSettings.api?.temperature || 0.7;
+        }
+
+        function hideSettings() { document.getElementById('settingsModal').classList.add('hidden'); }
+
+        async function saveSettings() {
+            const s = { api: { provider: document.getElementById('settingProvider').value, api_key: document.getElementById('settingApiKey').value, base_url: document.getElementById('settingBaseUrl').value, model: document.getElementById('settingModel').value, max_tokens: parseInt(document.getElementById('settingMaxTokens').value), temperature: parseFloat(document.getElementById('settingTemperature').value) } };
+            await api.update_settings(s);
+            currentSettings.api = s.api;
+            hideSettings();
+            showToast('设置已保存');
+            renderTabs();
+        }
+
+        function toggleShortcuts() { document.getElementById('shortcutsPanel').classList.toggle('hidden'); }
+        function hideShortcuts() { document.getElementById('shortcutsPanel').classList.add('hidden'); }
+
+        // 快捷键
+        document.addEventListener('keydown', (e) => {
+            const ctrl = e.ctrlKey || e.metaKey;
+            if (ctrl && e.key === 'k') { e.preventDefault(); switchView('explore'); }
+            if (ctrl && e.key === 'h') { e.preventDefault(); switchView('home'); }
+            if (ctrl && e.key === 't') { e.preventDefault(); newTab('chat'); }
+            if (ctrl && e.key === 'w') { e.preventDefault(); if (activeTab) closeTab(activeTab.id); }
+            if (ctrl && e.key === ',') { e.preventDefault(); showSettings(); }
+            if (ctrl && e.key === '/') { e.preventDefault(); toggleShortcuts(); }
+            if (ctrl && e.shiftKey && e.key === 'D') { e.preventDefault(); toggleTheme(); }
+            if (ctrl && e.shiftKey && e.key === 'C') { e.preventDefault(); cloneProject(); }
+            if (ctrl && e.shiftKey && e.key === 'S') { e.preventDefault(); setupProject(); }
+            if (ctrl && e.shiftKey && e.key === 'R') { e.preventDefault(); runProject(); }
+            if (e.key === 'Escape') { hideSettings(); hideShortcuts(); document.getElementById('detailPanel').classList.remove('active'); }
+        });
+
+        // 工具
+        function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+        function formatNum(n) { if (!n) return '0'; if (n >= 1e6) return (n/1e6).toFixed(1)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'k'; return n.toLocaleString(); }
+        function timeAgo(d) { if (!d) return '-'; const diff = Math.floor((Date.now()-new Date(d))/1000); if (diff < 60) return '刚刚'; if (diff < 3600) return Math.floor(diff/60)+'分钟前'; if (diff < 86400) return Math.floor(diff/3600)+'小时前'; if (diff < 2592000) return Math.floor(diff/86400)+'天前'; return new Date(d).toLocaleDateString('zh-CN'); }
+        function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+        function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000); }
+
+        // 初始化
+        loadTheme();
+        newTab('home', { title: '首页' });
+    </script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+import re
+import json
+
+
+_SECTION_RE = re.compile(r"^#{1,3}\s*(完成结果|文件变更|验证|运行状态)\s*$", re.MULTILINE)
+_ENGLISH_META_RE = re.compile(
+    r"^(?:the user asked|the task (?:is|was)|i (?:have )?(?:completed|read|checked)|done[.!]?)",
+    re.IGNORECASE,
+)
+
+
+def _completion_text(text: str) -> str:
+    cleaned = text.strip() or "任务已完成。"
+    matches = list(_SECTION_RE.finditer(cleaned))
+    if matches:
+        first = matches[0]
+        next_start = matches[1].start() if len(matches) > 1 else len(cleaned)
+        prefix = cleaned[:first.start()].strip()
+        body = cleaned[first.end():next_start].strip()
+        cleaned = "\n\n".join(part for part in (prefix, body) if part) or "任务已完成。"
+
+    # Some models append planning narration after the actual answer. Keep the
+    # user-facing result and discard that internal meta commentary.
+    meta_markers = (
+        "现在我需要", "根据指令", "直接告诉用户", "我只需要", "用户明确要求",
+        "用户说", "我应该", "我需要", "保持简洁", "这是一个简单的问候",
+        "我应该给出", "完美！", "完美!",
+    )
+    positions = [cleaned.find(marker) for marker in meta_markers if cleaned.find(marker) >= 0]
+    if positions:
+        cleaned = cleaned[:min(positions)].strip()
+    cleaned = re.sub(r"(?:读取成功|已读取)[^。！？\n]*[。！？]", "", cleaned).strip()
+    summary_tail = re.search(
+        r"(?:\n\s*)+(?:\*\*)?(?:文件变更|验证|运行状态|查看方式)(?:：|:)?(?:\*\*)?",
+        cleaned,
+    )
+    if summary_tail:
+        cleaned = cleaned[:summary_tail.start()].strip()
+
+    # Tool arguments are an implementation detail. If a model echoes them as
+    # its final answer, keep the real tool summary instead of exposing JSON.
+    candidate = cleaned.strip().strip("`").strip()
+    if "<tool_call>" in candidate or "<function=" in candidate:
+        cleaned = "本地操作已执行。"
+        candidate = cleaned
+    if candidate[:1] in "[{":
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, (dict, list)) and _contains_tool_fields(payload):
+            cleaned = "本地操作已执行。"
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for paragraph in paragraphs:
+        if _ENGLISH_META_RE.match(paragraph.strip()):
+            continue
+        key = re.sub(r"\s+", " ", paragraph).strip().casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(paragraph)
+    return "\n\n".join(unique) or "任务已完成。"
+
+
+def _contains_tool_fields(value: object) -> bool:
+    if isinstance(value, dict):
+        if {"path", "operation"}.issubset(value):
+            return True
+        if "tool_use" in value or "tool_uses" in value:
+            return True
+        return any(_contains_tool_fields(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_tool_fields(item) for item in value)
+    return False
+
+
+def format_final_response(text: str, summary: dict | None = None) -> str:
+    summary = summary or {}
+    files = list(dict.fromkeys(summary.get("changed_files", [])))
+    checks = summary.get("verification", [])
+    processes = summary.get("processes", [])
+    completion = _completion_text(text)
+
+    if not files and not checks and not processes:
+        return completion
+
+    file_lines = [f"- `{path}`" for path in files] or ["- 无文件变更"]
+    check_lines = [
+        f"- `{check.get('command') or check.get('path', '检查')}`：{'通过' if check.get('success') else '失败'}"
+        for check in checks
+    ] or ["- 未运行验证"]
+    process_lines = []
+    for process in processes:
+        process_id = process.get("process_id", "未知")
+        status = process.get("status", "unknown")
+        suffix = f"，{process['url']}" if process.get("url") else ""
+        process_lines.append(f"- `{process_id}`：{status}{suffix}")
+    if not process_lines:
+        process_lines = ["- 无后台进程"]
+
+    return "\n\n".join([
+        "## 完成结果\n" + completion,
+        "## 文件变更\n" + "\n".join(file_lines),
+        "## 验证\n" + "\n".join(check_lines),
+        "## 运行状态\n" + "\n".join(process_lines),
+    ])
