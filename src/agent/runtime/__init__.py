@@ -1,9 +1,11 @@
 """Core runtime for workspace-scoped local agent operations."""
 
 from .commands import CommandRunner
+from .compaction import CompactionEngine, ContextHandoff
 from .context import ContextEngine
 from .edits import ChangeSet, EditEngine
 from .file_tools import FileTools
+from .instructions import InstructionContext, InstructionLoader, InstructionSource
 from .models import ToolResult, ToolRisk, Workspace
 from .network import NetworkTools
 from .permissions import PermissionGate
@@ -18,12 +20,17 @@ from .workspace import WorkspaceBoundaryError, WorkspaceManager, WorkspaceNotBou
 
 __all__ = [
     "CommandRunner",
+    "CompactionEngine",
+    "ContextHandoff",
     "ContextEngine",
     "ChangeSet",
     "EditEngine",
     "FileTools",
     "LocalAgentRuntime",
     "LocalAgentServices",
+    "InstructionContext",
+    "InstructionLoader",
+    "InstructionSource",
     "NetworkTools",
     "ToolResult",
     "ToolRisk",

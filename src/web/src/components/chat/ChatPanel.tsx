@@ -5,6 +5,7 @@ import { InputArea } from './InputArea'
 import { useChatStream } from '../../hooks/useChatStream'
 import { AgentStatusPanel } from './AgentStatusPanel'
 import { api } from '../../lib/api'
+import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
   AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile,
 } from '../../types'
@@ -85,9 +86,10 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
   )
 
   useEffect(() => {
-    if (state.workspace && state.workspace !== workspace) {
-      setWorkspace(state.workspace)
-      setWorkspaceDraft(state.workspace)
+    const nextWorkspace = workspaceFromStream(workspace, state.workspace)
+    if (nextWorkspace && nextWorkspace !== workspace) {
+      setWorkspace(nextWorkspace)
+      setWorkspaceDraft(nextWorkspace)
     }
   }, [state.workspace, workspace])
 
@@ -207,6 +209,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           plan={[]}
           fileChanges={[]}
           verification={null}
+          acceptance={[]}
           processes={[]}
           approval={state.approval}
           onAnswerApproval={answerApproval}

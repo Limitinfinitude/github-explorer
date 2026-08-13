@@ -6,6 +6,7 @@ export type WorkChainTool = {
   group: string
   count: number
   failed: number
+  recovered: number
 }
 
 export type WorkChainGroup = {
@@ -13,6 +14,7 @@ export type WorkChainGroup = {
   label: string
   count: number
   failed: number
+  recovered: number
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -54,25 +56,36 @@ export function summarizeWorkChain(steps: Step[]) {
   const byKey = new Map<string, WorkChainTool>()
   let completed = 0
   let failed = 0
+  let recovered = 0
 
   steps.forEach((step, index) => {
     const match = step.text.match(/^([A-Za-z_][\w.-]*)\(\.\.\.\)/)
-    const name = match?.[1] ?? `step-${index}`
+    const name = step.toolName ?? match?.[1] ?? `step-${index}`
     const label = match ? (TOOL_LABELS[name] ?? name) : step.text
     const group = match ? groupFor(name) : { key: 'other', label: '其他操作', tools: [] }
-    const isFailed = /失败|error|failed/i.test(step.text)
+    const isHistoricalFailure = step.status
+      ? ['failed', 'rejected', 'interrupted'].includes(step.status)
+      : /失败|error|failed/i.test(step.text)
+    const isRecovered = isHistoricalFailure && Boolean(step.recoveredByCallId)
+    const isFailed = isHistoricalFailure && !isRecovered
     const key = match ? name : `${name}:${label}`
     const existing = byKey.get(key)
     if (existing) {
       existing.count += 1
       if (isFailed) existing.failed += 1
+      if (isRecovered) existing.recovered += 1
     } else {
-      const tool = { name, label, group: group.key, count: 1, failed: isFailed ? 1 : 0 }
+      const tool = {
+        name, label, group: group.key, count: 1,
+        failed: isFailed ? 1 : 0,
+        recovered: isRecovered ? 1 : 0,
+      }
       tools.push(tool)
       byKey.set(key, tool)
     }
     if (step.done) completed += 1
     if (isFailed) failed += 1
+    if (isRecovered) recovered += 1
   })
 
   const groups: WorkChainGroup[] = []
@@ -85,12 +98,16 @@ export function summarizeWorkChain(steps: Step[]) {
     if (existing) {
       existing.count += tool.count
       existing.failed += tool.failed
+      existing.recovered += tool.recovered
     } else {
-      const group = { key: definition.key, label: definition.label, count: tool.count, failed: tool.failed }
+      const group = {
+        key: definition.key, label: definition.label, count: tool.count,
+        failed: tool.failed, recovered: tool.recovered,
+      }
       groups.push(group)
       groupsByKey.set(group.key, group)
     }
   })
 
-  return { tools, groups, completed, failed }
+  return { tools, groups, completed, failed, recovered }
 }

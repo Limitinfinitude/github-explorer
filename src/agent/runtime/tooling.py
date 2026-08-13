@@ -49,7 +49,8 @@ class LocalAgentServices:
 
 
 _DESTRUCTIVE_COMMANDS = re.compile(
-    r"\b(Remove-Item|rm|del|rmdir|format|mkfs|diskpart)\b|git\s+(reset\s+--hard|clean\s+-[a-z]*f)",
+    r"\b(Remove-Item|rm|del|rmdir|mkfs|diskpart)\b|"
+    r"^\s*format(?:\.com)?(?:\s|$)|git\s+(reset\s+--hard|clean\s+-[a-z]*f)",
     re.IGNORECASE,
 )
 _PRIVILEGED_COMMANDS = re.compile(

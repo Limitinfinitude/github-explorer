@@ -2,7 +2,24 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Activity, AlertCircle, CheckCircle2, ChevronDown, Clock3, Database, RefreshCw, XCircle } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatLocalTimestamp } from '../../lib/time'
-import type { AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
+import type { AgentEvent, AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
+
+function eventLabel(event: AgentEvent): string {
+  const name = typeof event.payload.name === 'string' ? event.payload.name : ''
+  if (event.type === 'tool_call') return name ? `调用 ${name}` : '调用工具'
+  if (event.type === 'tool_result') return name ? `${name} 返回结果` : '工具返回结果'
+  if (event.type === 'tool_recovered') return name ? `${name} 失败已恢复` : '工具失败已恢复'
+  return {
+    task_started: '任务开始',
+    task_completed: '任务完成',
+    task_failed: '任务失败',
+    task_waiting_approval: '等待确认',
+    file_changed: '文件已变更',
+    verification: '验证完成',
+    context_compacted: '上下文已压缩',
+    error: '运行错误',
+  }[event.type] || event.type
+}
 
 function TraceDetails({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<AgentTraceDetail | null>(null)
@@ -17,12 +34,25 @@ function TraceDetails({ taskId }: { taskId: string }) {
   if (!detail) return <div className="activity-trace__detail muted">暂无明细</div>
   return (
     <div className="activity-trace__detail">
+      {detail.activity.events?.length > 0 && (
+        <div className="activity-event-list" aria-label="任务事件时间线">
+          {detail.activity.events.map(event => (
+            <div key={`${event.sequence}-${event.type}`} className={`activity-event-row activity-event-row--${event.type}`}>
+              <span className="activity-event-row__sequence">{String(event.sequence).padStart(2, '0')}</span>
+              <strong>{eventLabel(event)}</strong>
+              <time>{formatLocalTimestamp(event.created_at)}</time>
+            </div>
+          ))}
+        </div>
+      )}
       {detail.activity.tool_runs.length > 0 && (
         <div className="activity-tool-list">
           {detail.activity.tool_runs.map((run, index) => (
             <div key={`${run.tool_name}-${index}`} className="activity-tool-row">
               <span>{run.tool_name}</span>
-              <span className={run.result.success ? 'trace-ok' : 'trace-fail'}>{run.result.success ? '成功' : '失败'}</span>
+              <span className={run.result.success ? 'trace-ok' : run.recovered_by_call_id ? 'trace-recovered' : 'trace-fail'}>
+                {run.result.success ? '成功' : run.recovered_by_call_id ? '已恢复' : '失败'}
+              </span>
               <time>{formatLocalTimestamp(run.created_at)}</time>
             </div>
           ))}
@@ -53,6 +83,7 @@ function TraceRow({ trace }: { trace: AgentTrace }) {
         <span className="activity-trace__metrics">
           <b>{trace.tool_count}</b><small>工具</small>
           <b>{trace.changed_file_count}</b><small>文件</small>
+          {trace.recovered_tool_count > 0 && <span className="trace-badge trace-badge--recovered">{trace.recovered_tool_count} 已恢复</span>}
           <span className={`trace-badge trace-badge--${trace.verification}`}>{trace.verification === 'passed' ? '验证通过' : trace.verification === 'failed' ? '验证失败' : '未验证'}</span>
         </span>
         <ChevronDown size={15} className={open ? 'is-open' : ''} />

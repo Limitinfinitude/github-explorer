@@ -1,17 +1,20 @@
 import React from 'react'
 import {
-  Activity, CheckCircle2, ChevronDown, CircleDashed, FileCode2,
+  Activity, CheckCircle2, ChevronDown, CircleDashed, ClipboardCheck, FileCode2,
   GitBranch, Map, ShieldAlert, Square, TerminalSquare, XCircle,
 } from 'lucide-react'
 import type {
-  AgentApproval, AgentFileChange, AgentProcess, AgentVerification,
+  AgentAcceptanceItem, AgentApproval, AgentFileChange, AgentProcess, AgentVerification,
 } from '../../types'
+import { summarizeAcceptanceLedger } from '../../lib/acceptanceLedger'
 
 interface Props {
+  status?: 'completed' | 'incomplete' | 'failed' | 'blocked' | 'cancelled' | null
   plan: string[]
   repoMap?: string
   fileChanges: AgentFileChange[]
   verification: AgentVerification | null
+  acceptance?: AgentAcceptanceItem[]
   processes: AgentProcess[]
   approval?: AgentApproval | null
   onAnswerApproval?: (approved: boolean) => void
@@ -20,19 +23,30 @@ interface Props {
 }
 
 export function AgentStatusPanel({
+  status = null,
   plan,
   repoMap = '',
   fileChanges,
   verification,
+  acceptance = [],
   processes,
   approval = null,
   onAnswerApproval,
   onStopProcess,
   compact = false,
 }: Props) {
-  if (!plan.length && !repoMap && !fileChanges.length && !verification && !processes.length && !approval) return null
+  if (!plan.length && !repoMap && !fileChanges.length && !verification && !acceptance.length && !processes.length && !approval) return null
 
-  const fileCount = fileChanges.reduce((sum, item) => sum + item.files.length, 0)
+  const fileCount = new Set(fileChanges.flatMap(item => item.files.filter(
+    path => item.pathKinds?.[path] !== 'directory',
+  ))).size
+  const acceptanceSummary = summarizeAcceptanceLedger(acceptance)
+  const processStatusLabels: Record<AgentProcess['status'], string> = {
+    running: '运行中',
+    stopped: '已停止',
+    exited: '已退出',
+    orphaned: '已失联',
+  }
   const body = (
     <>
       {!compact && <header className="agent-run__header">
@@ -92,9 +106,40 @@ export function AgentStatusPanel({
           </div>
           <div className="agent-checks">
             {verification.checks.map((check, index) => (
-              <span key={`${check.command}-${index}`}>{check.command}</span>
+              <span key={`${check.command}-${index}`}>
+                {check.kind ? `[${check.kind}] ` : ''}{check.command || '检查'}
+                {check.cwd ? ` · cwd ${check.cwd}` : ''}
+                {check.python_executable ? ` · Python ${check.python_executable}` : ''}
+                {check.returncode !== undefined ? ` · 退出码 ${check.returncode}` : ''}
+              </span>
             ))}
           </div>
+        </div>
+      )}
+
+      {acceptance.length > 0 && (
+        <div className="agent-run__section">
+          <div className="agent-run__label">
+            <ClipboardCheck size={13} />需求验收
+            <span className="agent-acceptance__summary">
+              {acceptanceSummary.passed}/{acceptanceSummary.total} 有证据通过
+            </span>
+          </div>
+          <ol className="agent-acceptance">
+            {acceptance.map(item => (
+              <li key={item.id} className={`is-${item.status}`}>
+                <span className="agent-acceptance__index">{item.id}</span>
+                <div>
+                  <strong>{item.text}</strong>
+                  <small>{item.status === 'passed' ? '通过' : item.status === 'failed' ? '未完成' : '未验证'}</small>
+                  {item.evidence.length > 0 && (
+                    <p>{item.evidence.map(evidence => `${evidence.valid ? '有效' : '无效'} ${evidence.type}:${evidence.ref}`).join(' · ')}</p>
+                  )}
+                  {item.reason && <p>{item.reason}</p>}
+                </div>
+              </li>
+            ))}
+          </ol>
         </div>
       )}
 
@@ -109,7 +154,7 @@ export function AgentStatusPanel({
                     ? <CircleDashed className="agent-process__pulse" size={14} />
                     : <CheckCircle2 size={14} />}
                   <span className="agent-process__command">{process.command || process.processId.slice(0, 12)}</span>
-                  <span className={`agent-process__status is-${process.status}`}>{process.status}</span>
+                  <span className={`agent-process__status is-${process.status}`}>{processStatusLabels[process.status]}</span>
                   {process.status === 'running' && onStopProcess && (
                     <button
                       type="button"
@@ -152,11 +197,20 @@ export function AgentStatusPanel({
   )
 
   if (compact) {
-    const StatusIcon = verification?.success === false ? XCircle : CheckCircle2
-    const statusText = verification?.success === false ? '执行未通过' : '执行完成'
+    const failed = status === 'failed' || verification?.success === false
+    const incomplete = status === 'incomplete' || status === 'blocked' || status === 'cancelled'
+    const StatusIcon = failed ? XCircle : incomplete ? CircleDashed : CheckCircle2
+    const statusText = failed
+      ? '执行失败'
+      : status === 'cancelled'
+        ? '已取消'
+        : incomplete
+          ? '执行未完成'
+          : status === 'completed' ? '执行完成' : '执行状态未知'
     const meta = [
       fileCount ? `${fileCount} 个文件` : '无文件变更',
-      verification ? (verification.success ? '验证通过' : '验证失败') : null,
+      verification ? (verification.success ? '验证通过' : '验证失败') : '未运行验证',
+      acceptance.length ? `${acceptanceSummary.passed}/${acceptanceSummary.total} 项验收` : null,
       processes.length ? `${processes.length} 个进程` : null,
     ].filter(Boolean).join(' · ')
 

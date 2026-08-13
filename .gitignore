@@ -17,8 +17,10 @@ build/
 # 环境变量
 .env
 .env.*
+!.env.example
 .mcp.json
 .claude/
+AGENTS.override.md
 
 # 克隆仓库（体积大）
 cloned_repos/

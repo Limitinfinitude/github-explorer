@@ -3,7 +3,9 @@ import { api } from '../lib/api'
 import type {
   Step, CmdBlockData, SSEEvent, AgentFileChange, AgentRunSummary,
   AgentVerification, AgentProcess, AgentApproval,
+  AgentAcceptanceItem,
 } from '../types'
+import { normalizeProcessStatus, reconcileProcesses } from '../lib/processState'
 
 export type StreamState = {
   isGenerating: boolean
@@ -12,10 +14,12 @@ export type StreamState = {
   partialContent: string
   workspace: string
   taskId: string | null
+  status: AgentRunSummary['status']
   plan: string[]
   repoMap: string
   fileChanges: AgentFileChange[]
   verification: AgentVerification | null
+  acceptance: AgentAcceptanceItem[]
   processes: AgentProcess[]
   approval: AgentApproval | null
 }
@@ -35,10 +39,12 @@ function initialState(workspace: string): StreamState {
     partialContent: '',
     workspace,
     taskId: null,
+    status: null,
     plan: [],
     repoMap: '',
     fileChanges: [],
     verification: null,
+    acceptance: [],
     processes: [],
     approval: null,
   }
@@ -47,10 +53,12 @@ function initialState(workspace: string): StreamState {
 function summaryOf(state: StreamState): AgentRunSummary {
   return {
     taskId: state.taskId,
+    status: state.status,
     plan: state.plan,
     repoMap: state.repoMap,
     fileChanges: state.fileChanges,
     verification: state.verification,
+    acceptance: state.acceptance,
     processes: state.processes,
   }
 }
@@ -88,7 +96,7 @@ export function useChatStream(
       const verification = task.summary?.verification ?? []
       const processes = (task.summary?.processes ?? []).map(process => ({
         processId: String(process.process_id),
-        status: String(process.status ?? 'unknown'),
+        status: normalizeProcessStatus(process.status),
         pid: typeof process.pid === 'number' ? process.pid : undefined,
         cwd: typeof process.cwd === 'string' ? process.cwd : undefined,
         url: typeof process.url === 'string' ? process.url : undefined,
@@ -102,6 +110,7 @@ export function useChatStream(
         verification: verification.length
           ? { success: verification.every(check => check.success), checks: verification }
           : null,
+        acceptance: task.summary?.acceptance ?? [],
         processes,
         approval: {
           taskId: task.task_id,
@@ -123,10 +132,7 @@ export function useChatStream(
         if (!active) return
         commit(current => ({
           ...current,
-          processes: result.processes.map(process => {
-            const previous = current.processes.find(item => item.processId === process.processId)
-            return { ...previous, ...process }
-          }),
+          processes: reconcileProcesses(current.processes, result.processes),
         }))
       } catch { /* the stream remains usable when polling is unavailable */ }
     }
@@ -156,7 +162,7 @@ export function useChatStream(
         if (ctrl.signal.aborted) return
         const e = event as SSEEvent
         if (e.type === 'workspace') {
-          commit(current => ({ ...current, workspace: e.path }))
+          commit(current => ({ ...current, workspace: e.path, taskId: e.task_id ?? current.taskId }))
         } else if (e.type === 'plan') {
           commit(current => ({ ...current, taskId: e.task_id, plan: e.steps }))
         } else if (e.type === 'repo_map') {
@@ -165,13 +171,32 @@ export function useChatStream(
           steps.push({ icon: e.icon || 'activity', text: e.step, done: true })
           commit(current => ({ ...current, steps: [...steps] }))
         } else if (e.type === 'tool_call') {
-          steps.push({ icon: 'tool', text: `${e.name}(...)`, done: false })
+          steps.push({
+            icon: 'tool', text: `${e.name}(...)`, done: false,
+            callId: e.call_id, toolName: e.name, status: 'running',
+          })
           commit(current => ({ ...current, steps: [...steps] }))
         } else if (e.type === 'tool_result') {
-          const offset = [...steps].reverse().findIndex(item => !item.done && item.text.includes(e.name))
-          if (offset !== -1) {
-            const index = steps.length - 1 - offset
-            steps[index] = { ...steps[index], done: true, text: `${steps[index].text} ${e.success ? '完成' : '失败'}` }
+          let index = steps.findIndex(item => item.callId === e.call_id)
+          if (index === -1) {
+            const offset = [...steps].reverse().findIndex(item => !item.done && item.text.includes(e.name))
+            if (offset !== -1) index = steps.length - 1 - offset
+          }
+          if (index !== -1) {
+            steps[index] = {
+              ...steps[index], done: true,
+              status: e.success ? 'succeeded' : 'failed',
+              text: `${e.name}(...) ${e.success ? '完成' : '失败'}`,
+            }
+          }
+          commit(current => ({ ...current, steps: [...steps] }))
+        } else if (e.type === 'tool_recovered') {
+          const index = steps.findIndex(item => item.callId === e.failed_call_id)
+          if (index !== -1) {
+            steps[index] = {
+              ...steps[index],
+              recoveredByCallId: e.recovered_by_call_id,
+            }
           }
           commit(current => ({ ...current, steps: [...steps] }))
         } else if (e.type === 'cmd_preview') {
@@ -204,13 +229,19 @@ export function useChatStream(
           commit(current => ({
             ...current,
             taskId: e.task_id,
-            fileChanges: [...current.fileChanges, { files: e.files, diff: e.diff }],
+            fileChanges: [...current.fileChanges, { files: e.files, diff: e.diff, pathKinds: e.path_kinds }],
           }))
         } else if (e.type === 'verification') {
           commit(current => ({
             ...current,
             taskId: e.task_id,
             verification: { success: e.success, checks: e.checks },
+          }))
+        } else if (e.type === 'acceptance') {
+          commit(current => ({
+            ...current,
+            taskId: e.task_id,
+            acceptance: e.items,
           }))
         } else if (e.type === 'process_started') {
           commit(current => {
@@ -226,6 +257,14 @@ export function useChatStream(
               processes: [...current.processes.filter(item => item.processId !== process.processId), process],
             }
           })
+        } else if (e.type === 'budget_warning') {
+          steps.push({ icon: 'activity', text: e.message, done: true, status: 'succeeded' })
+          commit(current => ({
+            ...current,
+            taskId: e.task_id,
+            plan: e.plan ?? current.plan,
+            steps: [...steps],
+          }))
         } else if (e.type === 'approval_required') {
           commit(current => ({
             ...current,
@@ -244,6 +283,7 @@ export function useChatStream(
           fullContent = e.content || fullContent
           const completed = commit(current => ({
             ...current,
+            status: (e.status ?? null) as AgentRunSummary['status'],
             isGenerating: false,
             steps: [...steps],
             cmdBlocks: [...cmdBlocks],
@@ -271,9 +311,23 @@ export function useChatStream(
   }, [sessionId, agentMode, workspace, consume])
 
   const stop = useCallback(() => {
-    abortRef.current?.abort()
-    commit(current => ({ ...current, isGenerating: false }))
-  }, [commit])
+    const taskId = stateRef.current.taskId
+    const abort = () => {
+      abortRef.current?.abort()
+      commit(current => ({
+        ...current,
+        isGenerating: false,
+        status: taskId ? 'cancelled' : current.status,
+      }))
+    }
+    if (!taskId) {
+      abort()
+      return
+    }
+    void api.cancelTask(sessionId, taskId)
+      .catch(err => onError(err instanceof Error ? err.message : '取消任务失败'))
+      .finally(abort)
+  }, [sessionId, onError, commit])
 
   const answerApproval = useCallback((approved: boolean) => {
     const approval = stateRef.current.approval

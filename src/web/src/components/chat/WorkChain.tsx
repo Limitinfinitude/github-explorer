@@ -37,7 +37,9 @@ export function WorkChain({
   const [open, setOpen] = useState(defaultOpen)
   const summary = useMemo(() => summarizeWorkChain(steps), [steps])
   if (!steps.length) return null
-  const statusLabel = summary.failed ? `${summary.failed} 项失败` : '已完成'
+  const statusLabel = summary.failed
+    ? `${summary.failed} 项未恢复`
+    : summary.recovered ? `已完成 · ${summary.recovered} 项已恢复` : '已完成'
   return (
     <div className="work-chain">
       <button
@@ -56,7 +58,7 @@ export function WorkChain({
         <div className="work-chain__details">
           <div className="work-chain__groups">
             {summary.groups.map(group => (
-              <span key={group.key} className={`work-chain__group ${group.failed ? 'is-failed' : ''}`}>
+              <span key={group.key} className={`work-chain__group ${group.failed ? 'is-failed' : group.recovered ? 'is-recovered' : ''}`}>
                 <CircleDot size={11} />
                 {group.label} <b>{group.count}</b>
               </span>
@@ -66,10 +68,11 @@ export function WorkChain({
             {summary.tools.map(tool => {
               const Icon = ICONS[tool.name] || Wrench
               return (
-                <div key={`${tool.group}-${tool.name}`} className={`work-chain__step ${tool.failed ? 'is-failed' : 'is-done'}`}>
+                <div key={`${tool.group}-${tool.name}`} className={`work-chain__step ${tool.failed ? 'is-failed' : tool.recovered ? 'is-recovered' : 'is-done'}`}>
                   <Icon size={13} />
                   <span>{tool.label}{tool.count > 1 ? ` ×${tool.count}` : ''}</span>
                   {tool.failed > 0 && <small>{tool.failed} 失败</small>}
+                  {tool.failed === 0 && tool.recovered > 0 && <small>{tool.recovered} 已恢复</small>}
                 </div>
               )
             })}

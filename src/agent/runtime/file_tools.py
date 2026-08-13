@@ -115,4 +115,8 @@ class FileTools:
         target = self.workspaces.resolve(session_id, path)
         target.mkdir(parents=True, exist_ok=True)
         relative = self._relative(session_id, target)
-        return ToolResult.ok(output=f"已创建目录: {relative}", changed_files=[relative])
+        return ToolResult.ok(
+            output=f"已创建目录: {relative}",
+            data={"path_kinds": {relative: "directory"}},
+            changed_files=[relative],
+        )

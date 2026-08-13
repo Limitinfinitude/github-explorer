@@ -280,13 +280,16 @@ button { cursor: pointer; }
 .work-chain__group svg { color: #58a6ff; }
 .work-chain__group b { color: #c9d1d9; font-size: 10px; }
 .work-chain__group.is-failed, .work-chain__group.is-failed svg { color: #ff7b72; }
+.work-chain__group.is-recovered, .work-chain__group.is-recovered svg { color: #d7b96b; }
 .work-chain__steps { padding: 5px 9px 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 12px; }
 .work-chain__step { min-width: 0; min-height: 25px; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 6px; color: #737c88; line-height: 17px; }
 .work-chain__step.is-done { color: #9da7b3; }
 .work-chain__step.is-failed { color: #ff938a; }
+.work-chain__step.is-recovered { color: #cdbb86; }
 .work-chain__step svg { color: #69727e; }
 .work-chain__step span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-chain__step small { color: #ff7b72; font-size: 9px; }
+.work-chain__step.is-recovered small { color: #d7b96b; }
 
 .agent-run {
   margin: 0 28px 12px;
@@ -329,12 +332,26 @@ button { cursor: pointer; }
 .agent-result.is-error { color: #ff7b72; }
 .agent-checks { min-width: 0; display: flex; gap: 6px; overflow: hidden; }
 .agent-checks span { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b949e; font-family: Consolas, monospace; }
+.agent-acceptance__summary { margin-left: auto; color: #6e7681; font-weight: 400; }
+.agent-acceptance { margin: 8px 0 0; padding: 0; display: grid; gap: 6px; list-style: none; }
+.agent-acceptance li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px; align-items: start; }
+.agent-acceptance__index { width: 18px; height: 18px; display: grid; place-items: center; color: #8b949e; background: #20242a; border-radius: 4px; font: 600 9px/1 Consolas, monospace; }
+.agent-acceptance li.is-passed .agent-acceptance__index { color: #7ee787; background: rgba(46,160,67,.14); }
+.agent-acceptance li.is-failed .agent-acceptance__index { color: #ff7b72; background: rgba(248,81,73,.14); }
+.agent-acceptance li > div { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; }
+.agent-acceptance strong { min-width: 0; color: #b7c0ca; font-weight: 500; line-height: 17px; overflow-wrap: anywhere; }
+.agent-acceptance small { color: #6e7681; line-height: 17px; }
+.agent-acceptance li.is-passed small { color: #7ee787; }
+.agent-acceptance li.is-failed small { color: #ff7b72; }
+.agent-acceptance p { grid-column: 1 / -1; margin: 0; color: #737c88; font: 10px/15px Consolas, monospace; overflow-wrap: anywhere; }
 .agent-process summary { min-height: 24px; }
 .agent-process__pulse { color: #3fb950; animation: spin 2.4s linear infinite; }
 .agent-process__command { font-family: Consolas, monospace; }
 .agent-process__status { flex: 0 0 auto; color: #8b949e; font: 10px/1 Consolas, monospace; }
 .agent-process__status.is-running { color: #7ee787; }
 .agent-process__status.is-exited { color: #d29922; }
+.agent-process__status.is-stopped { color: #8b949e; }
+.agent-process__status.is-orphaned { color: #ff7b72; }
 .agent-process__meta { margin: 7px 0 0 21px; display: flex; flex-wrap: wrap; gap: 6px 14px; color: #6e7681; }
 .agent-icon-button { width: 24px; height: 24px; display: grid; place-items: center; color: #8b949e; background: transparent; border: 0; border-radius: 4px; }
 .agent-icon-button.is-danger:hover { color: #ff7b72; background: #2a1719; }
@@ -512,6 +529,7 @@ button { cursor: pointer; }
 .observability-card span { color: #69727e; font-size: 9px; }
 .trace-ok { color: #56d364 !important; }
 .trace-fail { color: #ff7b72 !important; }
+.trace-recovered { color: #d7b96b !important; }
 .trace-muted { color: #6e7681 !important; }
 .activity-view__list { max-width: 1080px; margin: 0 auto; }
 .activity-view__list-header { min-height: 38px; display: flex; align-items: baseline; justify-content: space-between; }
@@ -534,8 +552,16 @@ button { cursor: pointer; }
 .trace-badge { margin-left: 7px; padding: 3px 6px; color: #8b949e; background: #20242a; border-radius: 4px; font-size: 8px; }
 .trace-badge--passed { color: #8fbf9b; background: #15251a; }
 .trace-badge--failed { color: #ff938a; background: #2a1719; }
+.trace-badge--recovered { color: #d7b96b; background: #292513; }
 .activity-trace__detail { padding: 8px 12px 11px 45px; border-top: 1px solid #25282e; }
 .activity-trace__detail.muted { color: #69727e; font-size: 10px; }
+.activity-event-list { display: grid; gap: 2px; margin-bottom: 8px; }
+.activity-event-row { min-height: 25px; display: grid; grid-template-columns: 24px minmax(0, 1fr) 120px; align-items: center; gap: 8px; color: #aeb7c2; font-size: 9px; }
+.activity-event-row__sequence { color: #59636f; font: 8px/12px Consolas, monospace; }
+.activity-event-row strong { font-weight: 500; }
+.activity-event-row time { color: #59636f; text-align: right; }
+.activity-event-row--task_failed, .activity-event-row--error { color: #ff938a; }
+.activity-event-row--task_completed { color: #7ee787; }
 .activity-tool-list { display: grid; }
 .activity-tool-row { min-height: 28px; display: grid; grid-template-columns: minmax(0, 1fr) 45px 130px; align-items: center; gap: 8px; border-bottom: 1px solid #202329; font-size: 9px; }
 .activity-tool-row:last-child { border-bottom: 0; }
@@ -602,6 +628,8 @@ button { cursor: pointer; }
   .activity-trace__metrics { grid-column: 2 / 3; grid-row: 2; justify-self: start; }
   .activity-trace__summary > svg:last-child { grid-column: 3; grid-row: 1 / span 2; }
   .activity-trace__detail { padding-left: 12px; }
+  .activity-event-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .activity-event-row time { display: none; }
   .activity-tool-row { grid-template-columns: minmax(0, 1fr) 42px; }
   .activity-tool-row time { display: none; }
 }

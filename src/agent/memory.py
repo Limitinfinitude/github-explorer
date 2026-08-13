@@ -3,11 +3,38 @@
 """
 import sqlite3
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "memory.db"
+
+_EVENT_SECRET_KEY_MARKERS = ("key", "token", "secret", "password", "authorization")
+_EVENT_SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"(?i)authorization\s*:\s*bearer\s+[^\s,;]+"),
+)
+
+
+def _sanitize_event(value):
+    if isinstance(value, str):
+        result = value
+        for pattern in _EVENT_SECRET_PATTERNS:
+            result = pattern.sub("[REDACTED]", result)
+        return result
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]"
+            if any(marker in str(key).lower() for marker in _EVENT_SECRET_KEY_MARKERS)
+            else _sanitize_event(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_event(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_event(item) for item in value]
+    return value
 
 
 class Memory:
@@ -109,12 +136,78 @@ class Memory:
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                call_id TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                input_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                error_kind TEXT,
+                recovery_key TEXT,
+                recovered_by_call_id TEXT,
+                recovered_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                settled_at DATETIME,
+                UNIQUE(task_id, call_id)
+            )
+        """)
+        tool_call_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(agent_tool_calls)").fetchall()
+        }
+        for column, definition in (
+            ("recovery_key", "TEXT"),
+            ("recovered_by_call_id", "TEXT"),
+            ("recovered_at", "DATETIME"),
+        ):
+            if column not in tool_call_columns:
+                cursor.execute(f"ALTER TABLE agent_tool_calls ADD COLUMN {column} {definition}")
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS agent_changesets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
                 files_json TEXT NOT NULL,
                 diff TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, sequence)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_root TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                verification_status TEXT NOT NULL DEFAULT 'unverified',
+                expires_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(workspace_root, source_type, source_ref)
+            )
+        """)
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS project_memory_fts USING fts5(
+                content,
+                workspace_root UNINDEXED,
+                memory_id UNINDEXED,
+                tokenize = 'unicode61'
             )
         """)
 
@@ -311,12 +404,296 @@ class Memory:
         )
         self.conn.commit()
 
+    def create_agent_tool_call(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        call_id: str,
+        batch_id: str,
+        tool_name: str,
+        input: Dict,
+        recovery_key: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO agent_tool_calls
+               (task_id, session_id, call_id, batch_id, tool_name, input_json, status, recovery_key)
+               VALUES (?, ?, ?, ?, ?, ?, 'parsed', ?)
+               ON CONFLICT(task_id, call_id) DO NOTHING""",
+            (
+                task_id, session_id, call_id, batch_id, tool_name,
+                json.dumps(input, ensure_ascii=False), recovery_key,
+            ),
+        )
+        self.conn.commit()
+
+    def get_agent_tool_calls(self, task_id: str) -> List[Dict]:
+        rows = self.conn.execute(
+            """SELECT session_id, call_id, batch_id, tool_name, input_json, status,
+                      result_json, error_kind, recovery_key, recovered_by_call_id,
+                      created_at, updated_at, settled_at, recovered_at
+               FROM agent_tool_calls WHERE task_id = ? ORDER BY id""",
+            (task_id,),
+        ).fetchall()
+        columns = (
+            "session_id", "call_id", "batch_id", "tool_name", "input", "status",
+            "result", "error_kind", "recovery_key", "recovered_by_call_id",
+            "created_at", "updated_at", "settled_at", "recovered_at",
+        )
+        calls = []
+        for row in rows:
+            values = list(row)
+            values[4] = json.loads(values[4])
+            values[6] = json.loads(values[6]) if values[6] is not None else None
+            calls.append({"task_id": task_id, **dict(zip(columns, values))})
+        return calls
+
+    def transition_agent_tool_call(
+        self,
+        task_id: str,
+        call_id: str,
+        status: str,
+        *,
+        result: Dict | None = None,
+        error_kind: str | None = None,
+    ) -> Dict:
+        terminal = {"succeeded", "failed", "rejected", "interrupted"}
+        transitions = {
+            "parsed": {"awaiting_approval", "running", "failed", "interrupted"},
+            "awaiting_approval": {"running", "rejected", "interrupted"},
+            "running": {"succeeded", "failed", "interrupted"},
+        }
+        cursor = self.conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            row = cursor.execute(
+                "SELECT status FROM agent_tool_calls WHERE task_id = ? AND call_id = ?",
+                (task_id, call_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"工具调用不存在: {task_id}/{call_id}")
+            current = row[0]
+            if current in terminal:
+                if current != status:
+                    raise ValueError(f"工具调用终态不能从 {current} 改为 {status}")
+                self.conn.commit()
+                return next(call for call in self.get_agent_tool_calls(task_id) if call["call_id"] == call_id)
+            if status not in transitions.get(current, set()):
+                raise ValueError(f"非法工具调用状态转换: {current} -> {status}")
+            cursor.execute(
+                """UPDATE agent_tool_calls SET status = ?, result_json = ?, error_kind = ?,
+                          updated_at = CURRENT_TIMESTAMP,
+                          settled_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
+                   WHERE task_id = ? AND call_id = ?""",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str) if result is not None else None,
+                    error_kind,
+                    1 if status in terminal else 0,
+                    task_id,
+                    call_id,
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return next(call for call in self.get_agent_tool_calls(task_id) if call["call_id"] == call_id)
+
+    def mark_agent_tool_call_recovered(
+        self,
+        task_id: str,
+        failed_call_id: str,
+        recovered_by_call_id: str,
+    ) -> Dict:
+        cursor = self.conn.execute(
+            """UPDATE agent_tool_calls
+               SET recovered_by_call_id = ?, recovered_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE task_id = ? AND call_id = ? AND status = 'failed'
+                 AND recovered_by_call_id IS NULL""",
+            (recovered_by_call_id, task_id, failed_call_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"失败调用不能标记为已恢复: {task_id}/{failed_call_id}")
+        self.conn.commit()
+        return next(
+            call for call in self.get_agent_tool_calls(task_id)
+            if call["call_id"] == failed_call_id
+        )
+
+    def settle_open_agent_tool_calls(
+        self,
+        task_id: str,
+        *,
+        error: str,
+        error_kind: str = "interrupted",
+    ) -> List[Dict]:
+        settled = []
+        for call in self.get_agent_tool_calls(task_id):
+            if call["status"] in {"parsed", "awaiting_approval", "running"}:
+                settled.append(self.transition_agent_tool_call(
+                    task_id,
+                    call["call_id"],
+                    "interrupted",
+                    result={"success": False, "error": error, "error_kind": error_kind},
+                    error_kind=error_kind,
+                ))
+        return settled
+
     def record_agent_changeset(self, task_id: str, files: List[str], diff: str):
         self.conn.execute(
             "INSERT INTO agent_changesets (task_id, files_json, diff) VALUES (?, ?, ?)",
             (task_id, json.dumps(files, ensure_ascii=False), diff),
         )
         self.conn.commit()
+
+    def record_agent_event(self, event: Dict) -> int:
+        """Append one redacted event and return its task-local sequence number."""
+        task_id = str(event.get("task_id", ""))
+        session_id = str(event.get("session_id", ""))
+        event_type = str(event.get("type", "event"))
+        payload = _sanitize_event({
+            key: value
+            for key, value in event.items()
+            if key not in {"task_id", "session_id", "type"}
+        })
+        cursor = self.conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            row = cursor.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            sequence = int(row[0])
+            cursor.execute(
+                """INSERT INTO agent_events
+                   (task_id, session_id, sequence, event_type, payload_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    session_id,
+                    sequence,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return sequence
+
+    def get_agent_events(self, task_id: str, limit: int | None = None) -> List[Dict]:
+        query = (
+            "SELECT sequence, session_id, event_type, payload_json, created_at "
+            "FROM agent_events WHERE task_id = ? ORDER BY sequence"
+        )
+        params: list = [task_id]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            {
+                "task_id": task_id,
+                "session_id": row[1],
+                "sequence": row[0],
+                "type": row[2],
+                "payload": json.loads(row[3]),
+                "created_at": row[4],
+            }
+            for row in rows
+        ]
+
+    def remember_project_fact(
+        self,
+        *,
+        workspace_root: str,
+        content: str,
+        source_type: str,
+        source_ref: str,
+        confidence: float = 0.5,
+        verification_status: str = "unverified",
+        expires_at: str | None = None,
+    ) -> int:
+        """Upsert one provenance-bound project fact and synchronize its FTS row."""
+        safe_content = str(_sanitize_event(content)).strip()
+        cursor = self.conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(
+                """INSERT INTO project_memories
+                   (workspace_root, content, source_type, source_ref, confidence,
+                    verification_status, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(workspace_root, source_type, source_ref) DO UPDATE SET
+                       content = excluded.content,
+                       confidence = excluded.confidence,
+                       verification_status = excluded.verification_status,
+                       expires_at = excluded.expires_at,
+                       updated_at = CURRENT_TIMESTAMP""",
+                (
+                    workspace_root,
+                    safe_content,
+                    source_type,
+                    source_ref,
+                    min(1.0, max(0.0, float(confidence))),
+                    verification_status,
+                    expires_at,
+                ),
+            )
+            memory_id = int(cursor.execute(
+                """SELECT id FROM project_memories
+                   WHERE workspace_root = ? AND source_type = ? AND source_ref = ?""",
+                (workspace_root, source_type, source_ref),
+            ).fetchone()[0])
+            cursor.execute("DELETE FROM project_memory_fts WHERE memory_id = ?", (memory_id,))
+            cursor.execute(
+                "INSERT INTO project_memory_fts (content, workspace_root, memory_id) VALUES (?, ?, ?)",
+                (safe_content, workspace_root, memory_id),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return memory_id
+
+    def search_project_memories(
+        self,
+        workspace_root: str,
+        query: str,
+        *,
+        limit: int = 8,
+        verified_only: bool = False,
+    ) -> List[Dict]:
+        terms = re.findall(r"[\w\u3400-\u9fff.-]+", query, flags=re.UNICODE)
+        if not terms:
+            return []
+        match_query = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms[:12])
+        verified_filter = "AND memories.verification_status = 'verified'" if verified_only else ""
+        rows = self.conn.execute(
+            f"""SELECT memories.id, memories.workspace_root, memories.content,
+                       memories.source_type, memories.source_ref, memories.confidence,
+                       memories.verification_status, memories.expires_at,
+                       memories.created_at, memories.updated_at,
+                       bm25(project_memory_fts) AS rank
+                FROM project_memory_fts
+                JOIN project_memories AS memories
+                  ON memories.id = CAST(project_memory_fts.memory_id AS INTEGER)
+                WHERE project_memory_fts MATCH ?
+                  AND memories.workspace_root = ?
+                  AND (memories.expires_at IS NULL OR memories.expires_at > CURRENT_TIMESTAMP)
+                  {verified_filter}
+                ORDER BY rank, memories.confidence DESC, memories.updated_at DESC
+                LIMIT ?""",
+            (match_query, workspace_root, max(1, min(int(limit), 50))),
+        ).fetchall()
+        columns = (
+            "id", "workspace_root", "content", "source_type", "source_ref",
+            "confidence", "verification_status", "expires_at", "created_at", "updated_at", "rank",
+        )
+        return [dict(zip(columns, row)) for row in rows]
 
     def get_agent_task_activity(self, task_id: str) -> Dict:
         tool_rows = self.conn.execute(
@@ -327,11 +704,25 @@ class Memory:
             "SELECT files_json, diff, created_at FROM agent_changesets WHERE task_id = ? ORDER BY id",
             (task_id,),
         ).fetchall()
+        recovery_links = {
+            call["call_id"]: call.get("recovered_by_call_id")
+            for call in self.get_agent_tool_calls(task_id)
+            if call.get("recovered_by_call_id")
+        }
+        tool_runs = []
+        for row in tool_rows:
+            result = json.loads(row[2])
+            call_id = str(result.get("call_id") or "")
+            tool_runs.append({
+                "tool_name": row[0],
+                "args": json.loads(row[1]),
+                "result": result,
+                "recovered_by_call_id": recovery_links.get(call_id),
+                "created_at": row[3],
+            })
         return {
-            "tool_runs": [
-                {"tool_name": row[0], "args": json.loads(row[1]), "result": json.loads(row[2]), "created_at": row[3]}
-                for row in tool_rows
-            ],
+            "events": self.get_agent_events(task_id),
+            "tool_runs": tool_runs,
             "changesets": [
                 {"files": json.loads(row[0]), "diff": row[1], "created_at": row[2]}
                 for row in change_rows
@@ -352,16 +743,30 @@ class Memory:
         for task_id, session_id, message, status, state_json, created_at, updated_at in rows:
             state = json.loads(state_json)
             tool_rows = self.conn.execute(
-                "SELECT result_json FROM agent_tool_runs WHERE task_id = ?",
+                "SELECT status, recovered_by_call_id FROM agent_tool_calls WHERE task_id = ?",
                 (task_id,),
             ).fetchall()
-            failed_tools = 0
-            for (result_json,) in tool_rows:
-                try:
-                    if not json.loads(result_json).get("success", False):
+            if tool_rows:
+                tool_count = len(tool_rows)
+                failed_tools = sum(
+                    1 for tool_status, recovered_by in tool_rows
+                    if tool_status in {"failed", "rejected", "interrupted"} and not recovered_by
+                )
+                recovered_tools = sum(1 for _, recovered_by in tool_rows if recovered_by)
+            else:
+                legacy_rows = self.conn.execute(
+                    "SELECT result_json FROM agent_tool_runs WHERE task_id = ?",
+                    (task_id,),
+                ).fetchall()
+                tool_count = len(legacy_rows)
+                failed_tools = 0
+                for (result_json,) in legacy_rows:
+                    try:
+                        if not json.loads(result_json).get("success", False):
+                            failed_tools += 1
+                    except (TypeError, json.JSONDecodeError):
                         failed_tools += 1
-                except (TypeError, json.JSONDecodeError):
-                    failed_tools += 1
+                recovered_tools = 0
             changed_files = set()
             for (files_json,) in self.conn.execute(
                 "SELECT files_json FROM agent_changesets WHERE task_id = ?", (task_id,)
@@ -376,8 +781,9 @@ class Memory:
                 "session_id": session_id,
                 "message": message,
                 "status": status,
-                "tool_count": len(tool_rows),
+                "tool_count": tool_count,
                 "failed_tool_count": failed_tools,
+                "recovered_tool_count": recovered_tools,
                 "changed_file_count": len(changed_files),
                 "verification": verification,
                 "created_at": created_at,

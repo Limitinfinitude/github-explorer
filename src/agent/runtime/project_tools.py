@@ -98,9 +98,16 @@ class ProjectTools:
         root = self.workspaces.resolve(session_id, path)
         venv_python = root / ".venv" / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
         if venv_python.is_file():
-            return ToolResult.ok(output=f"项目虚拟环境已存在: {venv_python}")
+            return ToolResult.ok(
+                output=f"项目虚拟环境已存在: {venv_python}",
+                data={"cwd": str(root), "python_executable": str(venv_python)},
+            )
         command = f"{command_executable(Path(sys.executable))} -m venv .venv"
-        return self.runner.run(session_id, command, cwd=path, timeout=180)
+        result = self.runner.run(session_id, command, cwd=path, timeout=180)
+        if result.success and venv_python.is_file():
+            result.data["cwd"] = str(root)
+            result.data["python_executable"] = str(venv_python)
+        return result
 
     def install_commands(self, session_id: str, project_info: dict) -> list[str]:
         commands = []
@@ -125,6 +132,14 @@ class ProjectTools:
         return commands
 
     def install_dependencies(self, session_id: str, project_info: dict, path: str = ".") -> ToolResult:
+        if "python" in project_info.get("languages", []):
+            try:
+                self.runner.project_python(session_id, str(Path(project_info["root"])))
+            except FileNotFoundError as exc:
+                return ToolResult.fail(str(exc), data={"checks": [], "environment": {
+                    "project_root": str(project_info["root"]),
+                    "python_executable": None,
+                }})
         checks = []
         for command in self.install_commands(session_id, project_info):
             result = self.runner.run(session_id, command, cwd=path, timeout=600)

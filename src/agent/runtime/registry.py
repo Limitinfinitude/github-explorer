@@ -3,7 +3,7 @@ from typing import Callable
 
 from .models import ToolResult, ToolRisk
 from .permissions import PermissionGate
-from .tracing import tool_span
+from .tracing import current_tool_call_context, tool_span
 
 
 ToolHandler = Callable[[dict], ToolResult]
@@ -41,6 +41,13 @@ class ToolRegistry:
             for definition in self._definitions.values()
         ]
 
+    def requires_confirmation(self, name: str, args: dict) -> bool:
+        definition = self._definitions.get(name)
+        if definition is None:
+            return False
+        risk = definition.risk_resolver(args) if definition.risk_resolver else definition.risk
+        return self._permission_gate.requires_confirmation(risk)
+
     def execute(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
         definition = self._definitions.get(name)
         if definition is None:
@@ -55,7 +62,8 @@ class ToolRegistry:
             )
 
         try:
-            with tool_span(name, args, self._trace_metadata()):
+            metadata = {**self._trace_metadata(), **current_tool_call_context()}
+            with tool_span(name, args, metadata):
                 result = definition.handler(args)
         except Exception as exc:
             return ToolResult.fail(str(exc))

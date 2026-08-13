@@ -1,5 +1,8 @@
 import { useState, useCallback } from 'react'
 import type { Chat, Message } from '../types'
+import { api } from '../lib/api'
+import { historyToMessages } from '../lib/chatHistory'
+import { appendNewChat } from '../lib/chatState'
 
 const STORAGE_KEY = 'explorer_chats'
 
@@ -36,21 +39,16 @@ export function useChats() {
 
   const newChat = useCallback(() => {
     const id = nextId++
-    const chat: Chat = {
-      id,
-      title: '新对话',
-      sessionId: `session-${id}-${Date.now()}`,
-      messages: [],
-      created: Date.now(),
-    }
+    const now = Date.now()
+    const result = appendNewChat(chats, id, now)
     setChats(prev => {
-      const next = [...prev, chat]
+      const next = appendNewChat(prev, id, now).chats
       save(next)
       return next
     })
-    setActiveChatId(id)
-    return chat
-  }, [])
+    setActiveChatId(result.activeChatId)
+    return result.chat
+  }, [chats])
 
   const deleteChat = useCallback((id: number) => {
     setChats(prev => {
@@ -84,5 +82,22 @@ export function useChats() {
     })
   }, [])
 
-  return { chats, activeChat, activeChatId, setActiveChatId, newChat, deleteChat, pushMessage, updateLastMessage }
+  const hydrateChat = useCallback(async (chatId: number, sessionId: string) => {
+    const history = await api.getHistory(sessionId)
+    const messages = historyToMessages(sessionId, history)
+    if (messages.length === 0) return
+    setChats(prev => {
+      const next = prev.map(chat => {
+        if (chat.id !== chatId || chat.sessionId !== sessionId) return chat
+        const title = chat.title === '新对话'
+          ? (messages.find(message => message.role === 'user')?.content.slice(0, 20) || chat.title)
+          : chat.title
+        return { ...chat, messages, title }
+      })
+      save(next)
+      return next
+    })
+  }, [])
+
+  return { chats, activeChat, activeChatId, setActiveChatId, newChat, deleteChat, pushMessage, updateLastMessage, hydrateChat }
 }

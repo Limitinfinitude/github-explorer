@@ -22,6 +22,9 @@ GitHub Explorer 是一个仅供本机访问的通用本地操作 Agent。它结�
 - 分级自动执行：普通操作自动执行，删除、管理员操作和外部发布前确认
 - Anthropic 原生协议与 OpenAI Compatible 协议
 - SSE 执行轨迹、SQLite 任务记录和 LangSmith Trace
+- 工具调用账本、失败恢复、验收证据与上下文压缩
+- 后端任务取消、诊断预算与一次性重新规划
+- 后台进程状态对账：运行中、已停止、已退出和已失联
 
 ## 启动
 
@@ -44,21 +47,18 @@ cd E:\github探索者\github-explorer
 ## 开发与验证
 
 ```powershell
-\.venv\Scripts\python.exe -m pytest
 cd src\web
 npm test
 npm run build
 ```
 
-当前基线：Python 78 个测试通过，前端 Node 12 个测试通过，Vite 构建成功。
+P1 验收基线：内部 Python 回归测试 154 项通过，前端 Node 测试 22 项通过，TypeScript 与 Vite 构建成功。
 
 ## 目录说明
 
 ```text
 src/                 最新 FastAPI、Agent Runtime 和 React 源码
-tests/               Python 测试
-docs/                实施日记
-项目推进记录/        设计、实施计划和项目报告
+docs/                使用说明和公开技术文档
 desktop/             Windows 桌面启动封装
 mcp-servers/         MCP 配置与服务
 config/              非敏感配置模板
@@ -69,9 +69,3 @@ config/              非敏感配置模板
 ## 安全边界
 
 本项目默认只允许本机访问。删除、覆盖、管理员操作、系统级安装和外部发布需要确认。工作区 root 是文件和命令操作的边界。发布前必须轮换历史密钥，并确认源码、日志、构建产物和提交历史中不存在真实凭据。
-
-## 项目报告
-
-完整架构和实现报告位于：
-
-`项目推进记录/2026-08-10-GitHub-Explorer最新版完整项目报告.md`

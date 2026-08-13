@@ -32,14 +32,29 @@ class EditEngine:
         if not edits:
             return ToolResult.fail("没有提供文件编辑")
 
-        prepared: list[FileSnapshot] = []
+        prepared_by_path: dict[Path, FileSnapshot] = {}
         try:
             for edit in edits:
-                prepared.append(self._prepare(session_id, edit))
+                previous = prepared_by_path.get(
+                    self.workspaces.resolve(session_id, str(edit.get("path", "")).strip())
+                )
+                snapshot = self._prepare(session_id, edit, previous.after if previous else None)
+                if previous:
+                    snapshot = FileSnapshot(
+                        path=snapshot.path,
+                        relative_path=snapshot.relative_path,
+                        existed=previous.existed,
+                        before=previous.before,
+                        after=snapshot.after,
+                    )
+                prepared_by_path[snapshot.path] = snapshot
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             return ToolResult.fail(str(exc))
 
-        changed = [snapshot for snapshot in prepared if snapshot.before != snapshot.after]
+        changed = [
+            snapshot for snapshot in prepared_by_path.values()
+            if not snapshot.existed or snapshot.before != snapshot.after
+        ]
         if not changed:
             return ToolResult.ok(output="文件内容没有变化", data={"diff": ""})
 
@@ -58,7 +73,11 @@ class EditEngine:
         changed_files = [snapshot.relative_path for snapshot in changed]
         verification = [self._verify_snapshot(snapshot) for snapshot in changed]
         return ToolResult.ok(
-            data={"diff": diff, "verification": verification},
+            data={
+                "diff": diff,
+                "verification": verification,
+                "path_kinds": {path: "file" for path in changed_files},
+            },
             output=f"已修改 {len(changed_files)} 个文件",
             changed_files=changed_files,
         )
@@ -75,7 +94,7 @@ class EditEngine:
         changed_files = [snapshot.relative_path for snapshot in changeset.files]
         return ToolResult.ok(output="已撤销最近一次文件修改", changed_files=changed_files)
 
-    def _prepare(self, session_id: str, edit: dict) -> FileSnapshot:
+    def _prepare(self, session_id: str, edit: dict, current_content: str | None = None) -> FileSnapshot:
         relative_path = str(edit.get("path", "")).strip()
         if not relative_path:
             raise ValueError("编辑缺少 path")
@@ -86,7 +105,9 @@ class EditEngine:
             raise ValueError(f"父目录不存在: {path.parent}")
 
         existed = path.exists()
-        before = path.read_text(encoding="utf-8") if existed else ""
+        before = current_content if current_content is not None else (
+            path.read_text(encoding="utf-8") if existed else ""
+        )
         operation = edit.get("operation")
         content = edit.get("content")
         if not isinstance(content, str):
@@ -139,7 +160,12 @@ class EditEngine:
             return {"path": snapshot.relative_path, "success": False, "detail": str(exc)}
         if current != snapshot.after:
             return {"path": snapshot.relative_path, "success": False, "detail": "回读内容与写入内容不一致"}
-        return {"path": snapshot.relative_path, "success": True, "detail": "文件存在且回读一致"}
+        return {
+            "path": snapshot.relative_path,
+            "success": True,
+            "detail": "文件存在且回读一致",
+            "kind": "write_readback",
+        }
 
     @staticmethod
     def _diff(snapshot: FileSnapshot) -> str:

@@ -32,19 +32,45 @@ class Verifier:
                 commands.append("npm run build")
         return commands
 
+    @staticmethod
+    def command_kind(command: str) -> str:
+        if "-m pytest" in command or "npm test" in command:
+            return "unit"
+        if "compileall" in command:
+            return "static"
+        if "build" in command:
+            return "build"
+        return "command"
+
     def run(self, session_id: str, project_info: dict, path: str = ".") -> ToolResult:
+        project_root = Path(project_info["root"])
+        python_executable = None
+        if "python" in project_info.get("languages", []):
+            try:
+                python_executable = self.runner.project_python(session_id, str(project_root))
+            except FileNotFoundError as exc:
+                return ToolResult.fail(
+                    str(exc),
+                    data={"checks": [], "environment": {
+                        "project_root": str(project_root),
+                        "python_executable": None,
+                    }},
+                )
         checks = []
         for command in self.commands(session_id, project_info):
             result = self.runner.run(session_id, command, cwd=path, timeout=300)
             checks.append({
                 "command": command,
+                "kind": self.command_kind(command),
                 "success": result.success,
                 "returncode": result.data.get("returncode"),
+                "cwd": result.data.get("cwd"),
+                "python_executable": str(python_executable) if python_executable else None,
                 "output": result.output,
                 "error": result.error,
             })
             if not result.success:
                 return ToolResult.fail("项目验证失败", data={"checks": checks}, output=result.output)
         if not checks:
-            return ToolResult.ok(data={"checks": []}, output="没有检测到可运行的验证命令")
+            return ToolResult.fail("没有检测到可运行的项目验证命令", data={"checks": []})
         return ToolResult.ok(data={"checks": checks}, output="项目验证通过")

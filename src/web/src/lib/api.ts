@@ -1,7 +1,10 @@
 import type {
-  AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput, DefaultWorkspaceResponse, Model, ObservabilityStatus, Repo, SSEEvent, WorkspaceResponse,
+  AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
+  DefaultWorkspaceResponse, Model, ObservabilityStatus, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
+import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
+import { normalizeProcessStatus } from './processState'
 
 async function* readSSE(res: Response): AsyncGenerator<SSEEvent> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -54,6 +57,13 @@ export const api = {
     const res = await fetch(`/api/agent/workspace/${encodeURIComponent(sessionId)}`)
     if (!res.ok) throw new Error(`读取工作区失败：HTTP ${res.status}`)
     return res.json() as Promise<WorkspaceResponse>
+  },
+
+  async getHistory(sessionId: string): Promise<CanonicalHistoryRow[]> {
+    const res = await fetch(`/api/agent/history/${encodeURIComponent(sessionId)}`)
+    if (!res.ok) throw new Error(`读取会话历史失败：HTTP ${res.status}`)
+    const data = await res.json() as { history?: CanonicalHistoryRow[] }
+    return data.history ?? []
   },
 
   async getDefaultWorkspace() {
@@ -110,10 +120,14 @@ export const api = {
         summary?: {
           changed_files?: string[]
           verification?: Array<{ command: string; success: boolean; returncode?: number; output?: string }>
+          acceptance?: AgentAcceptanceItem[]
           processes?: Array<Record<string, unknown>>
         }
       }
-      activity: { changesets: Array<{ files: string[]; diff: string }> }
+      activity: {
+        events: Array<{ sequence: number; type: string; payload: Record<string, unknown>; created_at: string }>
+        changesets: Array<{ files: string[]; diff: string }>
+      }
     }>
   },
 
@@ -125,6 +139,19 @@ export const api = {
     })
     if (!res.ok) throw new Error(`确认操作失败：HTTP ${res.status}`)
     return res.json()
+  },
+
+  async cancelTask(sessionId: string, taskId: string) {
+    const res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    })
+    const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || `取消任务失败：HTTP ${res.status}`)
+    }
+    return data
   },
 
   async *approvalStream(
@@ -149,7 +176,7 @@ export const api = {
     return {
       processes: data.processes.map(process => ({
         processId: String(process.process_id),
-        status: String(process.status ?? 'unknown'),
+        status: normalizeProcessStatus(process.status),
         pid: typeof process.pid === 'number' ? process.pid : undefined,
         cwd: typeof process.cwd === 'string' ? process.cwd : undefined,
         command: typeof process.command === 'string' ? process.command : undefined,

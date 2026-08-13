@@ -49,6 +49,10 @@ export interface Step {
   icon: string
   text: string
   done: boolean
+  callId?: string
+  toolName?: string
+  status?: 'running' | 'succeeded' | 'failed' | 'rejected' | 'interrupted'
+  recoveredByCallId?: string
 }
 
 export interface CmdBlockData {
@@ -64,16 +68,25 @@ export interface CmdBlockData {
 export interface AgentFileChange {
   files: string[]
   diff: string
+  pathKinds?: Record<string, 'file' | 'directory'>
 }
 
 export interface AgentVerification {
   success: boolean
-  checks: Array<{ command: string; success: boolean; returncode?: number; output?: string }>
+  checks: Array<{
+    command: string
+    success: boolean
+    returncode?: number
+    output?: string
+    cwd?: string
+    python_executable?: string
+    kind?: 'write_readback' | 'static' | 'unit' | 'build' | 'http' | 'port' | 'browser' | 'command'
+  }>
 }
 
 export interface AgentProcess {
   processId: string
-  status: string
+  status: 'running' | 'stopped' | 'exited' | 'orphaned'
   pid?: number
   cwd?: string
   command?: string
@@ -89,11 +102,27 @@ export interface AgentApproval {
   reason: string
 }
 
+export interface AgentAcceptanceEvidence {
+  type: 'file' | 'check' | 'process'
+  ref: string
+  valid: boolean
+}
+
+export interface AgentAcceptanceItem {
+  id: number
+  text: string
+  status: 'passed' | 'failed' | 'unverified'
+  evidence: AgentAcceptanceEvidence[]
+  reason: string
+}
+
 export interface AgentRunSummary {
   taskId: string | null
+  status: 'completed' | 'incomplete' | 'failed' | 'blocked' | 'cancelled' | null
   plan: string[]
   fileChanges: AgentFileChange[]
   verification: AgentVerification | null
+  acceptance?: AgentAcceptanceItem[]
   processes: AgentProcess[]
   repoMap?: string
 }
@@ -144,6 +173,7 @@ export interface AgentTrace {
   status: string
   tool_count: number
   failed_tool_count: number
+  recovered_tool_count: number
   changed_file_count: number
   verification: 'passed' | 'failed' | 'not_run'
   created_at: string
@@ -153,9 +183,23 @@ export interface AgentTrace {
 export interface AgentTraceDetail {
   task: Record<string, unknown> | null
   activity: {
-    tool_runs: Array<{ tool_name: string; args: Record<string, unknown>; result: Record<string, unknown>; created_at: string }>
+    events: AgentEvent[]
+    tool_runs: Array<{
+      tool_name: string
+      args: Record<string, unknown>
+      result: Record<string, unknown>
+      recovered_by_call_id?: string | null
+      created_at: string
+    }>
     changesets: Array<{ files: string[]; diff: string; created_at: string }>
   }
+}
+
+export interface AgentEvent {
+  sequence: number
+  type: string
+  payload: Record<string, unknown>
+  created_at: string
 }
 
 export interface ObservabilityStatus {
@@ -166,19 +210,22 @@ export interface ObservabilityStatus {
 export type View = 'chat' | 'explore' | 'activity' | 'settings'
 
 export type SSEEvent =
-  | { type: 'workspace'; path: string; session_id: string }
+  | { type: 'workspace'; path: string; session_id: string; task_id?: string }
   | { type: 'plan'; steps: string[]; session_id: string; task_id: string }
   | { type: 'repo_map'; content: string; files_scanned: number; session_id: string; task_id: string }
   | { type: 'step'; step: string; icon: string }
-  | { type: 'tool_call'; name: string; args: Record<string, unknown> }
-  | { type: 'tool_result'; name: string; success: boolean; output: string; error?: string; data?: Record<string, unknown> }
+  | { type: 'tool_call'; name: string; tool_name?: string; args: Record<string, unknown>; call_id: string; batch_id: string }
+  | { type: 'tool_result'; name: string; tool_name?: string; success: boolean; output: string; error?: string; data?: Record<string, unknown>; call_id: string; batch_id: string }
+  | { type: 'tool_recovered'; name: string; failed_call_id: string; recovered_by_call_id: string; recovery_key: string }
   | { type: 'cmd_preview'; command: string; risk: 'safe' | 'high'; reason: string }
   | { type: 'cmd_line'; text: string }
   | { type: 'cmd_done'; success: boolean; returncode: number }
-  | { type: 'file_changed'; files: string[]; diff: string; task_id: string }
+  | { type: 'file_changed'; files: string[]; diff: string; path_kinds?: Record<string, 'file' | 'directory'>; task_id: string }
   | { type: 'verification'; success: boolean; checks: AgentVerification['checks']; task_id: string }
-  | { type: 'process_started'; process_id: string; data: { status?: string; pid?: number; cwd?: string }; task_id: string }
+  | { type: 'acceptance'; success: boolean; items: AgentAcceptanceItem[]; task_id: string }
+  | { type: 'process_started'; process_id: string; data: { status?: AgentProcess['status']; pid?: number; cwd?: string }; task_id: string }
+  | { type: 'budget_warning'; diagnostic_tool_count: number; round_limit: number; message: string; plan?: string[]; task_id: string }
   | { type: 'approval_required'; tool_name: string; args: Record<string, unknown>; reason: string; task_id: string }
   | { type: 'token'; content: string }
-  | { type: 'done'; content: string; status?: 'completed' | 'waiting_approval' | 'failed' }
+  | { type: 'done'; content: string; status?: 'completed' | 'incomplete' | 'waiting_approval' | 'failed' | 'blocked' | 'cancelled' }
   | { type: 'error'; content: string }

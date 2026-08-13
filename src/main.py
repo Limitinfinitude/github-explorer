@@ -102,13 +102,46 @@ def _load_model_configs() -> dict:
                 base[mid] = merged
         except Exception:
             pass
+    environment_model = os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL", "")
+    if environment_model and not any(
+        model_id == environment_model or config.get("model") == environment_model
+        for model_id, config in base.items()
+    ):
+        protocol = os.environ.get("LLM_PROTOCOL", "anthropic").lower()
+        api_key = os.environ.get("LLM_API_KEY") or (
+            os.environ.get("OPENAI_API_KEY")
+            if protocol == "openai"
+            else os.environ.get("ANTHROPIC_API_KEY")
+        )
+        base_url = os.environ.get("LLM_BASE_URL") or (
+            os.environ.get("OPENAI_BASE_URL")
+            if protocol == "openai"
+            else os.environ.get("ANTHROPIC_BASE_URL")
+        )
+        environment_id = "environment-model"
+        base[environment_id] = {
+            "id": environment_id,
+            "name": environment_model,
+            "model": environment_model,
+            "protocol": protocol,
+            "icon": "E",
+            "color": "#238636",
+            "tags": ["Environment"],
+            "api_key": api_key or "",
+            "base_url": base_url or "",
+            "source": "environment",
+        }
     return base
 
 
 def _save_model_configs(configs: dict):
     _MODEL_CONFIGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     _MODEL_CONFIGS_PATH.write_text(
-        json.dumps(list(configs.values()), ensure_ascii=False, indent=2),
+        json.dumps(
+            [config for config in configs.values() if config.get("source") != "environment"],
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8"
     )
 
@@ -120,7 +153,11 @@ def _mask_key(key: str) -> str:
 
 
 MODEL_CONFIGS: dict = _load_model_configs()
-_requested_model = os.environ.get("MODEL_CONFIG_ID") or os.environ.get("ANTHROPIC_MODEL", "")
+_requested_config = os.environ.get("MODEL_CONFIG_ID", "")
+_requested_model = (
+    _requested_config if _requested_config in MODEL_CONFIGS
+    else os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL", "")
+)
 ACTIVE_MODEL_ID: str = next(
     (mid for mid, cfg in MODEL_CONFIGS.items() if mid == _requested_model or cfg.get("model") == _requested_model),
     next(iter(MODEL_CONFIGS), ""),

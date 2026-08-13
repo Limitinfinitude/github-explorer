@@ -30,6 +30,14 @@ _TEXT_TOOL_PARAMETER_RE = re.compile(
     r"<parameter=([A-Za-z_][\w.-]*)>\s*(.*?)</parameter>",
     re.DOTALL,
 )
+_DSML_TOOL_CALL_RE = re.compile(
+    r'<｜｜DSML｜｜invoke\s+name="([A-Za-z_][\w.-]*)">\s*(.*?)</｜｜DSML｜｜invoke>',
+    re.DOTALL,
+)
+_DSML_TOOL_PARAMETER_RE = re.compile(
+    r'<｜｜DSML｜｜parameter\s+name="([A-Za-z_][\w.-]*)"[^>]*>\s*(.*?)</｜｜DSML｜｜parameter>',
+    re.DOTALL,
+)
 
 
 def _parse_text_tool_calls(text: str) -> tuple[str, list[dict]]:
@@ -55,15 +63,33 @@ def _parse_text_tool_calls(text: str) -> tuple[str, list[dict]]:
         })
         consumed.append(match.span())
 
+    for index, match in enumerate(_DSML_TOOL_CALL_RE.finditer(text), start=len(tool_uses) + 1):
+        name, body = match.groups()
+        params = {}
+        valid = True
+        for parameter in _DSML_TOOL_PARAMETER_RE.finditer(body):
+            key, raw_value = parameter.groups()
+            try:
+                params[key] = json.loads(raw_value.strip())
+            except json.JSONDecodeError:
+                valid = False
+                break
+        if not valid or not params:
+            continue
+        tool_uses.append({"id": f"text-tool-{index}", "name": name, "input": params})
+        consumed.append(match.span())
+
     if not consumed:
         return text, []
     pieces = []
     cursor = 0
-    for start, end in consumed:
+    for start, end in sorted(consumed):
         pieces.append(text[cursor:start])
         cursor = end
     pieces.append(text[cursor:])
-    return "".join(pieces).strip(), tool_uses
+    cleaned = "".join(pieces)
+    cleaned = re.sub(r"</?｜｜DSML｜｜tool_calls>", "", cleaned)
+    return cleaned.strip(), tool_uses
 
 
 def _get_client_kwargs() -> dict:

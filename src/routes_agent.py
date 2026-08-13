@@ -55,6 +55,10 @@ class ApprovalRequest(BaseModel):
     approved: bool
 
 
+class CancelTaskRequest(BaseModel):
+    session_id: str
+
+
 # 全局工作目录（命令执行 API 使用）
 _work_dir = str(Path.cwd())
 _fallback_workspace = Path(__file__).resolve().parent.parent / "cloned_repos"
@@ -120,6 +124,23 @@ def ensure_local_agent_workspace(session_id: str):
     return resolve_agent_workspace(session_id)[0]
 
 
+def require_agent_workspace(session_id: str, requested_path: str | None = None):
+    from agent.memory import memory
+
+    stored = memory.get_workspace_state(session_id)
+    if stored is None and requested_path:
+        return resolve_agent_workspace(session_id, requested_path)
+    workspace, source = resolve_agent_workspace(session_id)
+    if requested_path:
+        requested = Path(requested_path).expanduser().resolve()
+        if requested != workspace.root:
+            raise ValueError(
+                f"工作区已变化：当前会话为 {workspace.root}，请求仍携带 {requested}；"
+                "请刷新工作区后重试"
+            )
+    return workspace, source
+
+
 # 本地Agent对话 - SSE 流式输出（结构化工具调用 + 意图分类）
 @router_agent.post("/api/agent/chat/stream")
 async def local_agent_chat_stream(request: LocalChatRequest):
@@ -144,16 +165,18 @@ async def local_agent_chat_stream(request: LocalChatRequest):
             if request.agent_mode:
                 services = get_local_agent_services()
                 try:
-                    workspace, _ = resolve_agent_workspace(session_id, request.workspace)
+                    workspace, _ = require_agent_workspace(session_id, request.workspace)
                 except Exception as exc:
                     yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
                     return
 
-                yield f"data: {json.dumps({'type': 'workspace', 'path': str(workspace.root), 'session_id': session_id}, ensure_ascii=False)}\n\n"
                 full_response = ""
                 runtime = get_local_agent_runtime()
                 final_status = None
                 task_id = uuid.uuid4().hex
+                if hasattr(runtime, "register_task"):
+                    runtime.register_task(session_id, task_id)
+                yield f"data: {json.dumps({'type': 'workspace', 'path': str(workspace.root), 'session_id': session_id, 'task_id': task_id}, ensure_ascii=False)}\n\n"
                 from agent.llm import get_model, get_protocol
                 from agent.runtime.tracing import agent_workflow, sanitize
 
@@ -170,7 +193,11 @@ async def local_agent_chat_stream(request: LocalChatRequest):
                     message=user_msg,
                 ) as workflow:
                     async for event in runtime.run(
-                        session_id, user_msg, history=messages, task_id=task_id,
+                        session_id,
+                        user_msg,
+                        history=messages,
+                        task_id=task_id,
+                        model_context=model_context,
                     ):
                         if event.get("type") == "done":
                             full_response = event.get("content", full_response)
@@ -617,6 +644,25 @@ async def list_agent_traces(limit: int = 50):
     return {"traces": memory.list_agent_traces(max(1, min(limit, 100)))}
 
 
+@router_agent.get("/api/agent/memory/search")
+async def search_agent_memory(
+    workspace: str,
+    q: str,
+    limit: int = 8,
+    verified_only: bool = False,
+):
+    from agent.memory import memory
+
+    return {
+        "memories": memory.search_project_memories(
+            workspace,
+            q,
+            limit=max(1, min(limit, 50)),
+            verified_only=verified_only,
+        ),
+    }
+
+
 @router_agent.get("/api/agent/observability")
 async def get_observability_status():
     import os
@@ -625,7 +671,7 @@ async def get_observability_status():
     api_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY")
     enabled = str(tracing_flag).lower() in {"1", "true", "yes", "on"} and bool(api_key)
     return {
-        "local": {"enabled": True, "storage": "SQLite", "retention": "agent_tasks + agent_tool_runs + agent_changesets"},
+        "local": {"enabled": True, "storage": "SQLite", "retention": "agent_tasks + agent_events + project_memories"},
         "langsmith": {
             "enabled": enabled,
             "configured": bool(api_key),
@@ -672,8 +718,13 @@ async def get_agent_task(task_id: str):
 
     task = memory.get_agent_task(task_id)
     if task is None:
-        return {"task": None, "activity": {"tool_runs": [], "changesets": []}}
+        return {"task": None, "activity": {"events": [], "tool_runs": [], "changesets": []}}
     return {"task": task, "activity": memory.get_agent_task_activity(task_id)}
+
+
+@router_agent.post("/api/agent/tasks/{task_id}/cancel")
+async def cancel_agent_task(task_id: str, request: CancelTaskRequest):
+    return get_local_agent_runtime().cancel(request.session_id, task_id).to_dict()
 
 
 @router_agent.get("/api/agent/sessions/{session_id}/active-task")
@@ -682,7 +733,7 @@ async def get_active_agent_task(session_id: str):
 
     task = memory.get_latest_agent_task(session_id, status="waiting_approval")
     if task is None:
-        return {"task": None, "activity": {"tool_runs": [], "changesets": []}}
+        return {"task": None, "activity": {"events": [], "tool_runs": [], "changesets": []}}
     return {"task": task, "activity": memory.get_agent_task_activity(task["task_id"])}
 
 

@@ -4,8 +4,12 @@ import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from .commands import clean_environment, process_creation_flags, shell_args, terminate_process_tree
+from .commands import (
+    clean_environment, command_python_executable, process_creation_flags,
+    plan_shell_command, terminate_process_tree,
+)
 from .models import ToolResult
 from .workspace import WorkspaceManager
 
@@ -15,6 +19,8 @@ class ManagedProcess:
     process_id: str
     session_id: str
     command: str
+    original_command: str
+    shell: str
     cwd: str
     process: subprocess.Popen
     logs: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
@@ -32,8 +38,22 @@ class ProcessManager:
         if not work_dir.is_dir():
             return ToolResult.fail(f"进程目录不存在: {cwd}")
 
+        plan = plan_shell_command(command)
+        if plan.error:
+            return ToolResult.fail(
+                plan.error,
+                data={
+                    "returncode": None,
+                    "cwd": str(work_dir),
+                    "shell": plan.shell,
+                    "original_command": plan.original_command,
+                    "executed_command": None,
+                    "suggestion": plan.suggestion,
+                },
+            )
+
         process = subprocess.Popen(
-            shell_args(command),
+            plan.args,
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -49,7 +69,9 @@ class ProcessManager:
         managed = ManagedProcess(
             process_id=process_id,
             session_id=session_id,
-            command=command,
+            command=plan.command,
+            original_command=plan.original_command,
+            shell=plan.shell,
             cwd=str(work_dir),
             process=process,
         )
@@ -59,7 +81,15 @@ class ProcessManager:
         return ToolResult.ok(
             output=f"后台进程已启动: {process_id}",
             process_id=process_id,
-            data={"pid": process.pid, "cwd": str(work_dir), "status": "running"},
+            data={
+                "pid": process.pid,
+                "cwd": str(work_dir),
+                "status": "running",
+                "python_executable": command_python_executable(plan.command, work_dir),
+                "shell": plan.shell,
+                "original_command": plan.original_command,
+                "executed_command": plan.command,
+            },
         )
 
     def get(self, session_id: str, process_id: str) -> ToolResult:
@@ -101,7 +131,11 @@ class ProcessManager:
             "process_id": managed.process_id,
             "pid": managed.process.pid,
             "command": managed.command,
+            "original_command": managed.original_command,
+            "executed_command": managed.command,
+            "shell": managed.shell,
             "cwd": managed.cwd,
+            "python_executable": command_python_executable(managed.command, Path(managed.cwd)),
             "status": managed.status,
             "returncode": returncode,
             "logs": "".join(managed.logs),

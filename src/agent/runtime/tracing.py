@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Iterator
 
 from langsmith import trace
@@ -6,6 +7,10 @@ from langsmith.run_helpers import tracing_context
 
 
 _SENSITIVE_KEYS = {"api_key", "authorization", "token", "password", "secret"}
+_TOOL_CALL_CONTEXT: ContextVar[dict[str, str]] = ContextVar(
+    "tool_call_context",
+    default={},
+)
 
 
 def sanitize(value: Any, key: str = "") -> Any:
@@ -23,6 +28,21 @@ def sanitize(value: Any, key: str = "") -> Any:
 class _NoopRun:
     def set(self, **kwargs) -> None:
         return None
+
+
+@contextmanager
+def tool_call_context(**metadata: str) -> Iterator[None]:
+    token = _TOOL_CALL_CONTEXT.set({
+        key: str(value) for key, value in metadata.items() if value is not None
+    })
+    try:
+        yield
+    finally:
+        _TOOL_CALL_CONTEXT.reset(token)
+
+
+def current_tool_call_context() -> dict[str, str]:
+    return dict(_TOOL_CALL_CONTEXT.get())
 
 
 @contextmanager

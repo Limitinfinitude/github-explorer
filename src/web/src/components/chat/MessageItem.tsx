@@ -23,6 +23,7 @@ export function MessageItem({ msg }: { msg: Message }) {
     msg.agentRun && (
       msg.agentRun.fileChanges.length > 0
       || msg.agentRun.verification
+      || (msg.agentRun.acceptance?.length ?? 0) > 0
       || msg.agentRun.processes.length > 0
     ),
   )
@@ -82,10 +83,12 @@ export function MessageItem({ msg }: { msg: Message }) {
           {msg.agentRun && hasMaterialAgentRun && (
             <AgentStatusPanel
               compact
+              status={msg.agentRun.status}
               plan={msg.agentRun.plan}
               repoMap={msg.agentRun.repoMap}
               fileChanges={msg.agentRun.fileChanges}
               verification={msg.agentRun.verification}
+              acceptance={msg.agentRun.acceptance}
               processes={msg.agentRun.processes}
             />
           )}
