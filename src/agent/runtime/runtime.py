@@ -45,6 +45,12 @@ _DIAGNOSTIC_TOOLS = {
     "list_directory", "read_file", "search_text", "repo_map", "detect_project",
     "get_process", "list_processes", "check_port", "wait_http",
 }
+_STAGE_TOOLS = {
+    "inspect": _DIAGNOSTIC_TOOLS - {"check_port", "wait_http"},
+    "test": {"verify_project"},
+    "run": {"start_process", "get_process", "list_processes", "stop_process", "check_port", "wait_http", "http_request"},
+}
+_STAGE_LIMITS = {"inspect": 24, "implement": 16, "test": 8, "run": 8}
 _CONTINUE_TASK_RE = re.compile(
     r"^\s*(?:(?:继续|接着)(?:做|来|进行|推进|优化|完善)?(?:一下)?(?:吧)?|"
     r"按(?:照)?\s*(?:todo|计划)\s*继续(?:进行|推进)?(?:吧)?)\s*[。.!！]*\s*$",
@@ -94,7 +100,10 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": "",
             "status": "pending",
-            "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
+            "summary": {
+                "changed_files": [], "verification": [], "processes": [], "successful_tools": [],
+                "stage_budgets": self._new_stage_budgets(),
+            },
             "plan": [],
             "tool_call_ledger": {},
             "active_batch": None,
@@ -247,7 +256,10 @@ class LocalAgentRuntime:
             "context_handoff": None,
             "compaction_count": 0,
             "compacted_message_count": 0,
-            "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
+            "summary": {
+                "changed_files": [], "verification": [], "processes": [], "successful_tools": [],
+                "stage_budgets": self._new_stage_budgets(),
+            },
             "plan": plan,
             "acceptance_criteria": acceptance_criteria,
             "session_requirements": session_requirements,
@@ -677,12 +689,32 @@ class LocalAgentRuntime:
                 source_count, int(state.get("compacted_message_count", 0)),
             )
             state["context_handoff"] = asdict(handoff)
+            source_sequences = []
+            if self.task_store is not None and hasattr(self.task_store, "get_agent_events"):
+                source_sequences = [
+                    int(event["sequence"])
+                    for event in self.task_store.get_agent_events(state.get("task_id", ""))
+                ]
+            pending_requirements = [
+                str(item.get("text") or "")
+                for item in state.get("session_requirements", [])
+                if item.get("status", "pending") == "pending"
+            ]
+            open_call_ids = [
+                call_id for call_id, call in state.get("tool_call_ledger", {}).items()
+                if call.get("status") not in TERMINAL_TOOL_CALL_STATUSES
+            ]
             self._record_event({
                 "task_id": state.get("task_id", ""),
                 "session_id": state.get("session_id", ""),
                 "type": "context_compacted",
                 "compaction_count": state.get("compaction_count", 0),
                 "source_message_count": handoff.source_message_count,
+                "summary_version": 1,
+                "source_sequence_start": min(source_sequences) if source_sequences else 1,
+                "source_sequence_end": max(source_sequences) if source_sequences else 1,
+                "pending_requirements": pending_requirements,
+                "open_tool_call_ids": open_call_ids,
             })
         return compacted
 
@@ -716,6 +748,24 @@ class LocalAgentRuntime:
             name = tool_use["name"]
             args = tool_use["input"]
             call_id = tool_use["id"]
+            stage = self._tool_stage(name)
+            stage_budget = state["summary"]["stage_budgets"][stage]
+            if int(stage_budget["used"]) >= int(stage_budget["limit"]):
+                message = f"{stage} 阶段预算已用尽，任务未继续执行: {name}"
+                stage_budget["status"] = "exhausted"
+                state["status"] = "incomplete"
+                events.append({
+                    **base_event,
+                    "type": "stage_budget_exhausted",
+                    "stage": stage,
+                    "tool_name": name,
+                    "budget": dict(stage_budget),
+                })
+                events.append({**base_event, "type": "done", "content": message, "status": "incomplete"})
+                self._save_task(state)
+                return events, True
+            stage_budget["used"] = int(stage_budget["used"]) + 1
+            stage_budget["status"] = "active"
             recovery_key = tool_recovery_key(name, args, Path(state["current_path"]))
             state["tool_call_ledger"][call_id]["recovery_key"] = recovery_key
             is_resumed_tool = index == decision_index
@@ -1048,6 +1098,24 @@ class LocalAgentRuntime:
                 "success": result.success,
                 "checks": [check],
             })
+            process_id = result.data.get("process_id")
+            if name == "wait_http" and process_id:
+                for process in summary.get("processes", []):
+                    if process.get("process_id") != process_id:
+                        continue
+                    for field in ("owned", "listener_pids", "process_tree_pids", "url", "status"):
+                        if field in result.data:
+                            process[field] = result.data[field]
+                    process["url"] = result.data.get("url", process.get("url"))
+                    events.append({
+                        **base_event,
+                        "type": "process_verified",
+                        "process_id": process_id,
+                        "owned": result.data.get("owned", False),
+                        "listener_pids": result.data.get("listener_pids", []),
+                        "process_tree_pids": result.data.get("process_tree_pids", []),
+                    })
+                    break
         return events
 
     @staticmethod
@@ -1069,6 +1137,7 @@ class LocalAgentRuntime:
                 "processes": processes,
                 "acceptance": acceptance,
                 "successful_tools": list(dict.fromkeys(summary.get("successful_tools", []))),
+                "stage_budgets": summary.get("stage_budgets", {}),
             },
             "explanation": explanation,
         }
@@ -1083,6 +1152,20 @@ class LocalAgentRuntime:
             or facts["acceptance"]
             or facts["successful_tools"]
         )
+
+    @staticmethod
+    def _new_stage_budgets() -> dict:
+        return {
+            stage: {"used": 0, "limit": limit, "status": "pending"}
+            for stage, limit in _STAGE_LIMITS.items()
+        }
+
+    @staticmethod
+    def _tool_stage(name: str) -> str:
+        for stage in ("inspect", "test", "run"):
+            if name in _STAGE_TOOLS[stage]:
+                return stage
+        return "implement"
 
     @staticmethod
     def _normalize_evidence_fields(payload: dict, workspace_root: str) -> dict:

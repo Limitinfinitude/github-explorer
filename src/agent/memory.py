@@ -541,6 +541,41 @@ class Memory:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def reconcile_interrupted_runtime(self) -> List[str]:
+        """Settle task and process snapshots that cannot survive a process restart."""
+        rows = self.conn.execute(
+            "SELECT task_id, state_json FROM agent_tasks WHERE status IN ('queued', 'running')"
+        ).fetchall()
+        reconciled: List[str] = []
+        for task_id, state_json in rows:
+            state = json.loads(state_json)
+            state["status"] = "interrupted"
+            state["final_text"] = "服务重启前任务未结束，已标记为中断。"
+            summary = state.setdefault("summary", {})
+            processes = summary.get("processes", [])
+            for process in processes:
+                if isinstance(process, dict) and process.get("status") == "running":
+                    process["status"] = "orphaned"
+            self.settle_open_agent_tool_calls(
+                task_id,
+                error="Runtime restarted before tool completion.",
+            )
+            self.save_agent_task(state)
+            self.record_agent_event({
+                "task_id": task_id,
+                "session_id": state.get("session_id", ""),
+                "type": "runtime_reconciled",
+                "previous_status": "running",
+                "status": "interrupted",
+                "orphaned_process_ids": [
+                    process.get("process_id")
+                    for process in processes
+                    if isinstance(process, dict) and process.get("status") == "orphaned"
+                ],
+            })
+            reconciled.append(task_id)
+        return reconciled
+
     def record_agent_tool_run(self, task_id: str, tool_name: str, args: Dict, result: Dict):
         self.conn.execute(
             "INSERT INTO agent_tool_runs (task_id, tool_name, args_json, result_json) VALUES (?, ?, ?, ?)",
@@ -797,6 +832,25 @@ class Memory:
             }
             for row in rows
         ]
+
+    def get_agent_chat_history(self, session_id: str, limit: int = 20) -> List[Dict]:
+        rows = self.conn.execute(
+            """SELECT state_json, created_at, updated_at
+               FROM agent_tasks
+               WHERE session_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+            (session_id, max(1, int(limit))),
+        ).fetchall()
+        history = []
+        for state_json, created_at, updated_at in reversed(rows):
+            state = json.loads(state_json)
+            user_message = state.get("user_message")
+            final_text = state.get("final_text")
+            if isinstance(user_message, str) and user_message:
+                history.append({"role": "user", "content": user_message, "repo": None, "timestamp": created_at})
+            if isinstance(final_text, str) and final_text:
+                history.append({"role": "assistant", "content": final_text, "repo": None, "timestamp": updated_at})
+        return history[-max(1, int(limit)):]
 
     def remember_project_fact(
         self,

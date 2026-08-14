@@ -1,11 +1,12 @@
 import re
+import urllib.error
 from dataclasses import dataclass
 
 from .commands import CommandRunner
 from .context import ContextEngine
 from .edits import EditEngine
 from .file_tools import FileTools
-from .models import ToolRisk
+from .models import ToolResult, ToolRisk
 from .network import NetworkTools
 from .processes import ProcessManager
 from .project_tools import ProjectTools
@@ -188,6 +189,28 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 10},
     }, ["host", "port"], ToolRisk.READ,
         lambda a: services.network.check_port(a["host"], a["port"], a.get("timeout", 1)))
+    def http_request(a):
+        try:
+            status, body, headers = services.network.request(
+                a["method"], a["url"], a.get("headers"), a.get("json"), a.get("timeout", 15),
+            )
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            return ToolResult.fail(str(exc), error_kind="http_error")
+        return ToolResult(
+            success=200 <= status < 400,
+            data={"method": a["method"].upper(), "url": a["url"], "status": status, "headers": headers},
+            output=body,
+            error=None if 200 <= status < 400 else f"HTTP 请求失败: {status}",
+            error_kind=None if 200 <= status < 400 else "http_status",
+        )
+
+    add("http_request", "向本机 HTTP 服务发送结构化请求", {
+        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+        "url": {"type": "string"},
+        "headers": {"type": "object"},
+        "json": {},
+        "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+    }, ["method", "url"], ToolRisk.READ, http_request)
     add("wait_http", "等待本地 HTTP 服务开始响应", {
         "url": {"type": "string"},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},

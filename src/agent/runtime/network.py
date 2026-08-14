@@ -1,3 +1,4 @@
+import json
 import socket
 import time
 import urllib.error
@@ -22,6 +23,41 @@ class NetworkTools:
             return ToolResult.fail(
                 f"端口未开放: {host}:{port}",
                 data={"host": host, "port": port, "open": False, "detail": str(exc)},
+            )
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        json_body: object | None = None,
+        timeout: float = 15,
+    ) -> tuple[int, str, dict[str, str]]:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in _LOOPBACK_HOSTS:
+            raise ValueError("HTTP 请求只允许本机回环地址")
+        body = None if json_body is None else json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        request_headers = dict(headers or {})
+        if body is not None:
+            request_headers.setdefault("Content-Type", "application/json; charset=utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=request_headers,
+            method=method.upper(),
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return (
+                    response.status,
+                    response.read(1_000_000).decode("utf-8", errors="replace"),
+                    dict(response.headers.items()),
+                )
+        except urllib.error.HTTPError as exc:
+            return (
+                exc.code,
+                exc.read(1_000_000).decode("utf-8", errors="replace"),
+                dict(exc.headers.items()),
             )
 
     def wait_http(

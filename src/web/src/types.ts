@@ -224,6 +224,18 @@ export interface ProjectOverview {
   changed_files: string[]
   active_processes: Array<Record<string, unknown>>
   latest_verification: Record<string, unknown> | null
+  stage_budgets: Record<string, { used: number; limit: number; status: string }>
+  quality_metrics: {
+    false_completion: boolean
+    false_incomplete: boolean
+    evidence_coverage: number | null
+    tool_recovery_rate: number | null
+    unrecovered_tool_failures: number
+    model_rounds: number
+    model_latency_ms: number
+    total_tokens: number
+    event_count: number
+  }
   trace: AgentTrace | null
 }
 

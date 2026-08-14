@@ -29,6 +29,11 @@ function eventLabel(event: AgentEvent): string {
     file_changed: '文件已变更',
     verification: '验证完成',
     process_started: '进程已启动',
+    process_verified: '进程与端口归属已确认',
+    finalization: '事实账本已最终化',
+    tool_repair_exhausted: '工具参数修复机会已用尽',
+    stage_budget_exhausted: '阶段预算已用尽',
+    runtime_reconciled: '重启状态已对账',
     context_compacted: '上下文已压缩',
     error: '运行错误',
   }[event.type] || event.type

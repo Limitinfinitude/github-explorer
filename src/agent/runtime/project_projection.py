@@ -8,6 +8,7 @@ import ntpath
 from typing import Any
 
 from .tracing import sanitize
+from .metrics import calculate_task_metrics
 
 
 _TERMINAL_FAILURES = {"failed", "blocked", "cancelled", "interrupted", "incomplete"}
@@ -84,6 +85,14 @@ def _stage_status(task: Mapping[str, Any] | None) -> str:
     return "running"
 
 
+def _project_message(task: Mapping[str, Any], workspace_root: str) -> str:
+    message = str(task.get("user_message") or "").strip()
+    if message and set(message) != {"?"}:
+        return message
+    workspace_name = ntpath.basename(ntpath.normpath(workspace_root)) if workspace_root else ""
+    return workspace_name or "尚未开始项目任务"
+
+
 def build_project_overview(*, project_id: str, workspace: Mapping[str, Any] | None,
                            task: Mapping[str, Any] | None, activity: Mapping[str, Any] | None,
                            traces: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
@@ -114,7 +123,7 @@ def build_project_overview(*, project_id: str, workspace: Mapping[str, Any] | No
         "next_action": next_action,
         "summary": {
             "task_id": task.get("task_id"),
-            "message": task.get("user_message") or "尚未开始项目任务",
+            "message": _project_message(task, root),
             "status": task.get("status") or "not_started",
             "changed_file_count": len(files),
             "verification_count": len(verification),
@@ -131,6 +140,8 @@ def build_project_overview(*, project_id: str, workspace: Mapping[str, Any] | No
         "changed_files": files,
         "active_processes": processes,
         "latest_verification": verification[-1] if verification else None,
+        "stage_budgets": summary.get("stage_budgets", {}),
+        "quality_metrics": calculate_task_metrics(task=task, activity=activity),
         "trace": next(
             (trace for trace in (traces or []) if trace.get("task_id") == project_id),
             None,

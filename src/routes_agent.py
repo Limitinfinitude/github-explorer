@@ -84,6 +84,7 @@ def get_local_agent_runtime():
         from agent.memory import memory
 
         services = get_local_agent_services()
+        memory.reconcile_interrupted_runtime()
         _local_agent_runtime = LocalAgentRuntime(
             services.workspaces,
             lambda session_id: build_tool_registry(session_id, services),
@@ -228,9 +229,6 @@ async def local_agent_chat_stream(request: LocalChatRequest):
                         full_response = event.get("content", full_response)
                         final_status = event.get("status")
                     yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-                if final_status == "completed":
-                    memory.add_message(session_id, "user", user_msg, repo)
-                    memory.add_message(session_id, "assistant", full_response, repo)
                 return
 
             yield f"data: {json.dumps({'type': 'step', 'step': '分析问题', 'icon': 'search'}, ensure_ascii=False)}\n\n"
@@ -563,7 +561,8 @@ async def get_projects():
 @router_agent.get("/api/agent/history/{session_id}")
 async def get_history(session_id: str):
     from agent.memory import memory
-    return {"history": memory.get_history(session_id)}
+    projected = memory.get_agent_chat_history(session_id)
+    return {"history": projected or memory.get_history(session_id)}
 
 
 # 获取操作日志
@@ -783,12 +782,6 @@ async def approve_agent_operation_stream(request: ApprovalRequest):
             if event.get("type") == "done":
                 final_event = event
             yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-        if final_event and final_event.get("status") == "completed":
-            task = memory.get_agent_task(request.task_id)
-            if task:
-                memory.add_message(request.session_id, "user", task.get("user_message", ""))
-                memory.add_message(request.session_id, "assistant", final_event.get("content", ""))
-
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
