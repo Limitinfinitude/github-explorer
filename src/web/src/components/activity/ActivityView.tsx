@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Activity, AlertCircle, CheckCircle2, ChevronDown, Clock3, Database, RefreshCw, XCircle } from 'lucide-react'
+import { Activity, CheckCircle2, ChevronDown, Clock3, Database, RefreshCw, XCircle } from 'lucide-react'
 import { api } from '../../lib/api'
+import { localCoverageLabels } from '../../lib/observability'
 import { formatLocalTimestamp } from '../../lib/time'
 import type { AgentEvent, AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
 
@@ -9,13 +10,25 @@ function eventLabel(event: AgentEvent): string {
   if (event.type === 'tool_call') return name ? `调用 ${name}` : '调用工具'
   if (event.type === 'tool_result') return name ? `${name} 返回结果` : '工具返回结果'
   if (event.type === 'tool_recovered') return name ? `${name} 失败已恢复` : '工具失败已恢复'
+  if (event.type === 'model_request_completed') {
+    const usage = event.payload.usage as Record<string, unknown> | undefined
+    const latency = typeof event.payload.latency_ms === 'number' ? `${Math.round(event.payload.latency_ms)} ms` : ''
+    const tokens = typeof usage?.total_tokens === 'number' ? `${usage.total_tokens} tokens` : ''
+    return ['模型响应', latency, tokens].filter(Boolean).join(' · ')
+  }
   return {
     task_started: '任务开始',
     task_completed: '任务完成',
     task_failed: '任务失败',
     task_waiting_approval: '等待确认',
+    task_finished: '任务结束（未完成）',
+    model_request_started: '模型请求',
+    model_request_failed: '模型请求失败',
+    approval_required: '请求操作确认',
+    approval_resolved: event.payload.approved ? '已批准操作' : '已拒绝操作',
     file_changed: '文件已变更',
     verification: '验证完成',
+    process_started: '进程已启动',
     context_compacted: '上下文已压缩',
     error: '运行错误',
   }[event.type] || event.type
@@ -77,7 +90,7 @@ function TraceRow({ trace }: { trace: AgentTrace }) {
           {trace.status === 'completed' ? <CheckCircle2 size={16} /> : trace.status === 'failed' ? <XCircle size={16} /> : <Clock3 size={16} />}
         </span>
         <span className="activity-trace__main">
-          <strong>{trace.message || '未命名任务'}</strong>
+          <strong>{trace.message_encoding_status === 'legacy_corrupted' ? '旧标题已损坏（原文不可恢复）' : trace.message || '未命名任务'}</strong>
           <small>{trace.task_id} · {formatLocalTimestamp(trace.updated_at)}</small>
         </span>
         <span className="activity-trace__metrics">
@@ -122,8 +135,14 @@ export function ActivityView() {
       </header>
 
       <section className="observability-strip">
-        <div className="observability-card"><Database size={16} /><div><strong>本地记录</strong><span>{observability?.local.enabled ? 'SQLite 已启用' : '未启用'}</span></div><CheckCircle2 size={15} className="trace-ok" /></div>
-        <div className="observability-card"><Activity size={16} /><div><strong>LangSmith</strong><span>{observability?.langsmith.enabled ? `已配置 · ${observability.langsmith.project}` : '可选，当前未启用'}</span></div>{observability?.langsmith.enabled ? <CheckCircle2 size={15} className="trace-ok" /> : <AlertCircle size={15} className="trace-muted" />}</div>
+        <div className="observability-card observability-card--local">
+          <Database size={16} />
+          <div><strong>本地观测总线</strong><span>{observability?.local.enabled ? `${observability.local.storage} 已启用 · 数据保留在本机` : '未启用'}</span></div>
+          <CheckCircle2 size={15} className="trace-ok" />
+          <div className="observability-coverage" aria-label="本地观测覆盖范围">
+            {localCoverageLabels(observability?.local.coverage).map(item => <span key={item}>{item}</span>)}
+          </div>
+        </div>
       </section>
 
       <section className="activity-view__list">

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Web 搜索与抓取工具 — web_search, web_fetch, code_search
 """
 import os
@@ -6,10 +6,7 @@ import re
 
 import httpx
 
-from langsmith import traceable
 
-
-@traceable(name="tool_web_search")
 def web_search(query: str, max_results: int = 5) -> dict:
     """
     通过 DuckDuckGo 搜索网页（无需 API Key）。
@@ -76,7 +73,6 @@ def web_search(query: str, max_results: int = 5) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_web_fetch")
 def web_fetch(url: str, max_length: int = 5000) -> dict:
     """
     获取网页内容并提取文本。
@@ -113,7 +109,6 @@ def web_fetch(url: str, max_length: int = 5000) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_code_search")
 def code_search(query: str, language: str = "", repo: str = "", limit: int = 10) -> dict:
     """
     搜索 GitHub 代码。

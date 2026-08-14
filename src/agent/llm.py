@@ -2,15 +2,13 @@
 LLM 客户端封装 — 基于原生 Anthropic SDK
 
 不使用 langchain-anthropic，直接调用 Anthropic API。
-支持 LangSmith @traceable 进行调用追踪。
+调用证据由 LocalAgentRuntime 写入本地事件存储；外部观测不参与调用控制。
 """
 import os
 import json
 import re
 from pathlib import Path
 from typing import Optional
-
-from langsmith import traceable
 
 # 修复 SSL_CERT_FILE
 _ssl_cert = os.environ.get("SSL_CERT_FILE")
@@ -254,7 +252,6 @@ async def _call_openai_with_tools(
     return result
 
 
-@traceable(name="llm_call")
 async def call_llm(
     system: str,
     messages: list[dict],
@@ -321,7 +318,6 @@ async def call_llm_stream(
         await client.close()
 
 
-@traceable(name="LLM_Reasoning", run_type="llm")
 async def call_llm_with_tools(
     system: str,
     messages: list[dict],
@@ -381,7 +377,6 @@ async def call_llm_with_tools(
         await client.close()
 
 
-@traceable(name="llm_call_json")
 async def call_llm_json(
     system: str,
     messages: list[dict],

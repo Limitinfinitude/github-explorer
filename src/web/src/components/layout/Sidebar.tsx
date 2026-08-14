@@ -1,6 +1,6 @@
 import React from 'react'
 import {
-  Activity, Compass, MessageSquare, PanelLeftClose, Plus, Settings, TerminalSquare, Trash2,
+  Activity, Compass, FolderKanban, MessageSquare, PanelLeftClose, Plus, Settings, TerminalSquare, Trash2,
 } from 'lucide-react'
 import type { Chat } from '../../types'
 
@@ -8,11 +8,11 @@ interface Props {
   open: boolean
   chats: Chat[]
   activeChatId: number | null
-  activeView: 'chat' | 'explore' | 'activity' | 'settings'
+  activeView: 'chat' | 'project' | 'explore' | 'activity' | 'settings'
   onSelectChat: (id: number) => void
   onNewChat: () => void
   onDeleteChat: (id: number) => void
-  onSetView: (v: 'chat' | 'explore' | 'activity' | 'settings') => void
+  onSetView: (v: 'chat' | 'project' | 'explore' | 'activity' | 'settings') => void
   onClose: () => void
 }
 
@@ -27,7 +27,7 @@ export function Sidebar({
   onSetView,
   onClose,
 }: Props) {
-  const selectView = (view: 'chat' | 'explore' | 'activity' | 'settings') => {
+  const selectView = (view: 'chat' | 'project' | 'explore' | 'activity' | 'settings') => {
     onSetView(view)
     onClose()
   }
@@ -78,6 +78,10 @@ export function Sidebar({
         </nav>
 
         <nav className="sidebar-nav" aria-label="主导航">
+          <button className={activeView === 'project' ? 'is-active' : ''} onClick={() => selectView('project')}>
+            <FolderKanban size={15} />
+            <span>项目工作台</span>
+          </button>
           <button className={activeView === 'explore' ? 'is-active' : ''} onClick={() => selectView('explore')}>
             <Compass size={15} />
             <span>探索</span>

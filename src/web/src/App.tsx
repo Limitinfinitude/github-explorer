@@ -3,6 +3,7 @@ import { Menu } from 'lucide-react'
 import { Sidebar } from './components/layout/Sidebar'
 import { ChatPanel } from './components/chat/ChatPanel'
 import { ExploreView } from './components/explore/ExploreView'
+import { ProjectWorkspaceView } from './components/project/ProjectWorkspaceView'
 import { SettingsView } from './components/settings/SettingsView'
 import { ActivityView } from './components/activity/ActivityView'
 import { useChats } from './hooks/useChats'
@@ -104,6 +105,8 @@ export default function App() {
             onSelectModel={handleSelectModel}
             onOpenMenu={() => setSidebarOpen(true)}
           />
+        ) : activeView === 'project' ? (
+          <ProjectWorkspaceView />
         ) : activeView === 'explore' ? (
           <ExploreView />
         ) : activeView === 'activity' ? (

@@ -133,7 +133,7 @@ export function AgentStatusPanel({
                   <strong>{item.text}</strong>
                   <small>{item.status === 'passed' ? '通过' : item.status === 'failed' ? '未完成' : '未验证'}</small>
                   {item.evidence.length > 0 && (
-                    <p>{item.evidence.map(evidence => `${evidence.valid ? '有效' : '无效'} ${evidence.type}:${evidence.ref}`).join(' · ')}</p>
+                    <p>{item.evidence.map(evidence => `${!evidence.valid ? '无效' : evidence.sufficient === false ? '有效但不足' : '有效'} ${evidence.type}:${evidence.ref}`).join(' · ')}</p>
                   )}
                   {item.reason && <p>{item.reason}</p>}
                 </div>

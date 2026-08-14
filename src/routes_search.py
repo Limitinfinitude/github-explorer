@@ -133,25 +133,14 @@ async def get_star_history(owner: str, repo: str):
 
 @router_search.post("/api/explain")
 async def explain_repo(request):
-    from agent.graph import get_graph
-    graph = await get_graph()
+    from routes_agent import run_local_agent_once
 
-    config = {"configurable": {"thread_id": "web"}}
-    result = await graph.ainvoke(
-        {
-            "user_message": f"解读 {request.repo}",
-            "session_id": "web",
-            "repo": request.repo,
-            "intent": "analyze",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
-    )
-    return {"explanation": result.get("response", "")}
+    result = await run_local_agent_once("web", f"解读 {request.repo}")
+    return {
+        "explanation": result["response"],
+        "status": result["status"],
+        "task_id": result["task_id"],
+    }
 
 
 @router_search.post("/api/clone")

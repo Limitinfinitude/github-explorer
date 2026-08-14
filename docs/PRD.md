@@ -1,4 +1,6 @@
-# GitHub探索者 - 产品需求文档
+# GitHub探索者 - 产品需求文档（历史 MVP 版本）
+
+> 当前 Agent Harness 产品需求以 [PRD v2.0](PRD-v2.0-Agent-Harness.md) 为准。本文件保留早期 GitHub 探索器搜索、趋势和本地启动范围；文末的 P4/P5 阶段定义不再作为当前执行依据。
 
 ## 1. 产品概述
 

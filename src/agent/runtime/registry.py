@@ -3,6 +3,7 @@ from typing import Callable
 
 from .models import ToolResult, ToolRisk
 from .permissions import PermissionGate
+from .schema import validate_schema
 from .tracing import current_tool_call_context, tool_span
 
 
@@ -51,7 +52,14 @@ class ToolRegistry:
     def execute(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
         definition = self._definitions.get(name)
         if definition is None:
-            return ToolResult.fail(f"未知工具: {name}")
+            return ToolResult.fail(f"未知工具: {name}", error_kind="unknown_tool")
+
+        validation_error = validate_schema(args, definition.input_schema)
+        if validation_error:
+            return ToolResult.fail(
+                f"工具参数无效: {validation_error}",
+                error_kind="invalid_input",
+            )
 
         risk = definition.risk_resolver(args) if definition.risk_resolver else definition.risk
         if self._permission_gate.requires_confirmation(risk) and not confirmed:
@@ -59,6 +67,7 @@ class ToolRegistry:
                 success=False,
                 requires_confirmation=True,
                 confirmation_reason=self._permission_gate.reason(risk, name),
+                error_kind="permission_denied",
             )
 
         try:
@@ -66,7 +75,15 @@ class ToolRegistry:
             with tool_span(name, args, metadata):
                 result = definition.handler(args)
         except Exception as exc:
-            return ToolResult.fail(str(exc))
+            return ToolResult.fail(str(exc), error_kind="tool_error")
         if not isinstance(result, ToolResult):
-            return ToolResult.fail(f"工具 {name} 返回了无效结果")
+            return ToolResult.fail(f"工具 {name} 返回了无效结果", error_kind="invalid_result")
+        result_error = result.validation_error()
+        if result_error:
+            return ToolResult.fail(
+                f"工具 {name} 返回了无效结果: {result_error}",
+                error_kind="invalid_result",
+            )
+        if not result.success and result.error_kind is None:
+            result.error_kind = "tool_error"
         return result

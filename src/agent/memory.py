@@ -4,6 +4,7 @@
 import sqlite3
 import json
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -11,6 +12,7 @@ from typing import Optional, List, Dict
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "memory.db"
 
 _EVENT_SECRET_KEY_MARKERS = ("key", "token", "secret", "password", "authorization")
+_EVENT_USAGE_KEYS = {"input_tokens", "output_tokens", "total_tokens"}
 _EVENT_SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"(?i)authorization\s*:\s*bearer\s+[^\s,;]+"),
@@ -26,7 +28,10 @@ def _sanitize_event(value):
     if isinstance(value, dict):
         return {
             str(key): "[REDACTED]"
-            if any(marker in str(key).lower() for marker in _EVENT_SECRET_KEY_MARKERS)
+            if (
+                str(key).lower() not in _EVENT_USAGE_KEYS
+                and any(marker in str(key).lower() for marker in _EVENT_SECRET_KEY_MARKERS)
+            )
             else _sanitize_event(item)
             for key, item in value.items()
         }
@@ -126,6 +131,27 @@ class Memory:
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_requirements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source_task_id TEXT NOT NULL,
+                completed_task_id TEXT,
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, position),
+                UNIQUE(session_id, normalized_text)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_requirements_status "
+            "ON session_requirements(session_id, status, position)"
+        )
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS agent_tool_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -135,6 +161,21 @@ class Memory:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_task ON agent_artifacts(task_id, created_at)"
+        )
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS agent_tool_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,6 +400,109 @@ class Memory:
         ).fetchall()
         return [row[0] for row in rows]
 
+    # ========== 会话需求账本 ==========
+
+    @staticmethod
+    def _normalize_requirement_text(text: str) -> str:
+        return " ".join(str(text).strip().split()).casefold()
+
+    def merge_session_requirements(
+        self,
+        session_id: str,
+        requirements: List[str],
+        *,
+        source_task_id: str,
+    ) -> List[Dict]:
+        normalized_items = []
+        seen = set()
+        for text in requirements:
+            clean_text = " ".join(str(text).strip().split())
+            normalized = self._normalize_requirement_text(clean_text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_items.append((clean_text, normalized))
+
+        next_position = self.conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM session_requirements WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        for text, normalized in normalized_items:
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO session_requirements
+                   (session_id, position, text, normalized_text, source_task_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, next_position, text, normalized, source_task_id),
+            )
+            if cursor.rowcount:
+                next_position += 1
+        self.conn.commit()
+
+        by_normalized = {
+            item["normalized_text"]: item
+            for item in self.list_session_requirements(session_id)
+        }
+        return [
+            by_normalized[normalized]
+            for _, normalized in normalized_items
+            if normalized in by_normalized
+        ]
+
+    def list_session_requirements(
+        self,
+        session_id: str,
+        *,
+        status: str | None = None,
+    ) -> List[Dict]:
+        query = (
+            "SELECT position, text, normalized_text, status, source_task_id, "
+            "completed_task_id, evidence_json, created_at, updated_at "
+            "FROM session_requirements WHERE session_id = ?"
+        )
+        params: list = [session_id]
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY position"
+        rows = self.conn.execute(query, params).fetchall()
+        columns = (
+            "position", "text", "normalized_text", "status", "source_task_id",
+            "completed_task_id", "evidence", "created_at", "updated_at",
+        )
+        items = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            item["evidence"] = json.loads(item["evidence"] or "[]")
+            items.append(item)
+        return items
+
+    def settle_session_requirements(
+        self,
+        session_id: str,
+        task_id: str,
+        results: List[Dict],
+    ) -> None:
+        for result in results:
+            position = int(result["id"])
+            passed = result.get("status") == "passed"
+            self.conn.execute(
+                """UPDATE session_requirements SET
+                       status = CASE WHEN ? THEN 'completed' ELSE status END,
+                       completed_task_id = CASE WHEN ? THEN ? ELSE completed_task_id END,
+                       evidence_json = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE session_id = ? AND position = ?""",
+                (
+                    passed,
+                    passed,
+                    task_id,
+                    json.dumps(result.get("evidence", []), ensure_ascii=False),
+                    session_id,
+                    position,
+                ),
+            )
+        self.conn.commit()
+
     # ========== Agent 任务 ========== 
 
     def save_agent_task(self, state: Dict):
@@ -403,6 +547,54 @@ class Memory:
             (task_id, tool_name, json.dumps(args, ensure_ascii=False), json.dumps(result, ensure_ascii=False, default=str)),
         )
         self.conn.commit()
+
+    def record_agent_artifact(
+        self,
+        *,
+        task_id: str,
+        call_id: str,
+        tool_name: str,
+        content: str,
+        mime_type: str,
+    ) -> Dict:
+        artifact_id = uuid.uuid4().hex
+        size = len(content.encode("utf-8"))
+        self.conn.execute(
+            """INSERT INTO agent_artifacts
+               (artifact_id, task_id, call_id, tool_name, mime_type, size, content)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (artifact_id, task_id, call_id, tool_name, mime_type, size, content),
+        )
+        self.conn.commit()
+        return self.get_agent_artifact(task_id, artifact_id)
+
+    def get_agent_artifact(self, task_id: str, artifact_id: str) -> Optional[Dict]:
+        row = self.conn.execute(
+            """SELECT artifact_id, task_id, call_id, tool_name, mime_type, size,
+                      content, created_at
+               FROM agent_artifacts WHERE task_id = ? AND artifact_id = ?""",
+            (task_id, artifact_id),
+        ).fetchone()
+        if row is None:
+            return None
+        columns = (
+            "artifact_id", "task_id", "call_id", "tool_name", "mime_type",
+            "size", "content", "created_at",
+        )
+        return dict(zip(columns, row))
+
+    def list_agent_artifacts(self, task_id: str) -> List[Dict]:
+        rows = self.conn.execute(
+            """SELECT artifact_id, task_id, call_id, tool_name, mime_type, size,
+                      created_at
+               FROM agent_artifacts WHERE task_id = ? ORDER BY created_at, artifact_id""",
+            (task_id,),
+        ).fetchall()
+        columns = (
+            "artifact_id", "task_id", "call_id", "tool_name", "mime_type",
+            "size", "created_at",
+        )
+        return [dict(zip(columns, row)) for row in rows]
 
     def create_agent_tool_call(
         self,
@@ -723,6 +915,7 @@ class Memory:
         return {
             "events": self.get_agent_events(task_id),
             "tool_runs": tool_runs,
+            "artifacts": self.list_agent_artifacts(task_id),
             "changesets": [
                 {"files": json.loads(row[0]), "diff": row[1], "created_at": row[2]}
                 for row in change_rows
@@ -780,6 +973,9 @@ class Memory:
                 "task_id": task_id,
                 "session_id": session_id,
                 "message": message,
+                "message_encoding_status": (
+                    "legacy_corrupted" if re.search(r"\?{6,}", str(message)) else "intact"
+                ),
                 "status": status,
                 "tool_count": tool_count,
                 "failed_tool_count": failed_tools,

@@ -124,6 +124,40 @@ def ensure_local_agent_workspace(session_id: str):
     return resolve_agent_workspace(session_id)[0]
 
 
+async def run_local_agent_once(
+    session_id: str,
+    message: str,
+    *,
+    workspace: str | None = None,
+    history: list[dict] | None = None,
+) -> dict:
+    bound_workspace, _ = resolve_agent_workspace(session_id, workspace)
+    from agent.llm import get_model, get_protocol
+
+    model_context = {
+        "id": get_model(),
+        "protocol": get_protocol(),
+        "base_url": os.environ.get("LLM_BASE_URL", ""),
+    }
+    task_id = uuid.uuid4().hex
+    final_event = None
+    async for event in get_local_agent_runtime().run(
+        session_id,
+        message,
+        history=history or [],
+        task_id=task_id,
+        model_context=model_context,
+    ):
+        if event.get("type") == "done":
+            final_event = event
+    return {
+        "task_id": task_id,
+        "workspace": str(bound_workspace.root),
+        "status": (final_event or {}).get("status", "failed"),
+        "response": (final_event or {}).get("content", ""),
+    }
+
+
 def require_agent_workspace(session_id: str, requested_path: str | None = None):
     from agent.memory import memory
 
@@ -178,36 +212,22 @@ async def local_agent_chat_stream(request: LocalChatRequest):
                     runtime.register_task(session_id, task_id)
                 yield f"data: {json.dumps({'type': 'workspace', 'path': str(workspace.root), 'session_id': session_id, 'task_id': task_id}, ensure_ascii=False)}\n\n"
                 from agent.llm import get_model, get_protocol
-                from agent.runtime.tracing import agent_workflow, sanitize
-
                 model_context = {
                     "id": get_model(),
                     "protocol": get_protocol(),
                     "base_url": os.environ.get("LLM_BASE_URL", ""),
                 }
-                with agent_workflow(
-                    session_id=session_id,
+                async for event in runtime.run(
+                    session_id,
+                    user_msg,
+                    history=messages,
                     task_id=task_id,
-                    workspace=str(workspace.root),
-                    model=model_context,
-                    message=user_msg,
-                ) as workflow:
-                    async for event in runtime.run(
-                        session_id,
-                        user_msg,
-                        history=messages,
-                        task_id=task_id,
-                        model_context=model_context,
-                    ):
-                        if event.get("type") == "done":
-                            full_response = event.get("content", full_response)
-                            final_status = event.get("status")
-                        yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-                    workflow.set(outputs=sanitize({
-                        "status": final_status,
-                        "final_workspace": str(services.workspaces.current_path(session_id)),
-                        "response": full_response,
-                    }))
+                    model_context=model_context,
+                ):
+                    if event.get("type") == "done":
+                        full_response = event.get("content", full_response)
+                        final_status = event.get("status")
+                    yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
                 if final_status == "completed":
                     memory.add_message(session_id, "user", user_msg, repo)
                     memory.add_message(session_id, "assistant", full_response, repo)
@@ -498,51 +518,30 @@ async def local_agent_chat_stream(request: LocalChatRequest):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# 项目环境配置 - 通过 LangGraph execute 路径
+# 项目环境配置
 @router_agent.post("/api/agent/setup")
 async def agent_setup(request: LocalChatRequest):
-    from agent.graph import get_graph
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": request.session_id}}
-    result = await graph.ainvoke(
-        {
-            "user_message": f"部署 {request.repo}",
-            "session_id": request.session_id,
-            "repo": request.repo,
-            "intent": "execute",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": True,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
+    local_result = await run_local_agent_once(
+        request.session_id,
+        request.message or f"部署 {request.repo or '当前项目'}",
+        workspace=request.workspace,
     )
     return {
-        "success": True,
-        "steps": result.get("execution_steps", []),
-        "message": result.get("response", ""),
+        "success": local_result["status"] == "completed",
+        "task_id": local_result["task_id"],
+        "status": local_result["status"],
+        "steps": [],
+        "message": local_result["response"],
     }
 
 
 # 用户确认后恢复执行
 @router_agent.post("/api/agent/confirm")
 async def agent_confirm(request: LocalChatRequest):
-    from agent.graph import get_graph
-    from langgraph.types import Command
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": request.session_id}}
-    result = await graph.ainvoke(
-        Command(resume={"confirmed": True}),
-        config=config,
+    raise HTTPException(
+        status_code=410,
+        detail="此端点已退役；请使用 /api/agent/approval 并提供 task_id 与 approved。",
     )
-    return {
-        "success": True,
-        "steps": result.get("execution_steps", []),
-        "message": result.get("response", ""),
-    }
 
 
 # 执行命令 - 直接调用工具
@@ -644,6 +643,92 @@ async def list_agent_traces(limit: int = 50):
     return {"traces": memory.list_agent_traces(max(1, min(limit, 100)))}
 
 
+def _project_task_states(memory, limit: int = 500):
+    states = []
+    for trace in memory.list_agent_traces(limit):
+        state = memory.get_agent_task(trace["task_id"])
+        if state is None:
+            continue
+        states.append({**state, "created_at": trace.get("created_at"), "updated_at": trace.get("updated_at")})
+    return states
+
+
+def _resolve_project_task(memory, project_id: str):
+    # Keep task-id lookups working while callers migrate to stable project ids.
+    direct = memory.get_agent_task(project_id)
+    if direct is not None:
+        return direct
+    from agent.runtime.project_projection import project_id_for_workspace
+
+    for state in _project_task_states(memory):
+        if project_id_for_workspace(state.get("workspace_root", "")) == project_id:
+            return state
+    return None
+
+
+def _project_history(memory, project_id: str):
+    from agent.runtime.project_projection import project_id_for_workspace
+
+    traces = {trace["task_id"]: trace for trace in memory.list_agent_traces(500)}
+    records = []
+    for state in _project_task_states(memory):
+        if state.get("task_id") != project_id and project_id_for_workspace(state.get("workspace_root", "")) != project_id:
+            continue
+        records.append({
+            "task": state,
+            "activity": memory.get_agent_task_activity(state["task_id"]),
+            "trace": traces.get(state["task_id"]),
+        })
+    return records
+
+
+@router_agent.get("/api/projects")
+async def list_project_workspaces():
+    from agent.memory import memory
+    from agent.runtime.project_projection import build_project_summary
+
+    return {"projects": build_project_summary(_project_task_states(memory))}
+
+
+@router_agent.get("/api/projects/{project_id}/overview")
+async def get_project_overview(project_id: str):
+    """Read-only project journey summary backed by persisted agent facts."""
+    from agent.memory import memory
+    from agent.runtime.project_projection import build_project_overview
+
+    task = _resolve_project_task(memory, project_id)
+    task_id = task.get("task_id") if task else None
+    activity = memory.get_agent_task_activity(task_id) if task_id else {}
+    workspace = memory.get_workspace_state(task.get("session_id", "")) if task else None
+    return build_project_overview(
+        project_id=project_id,
+        workspace=workspace,
+        task=task,
+        activity=activity,
+        traces=memory.list_agent_traces(500),
+    )
+
+
+@router_agent.get("/api/projects/{project_id}/evidence")
+async def get_project_evidence(project_id: str):
+    """Read-only developer evidence layer; no Agent work is started."""
+    from agent.memory import memory
+    from agent.runtime.project_projection import build_project_evidence
+
+    task = _resolve_project_task(memory, project_id)
+    if task is None:
+        return build_project_evidence(project_id=project_id, workspace=None, task=None, activity={})
+    activity = memory.get_agent_task_activity(task["task_id"])
+    workspace = memory.get_workspace_state(task.get("session_id", ""))
+    return build_project_evidence(
+        project_id=project_id,
+        workspace=workspace,
+        task=task,
+        activity=activity,
+        history=_project_history(memory, project_id),
+    )
+
+
 @router_agent.get("/api/agent/memory/search")
 async def search_agent_memory(
     workspace: str,
@@ -665,17 +750,12 @@ async def search_agent_memory(
 
 @router_agent.get("/api/agent/observability")
 async def get_observability_status():
-    import os
-
-    tracing_flag = os.environ.get("LANGSMITH_TRACING") or os.environ.get("LANGCHAIN_TRACING_V2")
-    api_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY")
-    enabled = str(tracing_flag).lower() in {"1", "true", "yes", "on"} and bool(api_key)
     return {
-        "local": {"enabled": True, "storage": "SQLite", "retention": "agent_tasks + agent_events + project_memories"},
-        "langsmith": {
-            "enabled": enabled,
-            "configured": bool(api_key),
-            "project": os.environ.get("LANGCHAIN_PROJECT") or os.environ.get("LANGSMITH_PROJECT") or "default",
+        "local": {
+            "enabled": True,
+            "storage": "SQLite",
+            "retention": "agent_tasks + agent_events + project_memories",
+            "coverage": ["model", "tool", "approval", "file", "verification", "process", "terminal"],
         },
     }
 
@@ -722,6 +802,15 @@ async def get_agent_task(task_id: str):
     return {"task": task, "activity": memory.get_agent_task_activity(task_id)}
 
 
+@router_agent.get("/api/agent/tasks/{task_id}/artifacts/{artifact_id}")
+async def get_agent_artifact(task_id: str, artifact_id: str):
+    from agent.memory import memory
+    artifact = memory.get_agent_artifact(task_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Artifact 不存在")
+    return artifact
+
+
 @router_agent.post("/api/agent/tasks/{task_id}/cancel")
 async def cancel_agent_task(task_id: str, request: CancelTaskRequest):
     return get_local_agent_runtime().cancel(request.session_id, task_id).to_dict()
@@ -758,39 +847,10 @@ async def stop_agent_process(session_id: str, process_id: str):
 @router_agent.post("/api/agent/swarm")
 async def swarm_chat(request: LocalChatRequest):
     """Multi-Agent Swarm 端点 — 5 个子智能体协作"""
-    from agent.swarm_graph import get_swarm_graph
-    graph = await get_swarm_graph()
-
-    config = {"configurable": {"thread_id": request.session_id}}
-    result = await graph.ainvoke(
-        {
-            "user_message": request.message,
-            "session_id": request.session_id,
-            "repo": request.repo,
-            "intent": "",
-            "response": "",
-            "execution_steps": [],
-            "active_agents": [],
-            "agent_results": [],
-            "fix_iterations": 0,
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-        },
-        config=config,
+    raise HTTPException(
+        status_code=410,
+        detail="多智能体实验端点已退役；请使用 /api/agent/chat/stream。",
     )
-    return {
-        "response": result.get("response", ""),
-        "agents_used": result.get("active_agents", []),
-        "agent_results": result.get("agent_results", []),
-        "execution_steps": result.get("execution_steps", []),
-        "architecture_mermaid": result.get("architecture_mermaid"),
-        "design_patterns": result.get("design_patterns"),
-        "repo_health": result.get("repo_health"),
-        "worth_learning": result.get("worth_learning"),
-        "solutions": result.get("solutions"),
-        "ci_status": result.get("ci_status"),
-    }
 
 
 # ========== MCP 工具 API ==========

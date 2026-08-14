@@ -1,4 +1,4 @@
-"""
+﻿"""
 命令执行工具 — run_command, run_command_stream, classify_command_risk
 """
 import os
@@ -6,8 +6,6 @@ import subprocess
 import platform
 import asyncio
 import re as _re_cmd
-
-from langsmith import traceable
 
 
 _DANGEROUS_PATTERNS = [
@@ -32,7 +30,6 @@ def classify_command_risk(cmd: str) -> dict:
     return {"risk": "safe", "reason": ""}
 
 
-@traceable(name="tool_run_command")
 def run_command(cmd: str, cwd: str = None, timeout: int = 60) -> dict:
     """
     执行 shell 命令。

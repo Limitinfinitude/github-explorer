@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .compaction import CompactionEngine
+from .acceptance import WorkProductEvaluator
 from .context import ContextEngine
 from .instructions import InstructionLoader
 from .models import ToolResult
@@ -33,11 +35,20 @@ _DIRECT_CHAT_RE = re.compile(
     re.IGNORECASE,
 )
 _UNFINISHED_TEXT_RE = re.compile(r"[\w\u3400-\u9fff]$")
+_EXPLICIT_UNFINISHED_RE = re.compile(
+    r"(?:`?\[未完成\]`?|(?:^|[\s：:])未完成(?:$|[\s，。；;：:]))",
+    re.IGNORECASE | re.MULTILINE,
+)
 _CLAUSE_MARK_RE = re.compile(r"[，。！？,.!?；;：:\n]")
 _DIAGNOSTIC_TOOLS = {
     "list_directory", "read_file", "search_text", "repo_map", "detect_project",
     "get_process", "list_processes", "check_port", "wait_http",
 }
+_CONTINUE_TASK_RE = re.compile(
+    r"^\s*(?:(?:继续|接着)(?:做|来|进行|推进|优化|完善)?(?:一下)?(?:吧)?|"
+    r"按(?:照)?\s*(?:todo|计划)\s*继续(?:进行|推进)?(?:吧)?)\s*[。.!！]*\s*$",
+    re.IGNORECASE,
+)
 
 
 class LocalAgentRuntime:
@@ -52,6 +63,7 @@ class LocalAgentRuntime:
         max_output_tokens: int = 12_000,
         diagnostic_tool_budget: int = 8,
         replan_extra_rounds: int = 4,
+        tool_result_preview_chars: int = 30_000,
         task_store: Any | None = None,
         context_engine: ContextEngine | None = None,
         compaction_engine: CompactionEngine | None = None,
@@ -65,9 +77,11 @@ class LocalAgentRuntime:
         self.max_output_tokens = max_output_tokens
         self.diagnostic_tool_budget = diagnostic_tool_budget
         self.replan_extra_rounds = replan_extra_rounds
+        self.tool_result_preview_chars = max(1, int(tool_result_preview_chars))
         self.task_store = task_store
         self.context_engine = context_engine
         self.compaction_engine = compaction_engine or CompactionEngine()
+        self.work_product_evaluator = WorkProductEvaluator()
         self._task_cache: dict[str, dict] = {}
         self._cancelled_tasks: set[str] = set()
 
@@ -79,7 +93,7 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": "",
             "status": "pending",
-            "summary": {"changed_files": [], "verification": [], "processes": []},
+            "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
             "plan": [],
             "tool_call_ledger": {},
             "active_batch": None,
@@ -157,7 +171,50 @@ class LocalAgentRuntime:
                 repo_map = map_result.output
 
         plan = self._build_plan(user_message)
+        requires_material_change = self._request_requires_material_change(user_message)
         acceptance_criteria = self._extract_acceptance_criteria(user_message)
+        explicit_acceptance = bool(acceptance_criteria)
+        session_requirements = []
+        implicit_requirement_positions = []
+        engages_backlog = bool(
+            acceptance_criteria
+            or requires_material_change
+            or _CONTINUE_TASK_RE.fullmatch(user_message)
+        )
+        if (
+            engages_backlog
+            and self.task_store is not None
+            and hasattr(self.task_store, "merge_session_requirements")
+            and hasattr(self.task_store, "list_session_requirements")
+        ):
+            existing_requirements = self.task_store.list_session_requirements(
+                session_id,
+                status="pending",
+            )
+            new_requirements = [item["text"] for item in acceptance_criteria]
+            if not new_requirements and requires_material_change:
+                new_requirements = [user_message]
+            if new_requirements:
+                merged_requirements = self.task_store.merge_session_requirements(
+                    session_id,
+                    new_requirements,
+                    source_task_id=task_id,
+                )
+                if not explicit_acceptance and not existing_requirements:
+                    implicit_requirement_positions = [
+                        item["position"] for item in merged_requirements
+                    ]
+            session_requirements = self.task_store.list_session_requirements(
+                session_id,
+                status="pending",
+            )
+            if explicit_acceptance or existing_requirements or _CONTINUE_TASK_RE.fullmatch(user_message):
+                acceptance_criteria = [
+                    {"id": item["position"], "text": item["text"]}
+                    for item in session_requirements
+                ]
+            else:
+                acceptance_criteria = []
         if acceptance_criteria:
             plan.append(f"逐项核对 {len(acceptance_criteria)} 条验收要求并报告证据")
         state = {
@@ -170,6 +227,7 @@ class LocalAgentRuntime:
             "round_limit": self.max_rounds,
             "diagnostic_tool_count": 0,
             "material_tool_seen": False,
+            "requires_material_change": requires_material_change,
             "replanned": False,
             "failure_counts": {},
             "unrecovered_failures": {},
@@ -187,9 +245,11 @@ class LocalAgentRuntime:
             "context_handoff": None,
             "compaction_count": 0,
             "compacted_message_count": 0,
-            "summary": {"changed_files": [], "verification": [], "processes": []},
+            "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
             "plan": plan,
             "acceptance_criteria": acceptance_criteria,
+            "session_requirements": session_requirements,
+            "implicit_requirement_positions": implicit_requirement_positions,
             "context_emitted": False,
             "allow_tools": not direct_chat,
         }
@@ -201,7 +261,14 @@ class LocalAgentRuntime:
             "current_path": str(current_path),
             "workspace_snapshot": workspace_snapshot,
             "model_context": safe_model_context,
+            "requirement_backlog": session_requirements,
         })
+        if session_requirements:
+            self._record_event({
+                **base_event,
+                "type": "requirement_backlog_loaded",
+                "items": session_requirements,
+            })
 
         try:
             registry = self.registry_factory(session_id)
@@ -240,6 +307,16 @@ class LocalAgentRuntime:
 
         workspace = self._restore_task_workspace(state)
         registry = self.registry_factory(session_id)
+        pending_batch = state["active_batch"]
+        pending_call = pending_batch["tool_uses"][pending_batch["next_index"]]
+        self._record_event({
+            **base_event,
+            "type": "approval_resolved",
+            "approved": approved,
+            "batch_id": pending_batch["batch_id"],
+            "call_id": pending_call["id"],
+            "tool_name": pending_call["name"],
+        })
         state["status"] = "running"
         events, paused = await self._execute_active_batch(
             state, registry, base_event, approval_decision=approved,
@@ -275,7 +352,9 @@ class LocalAgentRuntime:
             while state["round"] < state.get("round_limit", self.max_rounds):
                 state["round"] += 1
                 self._save_task(state)
-                response = await self.llm_call(
+                response = await self._call_model(
+                    state,
+                    "reasoning",
                     system=system,
                     messages=self._fit_context(
                         system,
@@ -305,7 +384,9 @@ class LocalAgentRuntime:
                         and bool(_UNFINISHED_TEXT_RE.search(response_text.rstrip()))
                     )
                     if explicit_truncation or incomplete_plain_chat:
-                        continuation = await self.llm_call(
+                        continuation = await self._call_model(
+                            state,
+                            "continuation",
                             system=(
                                 system
                                 + "\n\n上一段回复意外中断。请仅从中断处继续，把当前回答完整结束；"
@@ -330,13 +411,16 @@ class LocalAgentRuntime:
                             + "\n\n未逐项覆盖验收清单："
                             + "、".join(str(item) for item in missing_criteria)
                         )
-                    acceptance = self._build_acceptance_ledger(
-                        response_text,
-                        state.get("acceptance_criteria", []),
-                        state["summary"],
+                    evaluation = self.work_product_evaluator.evaluate(
+                        criteria=state.get("acceptance_criteria", []),
+                        response_text=response_text,
+                        summary=state["summary"],
                     )
+                    acceptance = evaluation["requirement_coverage"]["items"]
                     if acceptance:
                         state["summary"]["acceptance"] = acceptance
+                        state["summary"]["work_product_evaluation"] = evaluation
+                        self._settle_session_requirements(state, acceptance)
                         response_text = re.sub(
                             r"\s*\[证据:(?:file|check|process):[^\]]+\]",
                             "",
@@ -348,16 +432,29 @@ class LocalAgentRuntime:
                         not check.get("success", False)
                         for check in state["summary"].get("verification", [])
                     )
+                    missing_material_change = (
+                        state.get("requires_material_change", False)
+                        and not state.get("material_tool_seen", False)
+                    )
+                    if missing_material_change:
+                        final_text = (
+                            final_text.rstrip()
+                            + "\n\n未完成：本次任务要求执行修改，但未记录任何文件或项目变更。"
+                        )
                     status = "incomplete" if (
                         state.get("unrecovered_failures")
                         or has_failed_verification
+                        or missing_material_change
                         or missing_criteria
+                        or self._has_explicit_unfinished(response_text)
                         or (acceptance and not all(
                             item["status"] == "passed" for item in acceptance
                         ))
                     ) else "completed"
                     state["status"] = status
                     state["final_text"] = final_text
+                    if status == "completed" and state.get("implicit_requirement_positions"):
+                        self._settle_implicit_session_requirements(state)
                     self._save_task(state)
                     if acceptance:
                         yield {
@@ -386,6 +483,32 @@ class LocalAgentRuntime:
                     tool_uses,
                     set(state.get("tool_call_ledger", {})),
                 )
+                repeated_diagnostics = (
+                    state.get("replanned")
+                    and not state.get("material_tool_seen")
+                    and int(state.get("diagnostic_tool_count", 0)) >= self.diagnostic_tool_budget
+                    and tool_uses
+                    and all(tool_use["name"] in _DIAGNOSTIC_TOOLS for tool_use in tool_uses)
+                )
+                if repeated_diagnostics:
+                    message = (
+                        "诊断预算已用尽，重规划后仍只请求诊断工具；"
+                        "Harness 已停止继续扩散读取，本次任务未完成。"
+                    )
+                    state["status"] = "incomplete"
+                    state["final_text"] = message
+                    self._save_task(state)
+                    yield {
+                        **base_event,
+                        "type": "budget_warning",
+                        "diagnostic_tool_count": state["diagnostic_tool_count"],
+                        "round_limit": state["round_limit"],
+                        "message": message,
+                        "plan": state["plan"],
+                    }
+                    yield {**base_event, "type": "token", "content": message}
+                    yield {**base_event, "type": "done", "content": message, "status": "incomplete"}
+                    return
                 batch_id = f"batch_{uuid.uuid4().hex}"
                 for tool_use in tool_uses:
                     self._create_tool_call(state, tool_use, batch_id)
@@ -427,7 +550,9 @@ class LocalAgentRuntime:
                 state,
                 "Maximum tool rounds reached before completion.",
             )
-            final_response = await self.llm_call(
+            final_response = await self._call_model(
+                state,
+                "finalization",
                 system=(
                     system
                     + "\n\n工具执行轮次已经结束。请根据已有工具结果给出最终答复，"
@@ -445,14 +570,59 @@ class LocalAgentRuntime:
                 max_tokens=self.max_output_tokens,
                 temperature=0.2,
             )
-            final_text = format_final_response(final_response.get("text", ""), state["summary"])
-            state["status"] = "incomplete"
+            response_text = final_response.get("text", "")
+            missing_criteria = self._missing_acceptance_criteria(
+                response_text, state.get("acceptance_criteria", []),
+            )
+            if missing_criteria:
+                response_text = (
+                    response_text.rstrip()
+                    + "\n\n未逐项覆盖验收清单："
+                    + "、".join(str(item) for item in missing_criteria)
+                )
+            evaluation = self.work_product_evaluator.evaluate(
+                criteria=state.get("acceptance_criteria", []),
+                response_text=response_text,
+                summary=state["summary"],
+            )
+            acceptance = evaluation["requirement_coverage"]["items"]
+            if acceptance:
+                state["summary"]["acceptance"] = acceptance
+                state["summary"]["work_product_evaluation"] = evaluation
+                self._settle_session_requirements(state, acceptance)
+                response_text = re.sub(
+                    r"\s*\[证据:(?:file|check|process):[^\]]+\]",
+                    "",
+                    response_text,
+                    flags=re.IGNORECASE,
+                )
+            final_text = format_final_response(response_text, state["summary"])
+            has_failed_verification = any(
+                not check.get("success", False)
+                for check in state["summary"].get("verification", [])
+            )
+            status = "completed" if (
+                acceptance
+                and not state.get("unrecovered_failures")
+                and not has_failed_verification
+                and not missing_criteria
+                and not self._has_explicit_unfinished(response_text)
+                and all(item["status"] == "passed" for item in acceptance)
+            ) else "incomplete"
+            state["status"] = status
             state["final_text"] = final_text
             self._save_task(state)
+            if acceptance:
+                yield {
+                    **base_event,
+                    "type": "acceptance",
+                    "success": all(item["status"] == "passed" for item in acceptance),
+                    "items": acceptance,
+                }
             yield {**base_event, "type": "token", "content": final_text}
-            yield {**base_event, "type": "done", "content": final_text, "status": "incomplete"}
+            yield {**base_event, "type": "done", "content": final_text, "status": status}
         except Exception as exc:
-            error = f"Agent 运行失败: {exc}"
+            error = self._terminal_error(exc, state)
             self._settle_open_tool_calls(state, error)
             state["status"] = "failed"
             state["final_text"] = error
@@ -463,6 +633,10 @@ class LocalAgentRuntime:
     @staticmethod
     def _estimate_tokens(system: str, messages: list[dict]) -> int:
         return CompactionEngine.estimate_tokens(system, messages)
+
+    @staticmethod
+    def _has_explicit_unfinished(response_text: str) -> bool:
+        return bool(_EXPLICIT_UNFINISHED_RE.search(response_text))
 
     def _fit_context(
         self,
@@ -549,7 +723,7 @@ class LocalAgentRuntime:
                 })
 
             if is_resumed_tool and approval_decision is False:
-                result = ToolResult.fail("用户拒绝了该操作")
+                result = ToolResult.fail("用户拒绝了该操作", error_kind="rejected")
             else:
                 requires_confirmation = (
                     not is_resumed_tool
@@ -599,17 +773,20 @@ class LocalAgentRuntime:
                 return events, True
 
             result_dict = result.to_dict()
+            provider_content, persisted_result, event_result, artifact = self._prepare_tool_result(
+                state["task_id"], call_id, name, result, result_dict,
+            )
             if is_resumed_tool and approval_decision is False:
                 terminal_status = "rejected"
                 error_kind = "rejected"
             else:
                 terminal_status = "succeeded" if result.success else "failed"
-                error_kind = None if result.success else "tool_error"
+                error_kind = None if result.success else (result.error_kind or "tool_error")
             self._transition_tool_call(
                 state,
                 call_id,
                 terminal_status,
-                result=result_dict,
+                result=persisted_result,
                 error_kind=error_kind,
             )
             if result.success:
@@ -642,25 +819,26 @@ class LocalAgentRuntime:
                 }
             self._record_tool_run(
                 state["task_id"], name, args,
-                {**result_dict, "call_id": call_id, "batch_id": batch_id},
+                {**persisted_result, "call_id": call_id, "batch_id": batch_id},
             )
             events.extend(self._result_events(
-                base_event, state, name, result,
-                call_id=call_id, batch_id=batch_id,
+                base_event, state, name, event_result,
+                call_id=call_id, batch_id=batch_id, artifact=artifact,
             ))
             batch["results"].append({
                 "type": "tool_result",
                 "tool_use_id": call_id,
-                "content": json.dumps(result_dict, ensure_ascii=False, default=str)[:30_000],
+                "content": provider_content,
             })
             batch["next_index"] += 1
             if name in _DIAGNOSTIC_TOOLS:
                 state["diagnostic_tool_count"] = int(state.get("diagnostic_tool_count", 0)) + 1
-            elif result.changed_files or name in {
-                "create_directory", "edit_files", "undo_last_change", "clone_repository",
-                "ensure_venv", "install_dependencies", "start_process", "stop_process",
-            }:
+            elif result.success:
                 state["material_tool_seen"] = True
+                state["summary"]["successful_tools"] = list(dict.fromkeys([
+                    *state["summary"].get("successful_tools", []),
+                    name,
+                ]))
 
             if not result.success and approval_decision is not False:
                 signature = json.dumps(
@@ -727,6 +905,34 @@ class LocalAgentRuntime:
             "plan": state["plan"],
         }
 
+    @staticmethod
+    def _terminal_error(exc: Exception, state: dict) -> str:
+        detail = str(exc).strip() or "未提供错误信息"
+        error = f"Agent 运行失败（{type(exc).__name__}）：{detail}"
+        summary = state.get("summary") or {}
+        facts = []
+        changed_files = [str(path) for path in summary.get("changed_files", [])]
+        if changed_files:
+            facts.append("已记录文件变更：" + "、".join(changed_files[:20]))
+        checks = [
+            check for check in summary.get("verification", [])
+            if isinstance(check, dict)
+        ]
+        if checks:
+            passed = sum(bool(check.get("success")) for check in checks)
+            facts.append(f"已记录验证：{passed}/{len(checks)} 项通过")
+        processes = [
+            process for process in summary.get("processes", [])
+            if isinstance(process, dict) and process.get("process_id")
+        ]
+        if processes:
+            facts.append("已记录进程：" + "、".join(
+                str(process["process_id"]) for process in processes[:10]
+            ))
+        if facts:
+            error += "\n\n执行事实已保留：\n- " + "\n- ".join(facts)
+        return error
+
     def _result_events(
         self,
         base_event: dict,
@@ -736,6 +942,7 @@ class LocalAgentRuntime:
         *,
         call_id: str,
         batch_id: str,
+        artifact: dict | None = None,
     ) -> list[dict]:
         events = [{
             **base_event,
@@ -748,6 +955,8 @@ class LocalAgentRuntime:
             "output": result.output,
             "error": result.error,
             "data": result.data,
+            "error_kind": result.error_kind,
+            "artifact": artifact,
         }]
         summary = state["summary"]
         if result.changed_files:
@@ -796,6 +1005,79 @@ class LocalAgentRuntime:
                 "checks": [check],
             })
         return events
+
+    def _prepare_tool_result(
+        self,
+        task_id: str,
+        call_id: str,
+        tool_name: str,
+        result: ToolResult,
+        result_dict: dict,
+    ) -> tuple[str, dict, ToolResult, dict | None]:
+        serialized = json.dumps(result_dict, ensure_ascii=False, default=str)
+        if len(serialized) <= self.tool_result_preview_chars:
+            return serialized, result_dict, result, None
+
+        preview = serialized[:self.tool_result_preview_chars]
+        artifact = None
+        if self.task_store is not None and hasattr(self.task_store, "record_agent_artifact"):
+            stored = self.task_store.record_agent_artifact(
+                task_id=task_id,
+                call_id=call_id,
+                tool_name=tool_name,
+                content=serialized,
+                mime_type="application/json",
+            )
+            artifact = {key: value for key, value in stored.items() if key != "content"}
+
+        preview_meta = {
+            "truncated": True,
+            "preview": preview,
+            "preview_chars": len(preview),
+            "original_chars": len(serialized),
+            "original_size": len(serialized.encode("utf-8")),
+            "artifact": artifact,
+        }
+        if artifact is None:
+            preview_meta["artifact_unavailable"] = True
+        provider_content = json.dumps(
+            {
+                "success": result.success,
+                "error_kind": result.error_kind,
+                **preview_meta,
+            },
+            ensure_ascii=False,
+        )
+        bounded_data = {
+            "truncated": True,
+            "preview_chars": len(preview),
+            "original_chars": len(serialized),
+            "original_size": len(serialized.encode("utf-8")),
+            "artifact": artifact,
+        }
+        persisted_result = {
+            "success": result.success,
+            "data": bounded_data,
+            "output": preview,
+            "error": result.error[:self.tool_result_preview_chars] if result.error else None,
+            "changed_files": result.changed_files,
+            "process_id": result.process_id,
+            "requires_confirmation": result.requires_confirmation,
+            "confirmation_reason": result.confirmation_reason,
+            "error_kind": result.error_kind,
+        }
+        event_result = ToolResult(
+            success=result.success,
+            data=bounded_data,
+            output=preview,
+            error=persisted_result["error"],
+            changed_files=result.changed_files,
+            process_id=result.process_id,
+            requires_confirmation=result.requires_confirmation,
+            confirmation_reason=result.confirmation_reason,
+            error_kind=result.error_kind,
+        )
+        return provider_content, persisted_result, event_result, artifact
 
     def _create_tool_call(self, state: dict, call: dict, batch_id: str) -> None:
         recovery_key = tool_recovery_key(
@@ -903,10 +1185,86 @@ class LocalAgentRuntime:
             "type": event_type or "event",
         })
 
+    async def _call_model(self, state: dict, phase: str, **kwargs) -> dict:
+        model_context = state.get("model_context", {})
+        event = {
+            "session_id": state["session_id"],
+            "task_id": state["task_id"],
+            "round": state.get("round", 0),
+            "phase": phase,
+            "model": model_context.get("id", ""),
+            "protocol": model_context.get("protocol", ""),
+            "base_url": model_context.get("base_url", ""),
+        }
+        self._record_event({**event, "type": "model_request_started"})
+        started_at = time.perf_counter()
+        try:
+            response = await self.llm_call(**kwargs)
+        except Exception as exc:
+            self._record_event({
+                **event,
+                "type": "model_request_failed",
+                "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                "error_type": type(exc).__name__,
+            })
+            raise
+        self._record_event({
+            **event,
+            "type": "model_request_completed",
+            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "stop_reason": str(response.get("stop_reason", "")),
+            "usage": response.get("usage_metadata") or {},
+        })
+        return response
+
     def _record_stream_event(self, state: dict, event: dict) -> None:
         self._record_event(event)
         if event.get("type") == "done" and event.get("status") == "completed":
             self._record_task_memory(state)
+
+    def _settle_session_requirements(self, state: dict, acceptance: list[dict]) -> None:
+        if (
+            self.task_store is None
+            or not hasattr(self.task_store, "settle_session_requirements")
+            or not state.get("session_requirements")
+        ):
+            return
+        self.task_store.settle_session_requirements(
+            state["session_id"],
+            state["task_id"],
+            acceptance,
+        )
+        remaining = self.task_store.list_session_requirements(
+            state["session_id"],
+            status="pending",
+        )
+        state["session_requirements"] = remaining
+        self._record_event({
+            "session_id": state["session_id"],
+            "task_id": state["task_id"],
+            "type": "requirement_backlog_updated",
+            "items": remaining,
+        })
+
+    def _settle_implicit_session_requirements(self, state: dict) -> None:
+        summary = state.get("summary") or {}
+        evidence = [
+            {"type": "file", "ref": str(path)}
+            for path in summary.get("changed_files", [])
+        ]
+        evidence.extend(
+            {"type": "check", "ref": str(check.get("kind", "command"))}
+            for check in summary.get("verification", [])
+            if isinstance(check, dict) and check.get("success", False)
+        )
+        evidence.extend(
+            {"type": "tool", "ref": str(name)}
+            for name in summary.get("successful_tools", [])
+        )
+        self._settle_session_requirements(state, [
+            {"id": position, "status": "passed", "evidence": evidence}
+            for position in state.get("implicit_requirement_positions", [])
+        ])
 
     def _search_project_memories(self, workspace_root: str, query: str) -> list[dict]:
         if self.task_store is None or not hasattr(self.task_store, "search_project_memories"):
@@ -1005,8 +1363,21 @@ class LocalAgentRuntime:
         return steps
 
     @staticmethod
+    def _request_requires_material_change(user_message: str) -> bool:
+        text = user_message.casefold()
+        change_terms = (
+            "修改", "实现", "修复", "创建", "新增", "添加", "开发", "优化", "改进",
+            "删除", "清理", "安装", "克隆", "启动", "重启",
+            "fix", "implement", "create", "add", "build", "develop", "optimize",
+            "optimise", "delete", "remove", "install", "clone", "start", "restart",
+        )
+        negation = re.compile(r"(?:不要|无需|不需要|禁止|do not|don't)\s*.{0,16}")
+        without_negated_phrases = negation.sub("", text)
+        return any(term in without_negated_phrases for term in change_terms)
+
+    @staticmethod
     def _extract_acceptance_criteria(user_message: str) -> list[dict]:
-        marker = re.compile(r"(?<!\d)(\d{1,2})\s*[.)、]\s*")
+        marker = re.compile(r"(?:^|(?<=[：:；;\n]))\s*(\d{1,2})\s*[.)、]\s*", re.MULTILINE)
         matches = list(marker.finditer(user_message))
         if not matches or int(matches[0].group(1)) != 1:
             return []
@@ -1016,7 +1387,7 @@ class LocalAgentRuntime:
             if item_id != index + 1:
                 return []
             end = matches[index + 1].start() if index + 1 < len(matches) else len(user_message)
-            text = user_message[match.end():end].strip(" \t\r\n；;。")
+            text = user_message[match.end():end].split("。", 1)[0].strip(" \t\r\n；;。")
             if not text:
                 return []
             criteria.append({"id": item_id, "text": text})
@@ -1027,7 +1398,10 @@ class LocalAgentRuntime:
         missing = []
         for item in criteria:
             item_id = int(item["id"])
-            if not re.search(rf"(?m)^\s*(?:[-*]\s*)?{item_id}\s*[.)、:]", response_text):
+            if not re.search(
+                rf"(?m)^\s*(?:[-*]\s*)?(?:\*\*)?\[?{item_id}\]?\s*[.)、:]?",
+                response_text,
+            ):
                 missing.append(item_id)
         return missing
 
@@ -1037,77 +1411,11 @@ class LocalAgentRuntime:
         criteria: list[dict],
         summary: dict,
     ) -> list[dict]:
-        if not criteria:
-            return []
-
-        changed_files = {
-            str(path).replace("\\", "/").casefold()
-            for path in summary.get("changed_files", [])
-        }
-        successful_checks = {
-            str(check.get("kind", "command")).casefold()
-            for check in summary.get("verification", [])
-            if isinstance(check, dict) and check.get("success", False)
-        }
-        process_ids = {
-            str(process.get("process_id", "")).casefold()
-            for process in summary.get("processes", [])
-            if isinstance(process, dict) and process.get("process_id")
-        }
-        evidence_pattern = re.compile(
-            r"\[证据:(file|check|process):([^\]]+)\]",
-            re.IGNORECASE,
-        )
-        item_pattern = re.compile(
-            r"(?ms)^\s*(?:[-*]\s*)?(\d{1,2})\s*[.)、:]\s*(.*?)"
-            r"(?=^\s*(?:[-*]\s*)?\d{1,2}\s*[.)、:]\s*|\Z)",
-        )
-        sections = {
-            int(match.group(1)): match.group(2).strip()
-            for match in item_pattern.finditer(response_text)
-        }
-
-        ledger = []
-        for criterion in criteria:
-            item_id = int(criterion["id"])
-            section = sections.get(item_id, "")
-            evidence = []
-            for match in evidence_pattern.finditer(section):
-                evidence_type = match.group(1).casefold()
-                evidence_ref = match.group(2).strip()
-                normalized_ref = evidence_ref.replace("\\", "/").casefold()
-                if evidence_type == "file":
-                    valid = normalized_ref in changed_files
-                elif evidence_type == "check":
-                    valid = normalized_ref in successful_checks
-                else:
-                    valid = normalized_ref in process_ids
-                evidence.append({
-                    "type": evidence_type,
-                    "ref": evidence_ref,
-                    "valid": valid,
-                })
-
-            if "[未完成]" in section:
-                status = "failed"
-                reason = "回复明确标记为未完成"
-            elif "[完成]" not in section:
-                status = "unverified"
-                reason = "缺少明确的完成状态"
-            elif not any(item["valid"] for item in evidence):
-                status = "unverified"
-                reason = "完成声明缺少有效执行证据"
-            else:
-                status = "passed"
-                reason = ""
-            ledger.append({
-                "id": item_id,
-                "text": criterion["text"],
-                "status": status,
-                "evidence": evidence,
-                "reason": reason,
-            })
-        return ledger
+        return WorkProductEvaluator().evaluate(
+            criteria=criteria,
+            response_text=response_text,
+            summary=summary,
+        )["requirement_coverage"]["items"]
 
     @staticmethod
     def _system_prompt(

@@ -106,6 +106,7 @@ export interface AgentAcceptanceEvidence {
   type: 'file' | 'check' | 'process'
   ref: string
   valid: boolean
+  sufficient?: boolean
 }
 
 export interface AgentAcceptanceItem {
@@ -170,6 +171,7 @@ export interface AgentTrace {
   task_id: string
   session_id: string
   message: string
+  message_encoding_status?: 'intact' | 'legacy_corrupted'
   status: string
   tool_count: number
   failed_tool_count: number
@@ -192,7 +194,93 @@ export interface AgentTraceDetail {
       created_at: string
     }>
     changesets: Array<{ files: string[]; diff: string; created_at: string }>
+    artifacts: AgentArtifact[]
   }
+}
+
+export interface ProjectOverview {
+  project_id: string
+  workspace_root: string
+  current_path: string
+  stage: 'intake' | 'inspect' | 'run' | 'understand' | 'experiment' | 'verify'
+  stage_status: string
+  next_action: string
+  summary: {
+    task_id?: string
+    message: string
+    status: string
+    changed_file_count: number
+    verification_count: number
+    process_count: number
+    failed: boolean
+  }
+  evidence_counts: {
+    events: number
+    tool_runs: number
+    changesets: number
+    files: number
+    artifacts: number
+  }
+  changed_files: string[]
+  active_processes: Array<Record<string, unknown>>
+  latest_verification: Record<string, unknown> | null
+  trace: AgentTrace | null
+}
+
+export interface ProjectSummary {
+  project_id: string
+  workspace_root: string
+  latest_task_id: string
+  task_count: number
+  updated_at?: string
+}
+
+export interface ProjectEvidence {
+  project_id: string
+  workspace_root: string
+  task: Record<string, unknown>
+  task_history: Array<{
+    task_id: string
+    session_id?: string
+    message: string
+    status: string
+    created_at: string
+  }>
+  entries: ProjectEvidenceEntry[]
+  events: AgentEvent[]
+  tool_runs: Array<{
+    tool_name: string
+    args: Record<string, unknown>
+    result: Record<string, unknown>
+    recovered_by_call_id?: string | null
+    created_at: string
+  }>
+  changesets: Array<{ files: string[]; diff: string; created_at: string }>
+  artifacts: AgentArtifact[]
+  developer_layers: string[]
+}
+
+export type ProjectEvidenceCategory = 'events' | 'tools' | 'files' | 'verification' | 'processes' | 'observability'
+export type ProjectEvidenceFilter = 'all' | 'failed' | 'recovered' | Exclude<ProjectEvidenceCategory, 'events' | 'observability'>
+
+export interface ProjectEvidenceEntry {
+  id: string
+  task_id: string
+  category: ProjectEvidenceCategory
+  status: string
+  title: string
+  created_at: string
+  details: Record<string, unknown>
+}
+
+export interface AgentArtifact {
+  artifact_id: string
+  task_id: string
+  call_id: string
+  tool_name: string
+  mime_type: string
+  size: number
+  created_at: string
 }
 
 export interface AgentEvent {
@@ -203,11 +291,10 @@ export interface AgentEvent {
 }
 
 export interface ObservabilityStatus {
-  local: { enabled: boolean; storage: string; retention: string }
-  langsmith: { enabled: boolean; configured: boolean; project: string }
+  local: { enabled: boolean; storage: string; retention: string; coverage: string[] }
 }
 
-export type View = 'chat' | 'explore' | 'activity' | 'settings'
+export type View = 'chat' | 'project' | 'explore' | 'activity' | 'settings'
 
 export type SSEEvent =
   | { type: 'workspace'; path: string; session_id: string; task_id?: string }
@@ -215,7 +302,7 @@ export type SSEEvent =
   | { type: 'repo_map'; content: string; files_scanned: number; session_id: string; task_id: string }
   | { type: 'step'; step: string; icon: string }
   | { type: 'tool_call'; name: string; tool_name?: string; args: Record<string, unknown>; call_id: string; batch_id: string }
-  | { type: 'tool_result'; name: string; tool_name?: string; success: boolean; output: string; error?: string; data?: Record<string, unknown>; call_id: string; batch_id: string }
+  | { type: 'tool_result'; name: string; tool_name?: string; success: boolean; output: string; error?: string; error_kind?: string; data?: Record<string, unknown>; artifact?: AgentArtifact | null; call_id: string; batch_id: string }
   | { type: 'tool_recovered'; name: string; failed_call_id: string; recovered_by_call_id: string; recovery_key: string }
   | { type: 'cmd_preview'; command: string; risk: 'safe' | 'high'; reason: string }
   | { type: 'cmd_line'; text: string }

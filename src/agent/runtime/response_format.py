@@ -81,6 +81,17 @@ def _fact_summary(summary: dict) -> str:
     return "，".join(parts) + "。" if parts else "任务未产生可确认的执行结果。"
 
 
+def _acceptance_summary(items: list[dict]) -> str:
+    labels = {"passed": "完成", "failed": "未完成", "unverified": "未验证"}
+    lines = []
+    for item in items:
+        label = labels.get(str(item.get("status")), "未验证")
+        reason = str(item.get("reason") or "").strip()
+        suffix = f"（{reason}）" if reason else ""
+        lines.append(f"{item.get('id')}. [{label}] {item.get('text', '')}{suffix}")
+    return "\n".join(lines)
+
+
 def _contains_tool_fields(value: object) -> bool:
     if isinstance(value, dict):
         if {"path", "operation"}.issubset(value):
@@ -98,7 +109,15 @@ def format_final_response(text: str, summary: dict | None = None) -> str:
     files = list(dict.fromkeys(summary.get("changed_files", [])))
     checks = summary.get("verification", [])
     processes = summary.get("processes", [])
-    completion = _completion_text(text, summary)
+    acceptance = [
+        item for item in summary.get("acceptance", [])
+        if isinstance(item, dict)
+    ]
+    completion = (
+        _acceptance_summary(acceptance)
+        if not text.strip() and acceptance
+        else _completion_text(text, summary)
+    )
 
     if not files and not checks and not processes:
         return completion

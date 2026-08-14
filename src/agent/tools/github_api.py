@@ -1,4 +1,4 @@
-"""
+﻿"""
 GitHub API 工具 — 仓库信息、搜索、克隆、文件树、Issue、分支、PR 等
 """
 import os
@@ -9,13 +9,10 @@ from typing import Optional
 import httpx
 import base64
 
-from langsmith import traceable
-
 
 CLONE_DIR = Path("./cloned_repos")
 
 
-@traceable(name="tool_fetch_repo_info")
 def fetch_repo_info(repo: str) -> dict:
     """
     通过 GitHub API 获取仓库详情。
@@ -45,7 +42,6 @@ def fetch_repo_info(repo: str) -> dict:
         return {"error": str(e)}
 
 
-@traceable(name="tool_search_github")
 def search_github(query: str, language: str = "", limit: int = 20,
                    sort: str = "stars", min_stars: int = 0,
                    created_after: str = "") -> dict:
@@ -97,7 +93,6 @@ def search_github(query: str, language: str = "", limit: int = 20,
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_clone_repo")
 def clone_repo(repo: str, target_dir: str = None) -> dict:
     """
     克隆 GitHub 仓库。使用 args list 而非字符串拼接，防止命令注入。
@@ -128,7 +123,6 @@ def clone_repo(repo: str, target_dir: str = None) -> dict:
         return {"success": False, "output": str(e), "path": None}
 
 
-@traceable(name="tool_get_file_tree")
 def get_file_tree(repo: str, branch: str = None) -> dict:
     """获取仓库文件树（递归）"""
     try:
@@ -164,7 +158,6 @@ def get_file_tree(repo: str, branch: str = None) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_read_file_content")
 def read_file_content(repo: str, path: str) -> dict:
     """通过 GitHub API 读取文件内容"""
     try:
@@ -187,7 +180,6 @@ def read_file_content(repo: str, path: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_get_issue_details")
 def get_issue_details(repo: str, issue_number: int) -> dict:
     """获取 GitHub Issue 详情"""
     try:
@@ -216,7 +208,6 @@ def get_issue_details(repo: str, issue_number: int) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_get_issue_comments")
 def get_issue_comments(repo: str, issue_number: int) -> dict:
     """获取 Issue 的所有评论"""
     try:
@@ -238,7 +229,6 @@ def get_issue_comments(repo: str, issue_number: int) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_get_commit_frequency")
 def get_commit_frequency(repo: str) -> dict:
     """获取最近 52 周的 commit 频率统计"""
     try:
@@ -265,7 +255,6 @@ def get_commit_frequency(repo: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_get_workflow_runs")
 def get_workflow_runs(repo: str, limit: int = 10) -> dict:
     """获取 GitHub Actions workflow 运行记录"""
     try:
@@ -295,7 +284,6 @@ def get_workflow_runs(repo: str, limit: int = 10) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_create_branch")
 def create_branch(repo: str, branch_name: str, base_sha: str) -> dict:
     """创建新分支"""
     try:
@@ -316,7 +304,6 @@ def create_branch(repo: str, branch_name: str, base_sha: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_commit_file")
 def commit_file(repo: str, path: str, content: str, message: str, branch: str) -> dict:
     """提交文件到指定分支"""
     try:
@@ -349,7 +336,6 @@ def commit_file(repo: str, path: str, content: str, message: str, branch: str) -
         return {"success": False, "error": str(e)}
 
 
-@traceable(name="tool_create_pull_request")
 def create_pull_request(repo: str, title: str, body: str, head: str, base: str = "main") -> dict:
     """创建 Pull Request"""
     try:

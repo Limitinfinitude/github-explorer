@@ -186,6 +186,9 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     add("wait_http", "等待本地 HTTP 服务开始响应", {
         "url": {"type": "string"},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+        "expected_text": {"type": "string", "description": "响应正文必须包含的版本标记"},
     }, ["url"], ToolRisk.READ,
-        lambda a: services.network.wait_http(a["url"], a.get("timeout", 15)))
+        lambda a: services.network.wait_http(
+            a["url"], a.get("timeout", 15), a.get("expected_text"),
+        ))
     return registry

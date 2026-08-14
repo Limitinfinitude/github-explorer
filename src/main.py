@@ -72,6 +72,7 @@ app.include_router(router_agent)
 # ========== 多模型配置系统 ==========
 
 _MODEL_CONFIGS_PATH = Path(__file__).parent.parent / "data" / "model_configs.json"
+_ACTIVE_MODEL_PATH = Path(__file__).parent.parent / "data" / "active_model.json"
 
 _DEFAULT_MODEL_CONFIGS = [
     {"id": "mimo-v2.5",       "name": "Mimo v2.5",       "model": "mimo-v2.5",       "protocol": "anthropic", "icon": "M", "color": "#8250df", "tags": ["1M", "识图"],  "api_key": "", "base_url": "https://api.xiaomimimo.com/anthropic"},
@@ -146,6 +147,22 @@ def _save_model_configs(configs: dict):
     )
 
 
+def _load_active_model_id() -> str:
+    try:
+        value = json.loads(_ACTIVE_MODEL_PATH.read_text(encoding="utf-8"))
+        return str(value.get("model_id", "")).strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def _save_active_model_id(model_id: str) -> None:
+    _ACTIVE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ACTIVE_MODEL_PATH.write_text(
+        json.dumps({"model_id": model_id}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _mask_key(key: str) -> str:
     if len(key) > 8:
         return key[:4] + "*" * (len(key) - 8) + key[-4:]
@@ -154,8 +171,10 @@ def _mask_key(key: str) -> str:
 
 MODEL_CONFIGS: dict = _load_model_configs()
 _requested_config = os.environ.get("MODEL_CONFIG_ID", "")
+_saved_config = _load_active_model_id()
 _requested_model = (
     _requested_config if _requested_config in MODEL_CONFIGS
+    else _saved_config if _saved_config in MODEL_CONFIGS
     else os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL", "")
 )
 ACTIVE_MODEL_ID: str = next(
@@ -265,6 +284,8 @@ async def get_settings():
 @app.post("/api/settings/select")
 async def select_model_endpoint(s: SettingsSelectRequest):
     ok = _apply_model(s.model_id)
+    if ok:
+        _save_active_model_id(s.model_id)
     return {"ok": ok, "active_model": ACTIVE_MODEL_ID}
 
 
@@ -297,6 +318,7 @@ async def update_model_config(model_id: str, s: ModelConfigUpdate):
     _save_model_configs(MODEL_CONFIGS)
     if model_id == ACTIVE_MODEL_ID:
         _apply_model(model_id)
+        _save_active_model_id(model_id)
     return {"ok": True}
 
 
@@ -320,100 +342,39 @@ async def create_model_config(s: ModelConfigCreate):
     }
     MODEL_CONFIGS[model_id] = cfg
     _save_model_configs(MODEL_CONFIGS)
+    _apply_model(model_id)
+    _save_active_model_id(model_id)
     return {"ok": True, "model": _public_model(cfg)}
 
-# ========== AI 分析 API（通过 LangGraph） ==========
+# ========== AI 分析 API（统一 Local Runtime） ==========
+
+async def _run_compat_agent(message: str, history: list[dict] | None = None) -> dict:
+    from routes_agent import run_local_agent_once
+
+    return await run_local_agent_once("web", message, history=history)
 
 @app.post("/api/chat")
 async def chat_with_agent(request: ChatRequest):
-    from agent.graph import get_graph
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": "web"}}
-    result = await graph.ainvoke(
-        {
-            "user_message": request.message,
-            "session_id": "web",
-            "repo": request.repo,
-            "intent": "chat",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
-    )
-    return {"response": result.get("response", "")}
+    result = await _run_compat_agent(request.message, request.history)
+    return {"response": result["response"], "status": result["status"], "task_id": result["task_id"]}
 
 
 @app.post("/api/analyze")
 async def analyze_project(request: AnalyzeRequest):
-    from agent.graph import get_graph
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": "web"}}
-    result = await graph.ainvoke(
-        {
-            "user_message": f"深度分析 {request.repo}",
-            "session_id": "web",
-            "repo": request.repo,
-            "intent": "analyze",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
-    )
-    return {"analysis": result.get("analysis_result", result.get("response", ""))}
+    result = await _run_compat_agent(f"深度分析 {request.repo}")
+    return {"analysis": result["response"], "status": result["status"], "task_id": result["task_id"]}
 
 
 @app.post("/api/learning-path")
 async def get_learning_path(request: LearningPathRequest):
-    from agent.graph import get_graph
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": "web"}}
-    result = await graph.ainvoke(
-        {
-            "user_message": f"生成学习路径，水平：{request.level}",
-            "session_id": "web",
-            "repo": request.repo,
-            "intent": "analyze",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
-    )
-    return {"path": result.get("response", "")}
+    result = await _run_compat_agent(f"为 {request.repo} 生成 {request.level} 水平的学习路径")
+    return {"path": result["response"], "status": result["status"], "task_id": result["task_id"]}
 
 
 @app.post("/api/usage-example")
 async def get_usage_example(request: AnalyzeRequest):
-    from agent.graph import get_graph
-    graph = await get_graph()
-
-    config = {"configurable": {"thread_id": "web"}}
-    result = await graph.ainvoke(
-        {
-            "user_message": f"生成使用示例 {request.repo}",
-            "session_id": "web",
-            "repo": request.repo,
-            "intent": "analyze",
-            "needs_confirm": False,
-            "confirm_question": "",
-            "confirmed": False,
-            "response": "",
-            "execution_steps": [],
-        },
-        config=config,
-    )
-    return {"example": result.get("response", "")}
+    result = await _run_compat_agent(f"为 {request.repo} 生成使用示例")
+    return {"example": result["response"], "status": result["status"], "task_id": result["task_id"]}
 
 # ========== 本地文件访问 API ==========
 

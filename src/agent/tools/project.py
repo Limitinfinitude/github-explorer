@@ -1,16 +1,13 @@
-"""
+﻿"""
 项目检测与操作工具 — detect_project, install_deps, get_run_command, run_lint, run_tests, get_system_info
 """
 import os
 import platform
 from pathlib import Path
 
-from langsmith import traceable
-
 from .runner import run_command
 
 
-@traceable(name="tool_detect_project")
 def detect_project(repo_path: str) -> dict:
     """
     检测项目类型、语言、包管理器等信息。
@@ -77,7 +74,6 @@ def detect_project(repo_path: str) -> dict:
     return info
 
 
-@traceable(name="tool_install_deps")
 def install_deps(project_info: dict, cwd: str) -> dict:
     """
     根据项目类型安装依赖。
@@ -112,7 +108,6 @@ def install_deps(project_info: dict, cwd: str) -> dict:
     return run_command(cmd, cwd=cwd, timeout=300)
 
 
-@traceable(name="tool_get_run_command")
 def get_run_command(project_info: dict) -> str:
     """
     根据项目类型获取运行命令。
@@ -128,7 +123,6 @@ def get_run_command(project_info: dict) -> str:
     return commands.get(lang, "echo '未知项目类型，请手动运行'")
 
 
-@traceable(name="tool_run_lint")
 def run_lint(repo_path: str, language: str) -> dict:
     """运行 lint 检查"""
     lint_cmds = {
@@ -142,7 +136,6 @@ def run_lint(repo_path: str, language: str) -> dict:
     return run_command(cmd, cwd=repo_path, timeout=120)
 
 
-@traceable(name="tool_run_tests")
 def run_tests(repo_path: str, language: str) -> dict:
     """运行测试"""
     test_cmds = {

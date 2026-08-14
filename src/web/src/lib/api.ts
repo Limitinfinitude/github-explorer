@@ -1,6 +1,6 @@
 import type {
   AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
-  DefaultWorkspaceResponse, Model, ObservabilityStatus, Repo, SSEEvent, WorkspaceResponse,
+  DefaultWorkspaceResponse, Model, ObservabilityStatus, ProjectEvidence, ProjectOverview, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
@@ -101,6 +101,25 @@ export const api = {
   async getTraceDetail(taskId: string): Promise<AgentTraceDetail> {
     const res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}`)
     if (!res.ok) throw new Error(`读取任务详情失败：HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getProjectOverview(projectId: string): Promise<ProjectOverview> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/overview`)
+    if (!res.ok) throw new Error(`读取项目概览失败：HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getProjects(): Promise<ProjectSummary[]> {
+    const res = await fetch('/api/projects')
+    if (!res.ok) throw new Error(`读取项目列表失败：HTTP ${res.status}`)
+    const data = await res.json() as { projects?: ProjectSummary[] }
+    return data.projects ?? []
+  },
+
+  async getProjectEvidence(projectId: string): Promise<ProjectEvidence> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/evidence`)
+    if (!res.ok) throw new Error(`读取项目证据失败：HTTP ${res.status}`)
     return res.json()
   },
 
