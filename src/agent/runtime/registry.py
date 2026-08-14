@@ -3,7 +3,7 @@ from typing import Callable
 
 from .models import ToolResult, ToolRisk
 from .permissions import PermissionGate
-from .schema import validate_schema
+from .schema import schema_issue
 from .tracing import current_tool_call_context, tool_span
 
 
@@ -54,11 +54,12 @@ class ToolRegistry:
         if definition is None:
             return ToolResult.fail(f"未知工具: {name}", error_kind="unknown_tool")
 
-        validation_error = validate_schema(args, definition.input_schema)
-        if validation_error:
+        validation_issue = schema_issue(args, definition.input_schema)
+        if validation_issue:
             return ToolResult.fail(
-                f"工具参数无效: {validation_error}",
+                f"工具参数无效: {validation_issue.path}: {validation_issue.message}",
                 error_kind="invalid_input",
+                data={"validation": validation_issue.to_dict()},
             )
 
         risk = definition.risk_resolver(args) if definition.risk_resolver else definition.risk

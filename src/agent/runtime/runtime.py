@@ -12,6 +12,7 @@ from typing import Any
 from .compaction import CompactionEngine
 from .acceptance import WorkProductEvaluator
 from .context import ContextEngine
+from .evidence import normalize_evidence_path
 from .instructions import InstructionLoader
 from .models import ToolResult
 from .registry import ToolRegistry
@@ -230,6 +231,7 @@ class LocalAgentRuntime:
             "requires_material_change": requires_material_change,
             "replanned": False,
             "failure_counts": {},
+            "schema_repair_counts": {},
             "unrecovered_failures": {},
             "active_batch": None,
             "tool_call_ledger": {},
@@ -463,6 +465,9 @@ class LocalAgentRuntime:
                             "success": all(item["status"] == "passed" for item in acceptance),
                             "items": acceptance,
                         }
+                    finalization = self._finalization_event(base_event, status, final_text, state["summary"])
+                    if self._has_finalization_facts(finalization):
+                        yield finalization
                     yield {**base_event, "type": "token", "content": final_text}
                     yield {**base_event, "type": "done", "content": final_text, "status": status}
                     return
@@ -619,6 +624,9 @@ class LocalAgentRuntime:
                     "success": all(item["status"] == "passed" for item in acceptance),
                     "items": acceptance,
                 }
+            finalization = self._finalization_event(base_event, status, final_text, state["summary"])
+            if self._has_finalization_facts(finalization):
+                yield finalization
             yield {**base_event, "type": "token", "content": final_text}
             yield {**base_event, "type": "done", "content": final_text, "status": status}
         except Exception as exc:
@@ -831,6 +839,26 @@ class LocalAgentRuntime:
                 "content": provider_content,
             })
             batch["next_index"] += 1
+            if not result.success and result.error_kind == "invalid_input":
+                validation = result.data.get("validation", {})
+                lineage = f"{name}:{validation.get('path', '$')}"
+                repair_counts = state.setdefault("schema_repair_counts", {})
+                repair_counts[lineage] = int(repair_counts.get(lineage, 0)) + 1
+                if repair_counts[lineage] > 1:
+                    message = f"工具参数自动修复已用尽: {name} {validation.get('path', '$')}"
+                    state["status"] = "incomplete"
+                    state["final_text"] = message
+                    events.append({
+                        **base_event,
+                        "type": "tool_repair_exhausted",
+                        "tool_name": name,
+                        "lineage": lineage,
+                        "attempts": repair_counts[lineage],
+                        "validation": validation,
+                    })
+                    events.append({**base_event, "type": "done", "content": message, "status": "incomplete"})
+                    self._save_task(state)
+                    return events, True
             if name in _DIAGNOSTIC_TOOLS:
                 state["diagnostic_tool_count"] = int(state.get("diagnostic_tool_count", 0)) + 1
             elif result.success:
@@ -959,31 +987,47 @@ class LocalAgentRuntime:
             "artifact": artifact,
         }]
         summary = state["summary"]
+        workspace_root = state["workspace_root"]
         if result.changed_files:
+            changed_files = [
+                normalize_evidence_path(workspace_root, path)
+                for path in result.changed_files
+            ]
             summary["changed_files"] = list(dict.fromkeys([
-                *summary["changed_files"], *result.changed_files,
+                *summary["changed_files"], *changed_files,
             ]))
             diff = result.data.get("diff", "")
+            path_kinds = {
+                normalize_evidence_path(workspace_root, path): kind
+                for path, kind in result.data.get("path_kinds", {}).items()
+            }
             events.append({
                 **base_event,
                 "type": "file_changed",
-                "files": result.changed_files,
+                "files": changed_files,
                 "diff": diff,
-                "path_kinds": result.data.get("path_kinds", {}),
+                "path_kinds": path_kinds,
             })
-            self._record_changeset(state["task_id"], result.changed_files, diff)
+            self._record_changeset(state["task_id"], changed_files, diff)
         if result.process_id:
-            process = {"process_id": result.process_id, **result.data}
+            process_data = self._normalize_evidence_fields(result.data, workspace_root)
+            process = {"process_id": result.process_id, **process_data}
             summary["processes"] = [
                 item for item in summary["processes"] if item.get("process_id") != result.process_id
             ] + [process]
-            events.append({**base_event, "type": "process_started", "process_id": result.process_id, "data": result.data})
+            events.append({**base_event, "type": "process_started", "process_id": result.process_id, "data": process_data})
         if name == "verify_project":
-            checks = result.data.get("checks", [])
+            checks = [
+                self._normalize_evidence_fields(check, workspace_root)
+                for check in result.data.get("checks", [])
+            ]
             summary["verification"] = checks
             events.append({**base_event, "type": "verification", "success": result.success, "checks": checks})
         elif result.data.get("verification"):
-            checks = result.data["verification"]
+            checks = [
+                self._normalize_evidence_fields(check, workspace_root)
+                for check in result.data["verification"]
+            ]
             summary["verification"] = [*summary.get("verification", []), *checks]
             events.append({
                 **base_event,
@@ -1005,6 +1049,49 @@ class LocalAgentRuntime:
                 "checks": [check],
             })
         return events
+
+    @staticmethod
+    def _finalization_event(base_event: dict, status: str, explanation: str, summary: dict) -> dict:
+        checks = [item for item in summary.get("verification", []) if isinstance(item, dict)]
+        processes = [item for item in summary.get("processes", []) if isinstance(item, dict)]
+        acceptance = [item for item in summary.get("acceptance", []) if isinstance(item, dict)]
+        return {
+            **base_event,
+            "type": "finalization",
+            "status": status,
+            "facts": {
+                "changed_files": list(dict.fromkeys(summary.get("changed_files", []))),
+                "verification": {
+                    "passed": sum(bool(item.get("success")) for item in checks),
+                    "failed": sum(not bool(item.get("success")) for item in checks),
+                    "total": len(checks),
+                },
+                "processes": processes,
+                "acceptance": acceptance,
+                "successful_tools": list(dict.fromkeys(summary.get("successful_tools", []))),
+            },
+            "explanation": explanation,
+        }
+
+    @staticmethod
+    def _has_finalization_facts(event: dict) -> bool:
+        facts = event["facts"]
+        return bool(
+            facts["changed_files"]
+            or facts["verification"]["total"]
+            or facts["processes"]
+            or facts["acceptance"]
+            or facts["successful_tools"]
+        )
+
+    @staticmethod
+    def _normalize_evidence_fields(payload: dict, workspace_root: str) -> dict:
+        normalized = dict(payload)
+        for field in ("cwd", "path", "project_root"):
+            value = normalized.get(field)
+            if value:
+                normalized[field] = normalize_evidence_path(workspace_root, value)
+        return normalized
 
     def _prepare_tool_result(
         self,

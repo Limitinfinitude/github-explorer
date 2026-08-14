@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import platform
+import hashlib
+import socket
 import subprocess
 import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import psutil
 
 from .commands import (
     clean_environment, command_python_executable, process_creation_flags,
@@ -25,6 +31,9 @@ class ManagedProcess:
     process: subprocess.Popen
     logs: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
     status: str = "running"
+    command_fingerprint: str = ""
+    declared_host: str | None = None
+    declared_port: int | None = None
 
 
 class ProcessManager:
@@ -33,10 +42,32 @@ class ProcessManager:
         self._processes: dict[str, ManagedProcess] = {}
         self._lock = threading.RLock()
 
-    def start(self, session_id: str, command: str, cwd: str = ".") -> ToolResult:
+    def start(
+        self,
+        session_id: str,
+        command: str,
+        cwd: str = ".",
+        *,
+        host: str | None = None,
+        port: int | None = None,
+    ) -> ToolResult:
         work_dir = self.workspaces.resolve(session_id, cwd)
         if not work_dir.is_dir():
             return ToolResult.fail(f"进程目录不存在: {cwd}")
+        if host is not None and host not in {"127.0.0.1", "::1"}:
+            return ToolResult.fail(
+                f"后台服务只允许监听本机回环地址: {host}",
+                error_kind="invalid_host",
+                data={"host": host, "allowed_hosts": ["127.0.0.1", "::1"]},
+            )
+        if port is not None:
+            host = host or "127.0.0.1"
+            if self._port_is_open(host, port):
+                return ToolResult.fail(
+                    f"端口已被占用: {host}:{port}",
+                    error_kind="port_conflict",
+                    data={"host": host, "port": port},
+                )
 
         plan = plan_shell_command(command)
         if plan.error:
@@ -74,6 +105,11 @@ class ProcessManager:
             shell=plan.shell,
             cwd=str(work_dir),
             process=process,
+            command_fingerprint=hashlib.sha256(
+                f"{plan.shell}\0{plan.command}\0{work_dir}".encode("utf-8")
+            ).hexdigest(),
+            declared_host=host,
+            declared_port=port,
         )
         with self._lock:
             self._processes[process_id] = managed
@@ -83,14 +119,63 @@ class ProcessManager:
             process_id=process_id,
             data={
                 "pid": process.pid,
+                "launcher_pid": process.pid,
+                "process_tree_pids": self._process_tree_pids(process.pid),
                 "cwd": str(work_dir),
                 "status": "running",
                 "python_executable": command_python_executable(plan.command, work_dir),
                 "shell": plan.shell,
                 "original_command": plan.original_command,
                 "executed_command": plan.command,
+                "command_fingerprint": managed.command_fingerprint,
+                "declared_host": host,
+                "declared_port": port,
             },
         )
+
+    def listener_ownership(
+        self,
+        session_id: str,
+        process_id: str,
+        host: str,
+        port: int,
+    ) -> dict:
+        managed = self._owned_process(session_id, process_id)
+        if isinstance(managed, ToolResult):
+            return {
+                "owned": False,
+                "listener_pids": [],
+                "process_tree_pids": [],
+                "error_kind": "process_not_found",
+            }
+        tree_pids = self._process_tree_pids(managed.process.pid)
+        listener_pids: list[int] = []
+        try:
+            for connection in psutil.net_connections(kind="tcp"):
+                if connection.status != psutil.CONN_LISTEN or not connection.laddr:
+                    continue
+                if connection.laddr.port != port:
+                    continue
+                if host == "127.0.0.1" and connection.laddr.ip not in {"127.0.0.1", "0.0.0.0"}:
+                    continue
+                if host == "::1" and connection.laddr.ip not in {"::1", "::"}:
+                    continue
+                if connection.pid is not None:
+                    listener_pids.append(connection.pid)
+        except (psutil.AccessDenied, OSError) as exc:
+            return {
+                "owned": False,
+                "listener_pids": [],
+                "process_tree_pids": tree_pids,
+                "error_kind": "listener_inspection_failed",
+                "detail": str(exc),
+            }
+        listener_pids = sorted(set(listener_pids))
+        return {
+            "owned": bool(set(listener_pids) & set(tree_pids)),
+            "listener_pids": listener_pids,
+            "process_tree_pids": tree_pids,
+        }
 
     def get(self, session_id: str, process_id: str) -> ToolResult:
         managed = self._owned_process(session_id, process_id)
@@ -130,6 +215,8 @@ class ProcessManager:
         return {
             "process_id": managed.process_id,
             "pid": managed.process.pid,
+            "launcher_pid": managed.process.pid,
+            "process_tree_pids": self._process_tree_pids(managed.process.pid),
             "command": managed.command,
             "original_command": managed.original_command,
             "executed_command": managed.command,
@@ -139,7 +226,27 @@ class ProcessManager:
             "status": managed.status,
             "returncode": returncode,
             "logs": "".join(managed.logs),
+            "command_fingerprint": managed.command_fingerprint,
+            "declared_host": managed.declared_host,
+            "declared_port": managed.declared_port,
         }
+
+    @staticmethod
+    def _process_tree_pids(launcher_pid: int) -> list[int]:
+        pids = [launcher_pid]
+        try:
+            pids.extend(child.pid for child in psutil.Process(launcher_pid).children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        return sorted(set(pids))
+
+    @staticmethod
+    def _port_is_open(host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return True
+        except OSError:
+            return False
 
     @staticmethod
     def _capture_output(managed: ManagedProcess) -> None:

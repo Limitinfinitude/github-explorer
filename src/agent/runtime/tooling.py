@@ -35,15 +35,16 @@ class LocalAgentServices:
             workspaces,
             on_current_path_change=lambda session_id, path: memory.set_current_path(session_id, str(path)),
         )
+        processes = ProcessManager(workspaces)
         return cls(
             workspaces=workspaces,
             files=FileTools(workspaces),
             edits=EditEngine(workspaces),
             commands=commands,
-            processes=ProcessManager(workspaces),
+            processes=processes,
             projects=ProjectTools(workspaces, commands),
             verifier=Verifier(workspaces, commands),
-            network=NetworkTools(),
+            network=NetworkTools(processes),
             context=ContextEngine(workspaces),
         )
 
@@ -169,8 +170,12 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     add("verify_project", "运行项目测试、编译或构建并保留真实失败", {"path": path_property}, [], ToolRisk.PROCESS, verify)
     add("start_process", "启动后台服务并返回进程 ID", {
         "command": {"type": "string"}, "cwd": path_property,
+        "host": {"type": "string", "enum": ["127.0.0.1", "::1"]},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
     }, ["command"], ToolRisk.PROCESS,
-        lambda a: services.processes.start(session_id, a["command"], a.get("cwd", ".")), classify_command_risk)
+        lambda a: services.processes.start(
+            session_id, a["command"], a.get("cwd", "."), host=a.get("host"), port=a.get("port"),
+        ), classify_command_risk)
     add("get_process", "获取后台进程状态和日志", {"process_id": {"type": "string"}}, ["process_id"], ToolRisk.READ,
         lambda a: services.processes.get(session_id, a["process_id"]))
     add("list_processes", "列出当前会话后台进程", {}, [], ToolRisk.READ,
@@ -187,8 +192,10 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         "url": {"type": "string"},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
         "expected_text": {"type": "string", "description": "响应正文必须包含的版本标记"},
+        "process_id": {"type": "string", "description": "指定受管进程并核验端口归属"},
     }, ["url"], ToolRisk.READ,
         lambda a: services.network.wait_http(
             a["url"], a.get("timeout", 15), a.get("expected_text"),
+            session_id=session_id, process_id=a.get("process_id"),
         ))
     return registry
