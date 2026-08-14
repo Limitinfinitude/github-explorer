@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, PlugZap, Plus, Save, X } from 'lucide-react'
+import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Pencil, PlugZap, Plus, Save, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { modelProbeReadiness, probeStatusText } from '../../lib/modelProbe'
 import type { ModelDiscoveryResult, ProbeResult } from '../../lib/modelProbe'
@@ -22,6 +22,7 @@ const EMPTY_FORM: CustomModelInput = {
 
 export function SettingsView({ models, currentModel, onSelectModel, onModelCreated }: Props) {
   const [adding, setAdding] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -72,6 +73,7 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
 
   const closeEditor = () => {
     setAdding(false)
+    setEditingId(null)
     setShowKey(false)
     setError('')
     setForm(EMPTY_FORM)
@@ -82,6 +84,23 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
   }
 
   const readiness = modelProbeReadiness(form)
+
+  const editModel = (model: Model) => {
+    setEditingId(model.id)
+    setAdding(true)
+    setShowKey(false)
+    setError('')
+    setForm({
+      name: model.name,
+      model: model.model ?? model.id,
+      protocol: model.protocol ?? 'anthropic',
+      base_url: model.base_url ?? '',
+      api_key: '',
+    })
+    setLatencyResult(null)
+    setDiscoveryResult(null)
+    setConnectionResult(null)
+  }
 
   const runProbe = async (
     kind: 'latency' | 'discover' | 'connection',
@@ -105,11 +124,11 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
   })
 
   const getModels = () => runProbe('discover', async () => {
-    setDiscoveryResult(await api.discoverModels(form))
+    setDiscoveryResult(await api.discoverModels({ ...form, model_config_id: editingId ?? undefined }))
   })
 
   const testConnection = () => runProbe('connection', async () => {
-    setConnectionResult(await api.testModelConnection(form))
+    setConnectionResult(await api.testModelConnection({ ...form, model_config_id: editingId ?? undefined }))
   })
 
   const submit = async (event: React.FormEvent) => {
@@ -118,7 +137,7 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
     setSaving(true)
     setError('')
     try {
-      const result = await api.createModel(form)
+      const result = editingId ? await api.saveModel(editingId, form) : await api.createModel(form)
       await onModelCreated(result.model.id)
       closeEditor()
     } catch (reason) {
@@ -179,8 +198,8 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
         <form className="model-editor" onSubmit={submit}>
           <div className="model-editor__header">
             <div>
-              <strong>添加自定义模型</strong>
-              <span>保存后将立即同步到对话模型列表</span>
+              <strong>{editingId ? '修改自定义模型' : '添加自定义模型'}</strong>
+              <span>{editingId ? 'API Key 留空将保留原配置；保存后立即同步到对话模型列表' : '保存后将立即同步到对话模型列表'}</span>
             </div>
             <button type="button" className="model-editor__close" onClick={closeEditor} title="关闭" aria-label="关闭">
               <X size={15} />
@@ -252,7 +271,7 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
                   type={showKey ? 'text' : 'password'}
                   value={form.api_key}
                   onChange={event => update('api_key', event.target.value)}
-                  placeholder="可留空，用于无需鉴权的本地服务"
+                  placeholder={editingId ? '留空以保留当前密钥' : '可留空，用于无需鉴权的本地服务'}
                   autoComplete="new-password"
                 />
                 <button type="button" className="model-field-icon" onClick={() => setShowKey(value => !value)} title={showKey ? '隐藏密钥' : '显示密钥'} aria-label={showKey ? '隐藏密钥' : '显示密钥'}>
@@ -271,7 +290,7 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
           <div className="model-editor__actions">
             <button type="button" onClick={closeEditor}>取消</button>
             <button type="submit" className="is-primary" disabled={saving || !form.name.trim() || !form.model.trim()}>
-              <Save size={13} />{saving ? '保存中...' : '保存并使用'}
+              <Save size={13} />{saving ? '保存中...' : editingId ? '保存修改' : '保存并使用'}
             </button>
           </div>
         </form>
@@ -283,7 +302,8 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
       </div>
       <div className="model-list">
         {models.map(model => (
-          <button key={model.id} type="button" onClick={() => onSelectModel(model.id)} className={`model-row ${model.id === currentModel ? 'is-active' : ''}`}>
+          <div key={model.id} className={`model-row ${model.id === currentModel ? 'is-active' : ''}`}>
+            <button type="button" className="model-row__select" onClick={() => onSelectModel(model.id)} aria-label={`使用 ${model.name}`}>
             <span className="model-row__icon" style={{ background: model.color }}>{model.icon}</span>
             <span className="model-row__body">
               <span className="model-row__title">
@@ -297,7 +317,13 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
               </span>
             </span>
             {model.id === currentModel && <Check className="model-row__check" size={16} />}
-          </button>
+            </button>
+            {model.tags?.includes('Environment') !== true && (
+              <button type="button" className="model-row__edit" onClick={() => editModel(model)} title={`修改 ${model.name}`} aria-label={`修改 ${model.name}`}>
+                <Pencil size={14} />
+              </button>
+            )}
+          </div>
         ))}
       </div>
     </div>

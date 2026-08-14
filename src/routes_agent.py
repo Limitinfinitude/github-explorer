@@ -65,6 +65,7 @@ _fallback_workspace = Path(__file__).resolve().parent.parent / "cloned_repos"
 
 _local_agent_services = None
 _local_agent_runtime = None
+_agent_task_supervisor = None
 
 
 def get_local_agent_services():
@@ -93,6 +94,16 @@ def get_local_agent_runtime():
             context_engine=services.context,
         )
     return _local_agent_runtime
+
+
+def get_agent_task_supervisor():
+    global _agent_task_supervisor
+    if _agent_task_supervisor is None:
+        from agent.memory import memory
+        from agent.runtime.supervisor import AgentTaskSupervisor
+
+        _agent_task_supervisor = AgentTaskSupervisor(get_local_agent_runtime(), memory)
+    return _agent_task_supervisor
 
 
 def resolve_agent_workspace(session_id: str, requested_path: str | None = None):
@@ -192,7 +203,7 @@ async def local_agent_chat_stream(request: LocalChatRequest):
             repo = request.repo
 
             # 加载对话历史
-            history = memory.get_history(session_id, limit=10)
+            history = memory.get_agent_chat_history(session_id, limit=10)
             messages = []
             for h in history[-6:]:
                 messages.append({"role": h["role"], "content": h["content"]})
@@ -516,6 +527,53 @@ async def local_agent_chat_stream(request: LocalChatRequest):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@router_agent.post("/api/agent/tasks/start", status_code=202)
+async def start_agent_task(request: LocalChatRequest):
+    from agent.llm import get_model, get_protocol
+    from agent.memory import memory
+
+    try:
+        workspace, _ = require_agent_workspace(request.session_id, request.workspace)
+        history = memory.get_agent_chat_history(request.session_id, limit=10)
+        task_id = get_agent_task_supervisor().start(
+            request.session_id,
+            request.message,
+            history=[{"role": item["role"], "content": item["content"]} for item in history[-6:]],
+            model_context={
+                "id": get_model(),
+                "protocol": get_protocol(),
+                "base_url": os.environ.get("LLM_BASE_URL", ""),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "task_id": task_id,
+        "session_id": request.session_id,
+        "workspace": str(workspace.root),
+        "status": "pending",
+    }
+
+
+@router_agent.get("/api/agent/tasks/{task_id}/events")
+async def stream_agent_task_events(task_id: str, after_sequence: int = 0):
+    from agent.memory import memory
+
+    if memory.get_agent_task(task_id) is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    async def event_generator():
+        async for event in get_agent_task_supervisor().subscribe(
+            task_id,
+            after_sequence=after_sequence,
+        ):
+            yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 # 项目环境配置
 @router_agent.post("/api/agent/setup")
 async def agent_setup(request: LocalChatRequest):
@@ -728,6 +786,52 @@ async def get_project_evidence(project_id: str):
     )
 
 
+@router_agent.post("/api/projects/{project_id}/actions/{action}", status_code=202)
+async def start_project_action(project_id: str, action: str):
+    from agent.llm import get_model, get_protocol
+    from agent.memory import memory
+    from agent.runtime.project_projection import (
+        project_action_prompt,
+        project_session_id_for_workspace,
+    )
+
+    task = _resolve_project_task(memory, project_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    workspace_root = str(task.get("workspace_root") or "").strip()
+    if not workspace_root or not Path(workspace_root).is_dir():
+        raise HTTPException(status_code=400, detail="项目工作区不存在")
+    try:
+        prompt = project_action_prompt(action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    session_id = project_session_id_for_workspace(workspace_root)
+    workspace, _ = resolve_agent_workspace(session_id, workspace_root)
+    history = memory.get_agent_chat_history(session_id, limit=10)
+    try:
+        task_id = get_agent_task_supervisor().start(
+            session_id,
+            prompt,
+            history=[{"role": item["role"], "content": item["content"]} for item in history[-6:]],
+            model_context={
+                "id": get_model(),
+                "protocol": get_protocol(),
+                "base_url": os.environ.get("LLM_BASE_URL", ""),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "action": action,
+        "task_id": task_id,
+        "session_id": session_id,
+        "workspace": str(workspace.root),
+        "status": "pending",
+    }
+
+
 @router_agent.get("/api/agent/memory/search")
 async def search_agent_memory(
     workspace: str,
@@ -813,7 +917,7 @@ async def cancel_agent_task(task_id: str, request: CancelTaskRequest):
 async def get_active_agent_task(session_id: str):
     from agent.memory import memory
 
-    task = memory.get_latest_agent_task(session_id, status="waiting_approval")
+    task = memory.get_latest_nonterminal_agent_task(session_id)
     if task is None:
         return {"task": None, "activity": {"events": [], "tool_runs": [], "changesets": []}}
     return {"task": task, "activity": memory.get_agent_task_activity(task["task_id"])}

@@ -12,6 +12,28 @@ from .metrics import calculate_task_metrics
 
 
 _TERMINAL_FAILURES = {"failed", "blocked", "cancelled", "interrupted", "incomplete"}
+_PROJECT_ACTION_PROMPTS = {
+    "inspect": (
+        "对当前项目执行项目体检：识别技术栈、入口、依赖、环境要求和可运行性风险；"
+        "读取必要文件，给出有证据的结论和下一步，不修改业务代码。"
+    ),
+    "prepare": (
+        "为当前项目准备本地开发环境：先识别项目类型，再按项目约定创建或复用项目内环境、"
+        "安装依赖并验证关键命令；失败时说明原因并调整方案。"
+    ),
+    "start": (
+        "启动当前项目并验证服务：识别正确入口，使用受管后台进程启动，检查进程、端口和 HTTP；"
+        "最终给出可访问地址、进程状态和未完成事项。"
+    ),
+    "guide": (
+        "生成当前项目导读：基于真实源码说明用途、技术栈、目录、核心模块、启动链路和适合继续学习的入口；"
+        "引用实际文件，不修改项目。"
+    ),
+    "verify": (
+        "运行当前项目的验证：识别已有测试、构建或静态检查命令，执行最相关的验证并解释失败；"
+        "不要把未通过的验证描述为完成。"
+    ),
+}
 
 
 def _normalize_workspace_root(workspace_root: str) -> str:
@@ -25,6 +47,17 @@ def project_id_for_workspace(workspace_root: str) -> str:
     normalized = _normalize_workspace_root(workspace_root)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"project-{digest}"
+
+
+def project_session_id_for_workspace(workspace_root: str) -> str:
+    return project_id_for_workspace(workspace_root).replace("project-", "project-session-", 1)
+
+
+def project_action_prompt(action: str) -> str:
+    try:
+        return _PROJECT_ACTION_PROMPTS[action]
+    except KeyError as exc:
+        raise ValueError(f"不支持的项目动作: {action}") from exc
 
 
 def build_project_summary(tasks: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -57,17 +90,27 @@ def build_project_summary(tasks: list[Mapping[str, Any]]) -> list[dict[str, Any]
     )
 
 
-def _stage_for_task(task: Mapping[str, Any] | None) -> str:
+def _stage_for_task(
+    task: Mapping[str, Any] | None,
+    activity: Mapping[str, Any],
+) -> str:
     if not task:
         return "intake"
-    text = str(task.get("user_message") or "").lower()
-    if any(word in text for word in ("启动", "运行", "服务", "端口", "start", "run")):
+    summary = task.get("summary") if isinstance(task.get("summary"), Mapping) else {}
+    processes = summary.get("processes") if isinstance(summary.get("processes"), list) else []
+    verification = summary.get("verification") if isinstance(summary.get("verification"), list) else []
+    changed_files = summary.get("changed_files") if isinstance(summary.get("changed_files"), list) else []
+    changesets = activity.get("changesets") if isinstance(activity.get("changesets"), list) else []
+    successful_tools = {
+        str(name) for name in summary.get("successful_tools", [])
+    } if isinstance(summary.get("successful_tools"), list) else set()
+    if processes:
         return "run"
-    if any(word in text for word in ("测试", "test", "验证", "verify")):
+    if verification:
         return "verify"
-    if any(word in text for word in ("修改", "实现", "修复", "编辑", "改")):
+    if changed_files or changesets or successful_tools.intersection({"edit_files", "create_directory"}):
         return "experiment"
-    if any(word in text for word in ("分析", "架构", "看懂", "解释", "学习")):
+    if successful_tools.intersection({"read_file", "search_text", "repo_map"}):
         return "understand"
     return "inspect"
 
@@ -106,16 +149,33 @@ def build_project_overview(*, project_id: str, workspace: Mapping[str, Any] | No
                     for path in change.get("files", [])})
     verification = summary.get("verification") if isinstance(summary.get("verification"), list) else []
     status = _stage_status(task)
-    stage = _stage_for_task(task)
+    stage = _stage_for_task(task, activity)
     failed = status in _TERMINAL_FAILURES or any(not item.get("success", False) for item in verification if isinstance(item, dict))
-    next_action = "查看项目体检" if not task else (
-        "查看失败原因并重试" if failed else
-        "展开开发者证据" if status == "completed" else
-        "继续当前任务"
+    if not task:
+        next_action = "运行项目体检"
+    elif status == "waiting_approval":
+        next_action = "打开项目对话处理确认"
+    elif status == "running":
+        next_action = "打开项目对话查看进度"
+    elif failed:
+        next_action = "查看失败原因并重试"
+    elif files and not verification:
+        next_action = "运行验证"
+    elif not activity.get("tool_runs"):
+        next_action = "运行项目体检"
+    elif verification and not any(process.get("status") == "running" for process in processes if isinstance(process, Mapping)):
+        next_action = "启动并验证"
+    else:
+        next_action = "打开项目对话继续"
+    root = str(
+        (workspace or {}).get("root")
+        or (workspace or {}).get("workspace")
+        or task.get("workspace_root")
+        or ""
     )
-    root = str((workspace or {}).get("root") or (workspace or {}).get("workspace") or "")
     return {
         "project_id": project_id,
+        "project_session_id": project_session_id_for_workspace(root),
         "workspace_root": root,
         "current_path": str((workspace or {}).get("current_path") or root),
         "stage": stage,

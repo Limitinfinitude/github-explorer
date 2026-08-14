@@ -4,14 +4,7 @@ import { WorkChain } from './WorkChain'
 import { CmdBlock } from './CmdBlock'
 import { AgentStatusPanel } from './AgentStatusPanel'
 import { displayResponseContent } from '../../lib/responseDisplay'
-
-function relativeTime(ts: number): string {
-  const diff = Math.round((Date.now() - ts) / 1000)
-  if (diff < 10) return '刚刚'
-  if (diff < 60) return `${diff}秒前`
-  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
-  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
+import { relativeMessageTime } from '../../lib/time'
 
 export function MessageItem({ msg }: { msg: Message }) {
   const contentRef = useRef<HTMLDivElement>(null)
@@ -60,7 +53,7 @@ export function MessageItem({ msg }: { msg: Message }) {
           {isUser ? 'U' : 'E'}
         </div>
         <span className="text-[13px] font-semibold text-zinc-200">{isUser ? '你' : 'Explorer'}</span>
-        <span className="text-[11px] text-zinc-500">{relativeTime(msg.id ? parseInt(msg.id.split('-')[1] || '0') : Date.now())}</span>
+        <span className="text-[11px] text-zinc-500">{relativeMessageTime(msg.time)}</span>
       </div>
 
       {isUser ? (

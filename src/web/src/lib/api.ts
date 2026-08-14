@@ -4,7 +4,7 @@ import type {
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
-import { normalizeProcessStatus } from './processState'
+import { normalizeProcessStatus } from './processState.ts'
 
 async function* readSSE(res: Response): AsyncGenerator<SSEEvent> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -26,6 +26,42 @@ async function* readSSE(res: Response): AsyncGenerator<SSEEvent> {
 }
 
 export const api = {
+  async startAgentTask(message: string, sessionId: string, workspace?: string) {
+    const res = await fetch('/api/agent/tasks/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id: sessionId, agent_mode: true, workspace }),
+    })
+    const data = await res.json().catch(() => ({})) as {
+      task_id?: string
+      session_id?: string
+      workspace?: string
+      status?: string
+      detail?: string
+    }
+    if (!res.ok || !data.task_id) {
+      throw new Error(data.detail || `启动任务失败：HTTP ${res.status}`)
+    }
+    return data as {
+      task_id: string
+      session_id: string
+      workspace: string
+      status: string
+    }
+  },
+
+  async *taskEvents(
+    taskId: string,
+    signal: AbortSignal,
+    afterSequence = 0,
+  ): AsyncGenerator<SSEEvent> {
+    const res = await fetch(
+      `/api/agent/tasks/${encodeURIComponent(taskId)}/events?after_sequence=${Math.max(0, afterSequence)}`,
+      { signal },
+    )
+    yield* readSSE(res)
+  },
+
   async *chatStream(
     message: string,
     repo: string | undefined,
@@ -121,6 +157,33 @@ export const api = {
     const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/evidence`)
     if (!res.ok) throw new Error(`读取项目证据失败：HTTP ${res.status}`)
     return res.json()
+  },
+
+  async startProjectAction(projectId: string, action: string) {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/actions/${encodeURIComponent(action)}`,
+      { method: 'POST' },
+    )
+    const data = await res.json().catch(() => ({})) as {
+      project_id?: string
+      action?: string
+      task_id?: string
+      session_id?: string
+      workspace?: string
+      status?: string
+      detail?: string
+    }
+    if (!res.ok || !data.task_id || !data.session_id) {
+      throw new Error(data.detail || `启动项目动作失败：HTTP ${res.status}`)
+    }
+    return data as {
+      project_id: string
+      action: string
+      task_id: string
+      session_id: string
+      workspace: string
+      status: string
+    }
   },
 
   async getActiveTask(sessionId: string) {
@@ -246,12 +309,17 @@ export const api = {
     })
   },
 
-  async saveModel(modelId: string, config: Record<string, string>) {
-    await fetch(`/api/settings/models/${modelId}`, {
+  async saveModel(modelId: string, config: CustomModelInput) {
+    const res = await fetch(`/api/settings/models/${modelId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     })
+    const data = await res.json()
+    if (!res.ok || !data.ok) {
+      throw new Error(data.detail ?? data.error ?? `保存失败：HTTP ${res.status}`)
+    }
+    return data as { ok: true; model: Model }
   },
 
   async createModel(config: CustomModelInput) {
@@ -277,7 +345,7 @@ export const api = {
     return res.json()
   },
 
-  async discoverModels(config: Pick<CustomModelInput, 'protocol' | 'base_url' | 'api_key'>): Promise<ModelDiscoveryResult> {
+  async discoverModels(config: Pick<CustomModelInput, 'protocol' | 'base_url' | 'api_key'> & { model_config_id?: string }): Promise<ModelDiscoveryResult> {
     const res = await fetch('/api/settings/models/discover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -287,7 +355,7 @@ export const api = {
     return res.json()
   },
 
-  async testModelConnection(config: Pick<CustomModelInput, 'protocol' | 'base_url' | 'api_key' | 'model'>): Promise<ProbeResult> {
+  async testModelConnection(config: Pick<CustomModelInput, 'protocol' | 'base_url' | 'api_key' | 'model'> & { model_config_id?: string }): Promise<ProbeResult> {
     const res = await fetch('/api/settings/models/test-connection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

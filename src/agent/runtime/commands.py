@@ -23,6 +23,7 @@ class ShellCommandPlan:
 
 _BARE_CURL_RE = re.compile(r"(?<![\w.])curl(?=\s)", re.IGNORECASE)
 _BASH_COMMAND_RE = re.compile(
+    r"^\s*(?:bash|sh)(?:\.exe)?\s+-c\b|"
     r"(^|[;&|]\s*)(test\s+-[def]|for\s+\w+\s+in\b)|"
     r"\bdo\s+.*\bdone\b|\bfind\s+[^\r\n;]+\s+-maxdepth\b|/(?:c|d|e)/Program Files",
     re.IGNORECASE,

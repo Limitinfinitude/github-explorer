@@ -10,7 +10,9 @@ _ENGLISH_META_RE = re.compile(
 
 
 def _completion_text(text: str, summary: dict | None = None) -> str:
-    cleaned = text.strip() or "任务已完成。"
+    cleaned = text.strip()
+    if not cleaned:
+        return "模型未返回最终说明。" + _fact_summary(summary or {})
     matches = list(_SECTION_RE.finditer(cleaned))
     if matches:
         first = matches[0]
@@ -68,6 +70,7 @@ def _fact_summary(summary: dict) -> str:
     files = list(dict.fromkeys(summary.get("changed_files", [])))
     checks = [item for item in summary.get("verification", []) if isinstance(item, dict)]
     processes = summary.get("processes", [])
+    successful_tools = list(dict.fromkeys(summary.get("successful_tools", [])))
     parts = []
     if files:
         parts.append(f"已修改 {len(files)} 个文件")
@@ -78,7 +81,9 @@ def _fact_summary(summary: dict) -> str:
     if processes:
         running = sum(process.get("status") == "running" for process in processes)
         parts.append(f"{running} 个后台进程运行中")
-    return "，".join(parts) + "。" if parts else "任务未产生可确认的执行结果。"
+    if successful_tools:
+        parts.append(f"已成功执行 {len(successful_tools)} 个操作")
+    return "，".join(parts) + "。" if parts else "没有可确认的执行事实。"
 
 
 def _acceptance_summary(items: list[dict]) -> str:

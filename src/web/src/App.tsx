@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { Menu } from 'lucide-react'
 import { Sidebar } from './components/layout/Sidebar'
 import { ChatPanel } from './components/chat/ChatPanel'
@@ -15,7 +15,7 @@ const DEFAULT_MODELS: Model[] = [
 ]
 
 export default function App() {
-  const { chats, activeChat, activeChatId, setActiveChatId, newChat, deleteChat, pushMessage, hydrateChat } = useChats()
+  const { chats, activeChat, activeChatId, setActiveChatId, newChat, openSession, deleteChat, pushMessage, hydrateChat } = useChats()
   const [models, setModels] = useState<Model[]>(DEFAULT_MODELS)
   const [currentModel, setCurrentModel] = useState('claude-sonnet-5')
   const [agentMode] = useState(true)
@@ -44,21 +44,22 @@ export default function App() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hydratedSessions = useRef(new Set<string>())
   useEffect(() => {
-    chats.forEach(chat => {
-      if (hydratedSessions.current.has(chat.sessionId)) return
-      hydratedSessions.current.add(chat.sessionId)
-      void hydrateChat(chat.id, chat.sessionId).catch(() => {
-        // Keep the local cache when the history endpoint is temporarily unavailable.
-      })
+    if (activeView !== 'chat' || !activeChat) return
+    void hydrateChat(activeChat.id, activeChat.sessionId).catch(() => {
+      // Keep the local cache when the canonical history endpoint is temporarily unavailable.
     })
-  }, [chats, hydrateChat])
+  }, [activeView, activeChat?.id, activeChat?.sessionId, hydrateChat])
 
   const handleNewChat = useCallback(() => {
     newChat()
     setActiveView('chat')
   }, [newChat])
+
+  const handleOpenProjectConversation = useCallback((sessionId: string, title: string, userMessage?: string) => {
+    openSession(sessionId, title, userMessage)
+    setActiveView('chat')
+  }, [openSession])
 
   const handleSelectModel = useCallback((id: string) => {
     setCurrentModel(id)
@@ -106,7 +107,7 @@ export default function App() {
             onOpenMenu={() => setSidebarOpen(true)}
           />
         ) : activeView === 'project' ? (
-          <ProjectWorkspaceView />
+          <ProjectWorkspaceView onOpenProjectConversation={handleOpenProjectConversation} />
         ) : activeView === 'explore' ? (
           <ExploreView />
         ) : activeView === 'activity' ? (

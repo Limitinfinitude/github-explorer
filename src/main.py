@@ -219,6 +219,9 @@ class SettingsSelectRequest(BaseModel):
 
 
 class ModelConfigUpdate(BaseModel):
+    name: Optional[str] = None
+    model: Optional[str] = None
+    protocol: Optional[Literal["anthropic", "openai"]] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
 
@@ -239,6 +242,7 @@ class ModelProbeRequest(BaseModel):
     protocol: Literal["anthropic", "openai"]
     base_url: str
     api_key: str = ""
+    model_config_id: Optional[str] = None
 
 
 class ModelConnectionRequest(ModelProbeRequest):
@@ -298,20 +302,35 @@ async def measure_model_latency(s: ModelLatencyRequest):
 @app.post("/api/settings/models/discover")
 async def discover_model_ids(s: ModelProbeRequest):
     from agent.model_probe import discover_models
-    return await discover_models(s.protocol, s.base_url, s.api_key)
+    saved_key = MODEL_CONFIGS.get(s.model_config_id or "", {}).get("api_key", "")
+    return await discover_models(s.protocol, s.base_url, s.api_key or saved_key)
 
 
 @app.post("/api/settings/models/test-connection")
 async def test_model_connection(s: ModelConnectionRequest):
     from agent.model_probe import test_connection
-    return await test_connection(s.protocol, s.base_url, s.api_key, s.model)
+    saved_key = MODEL_CONFIGS.get(s.model_config_id or "", {}).get("api_key", "")
+    return await test_connection(s.protocol, s.base_url, s.api_key or saved_key, s.model)
 
 
 @app.post("/api/settings/models/{model_id}")
 async def update_model_config(model_id: str, s: ModelConfigUpdate):
     if model_id not in MODEL_CONFIGS:
-        return {"ok": False, "error": "未知模型"}
-    if s.api_key is not None and not s.api_key.startswith("*"):
+        raise HTTPException(status_code=404, detail="未知模型")
+    if MODEL_CONFIGS[model_id].get("source") == "environment":
+        raise HTTPException(status_code=403, detail="环境变量模型不可编辑")
+    name = s.name.strip() if s.name is not None else MODEL_CONFIGS[model_id]["name"]
+    provider_model = s.model.strip() if s.model is not None else MODEL_CONFIGS[model_id].get("model", model_id)
+    if not name or not provider_model:
+        raise HTTPException(status_code=422, detail="模型名称和模型 ID 不能为空")
+    MODEL_CONFIGS[model_id]["name"] = name
+    MODEL_CONFIGS[model_id]["model"] = provider_model
+    MODEL_CONFIGS[model_id]["icon"] = name[:1].upper()
+    if s.protocol is not None:
+        MODEL_CONFIGS[model_id]["protocol"] = s.protocol
+        MODEL_CONFIGS[model_id]["color"] = "#238636" if s.protocol == "openai" else "#d97757"
+        MODEL_CONFIGS[model_id]["tags"] = ["自定义", "OpenAI Compatible" if s.protocol == "openai" else "Anthropic"]
+    if s.api_key is not None and s.api_key.strip() and not s.api_key.startswith("*"):
         MODEL_CONFIGS[model_id]["api_key"] = s.api_key.strip()
     if s.base_url is not None:
         MODEL_CONFIGS[model_id]["base_url"] = s.base_url.strip()
@@ -319,7 +338,7 @@ async def update_model_config(model_id: str, s: ModelConfigUpdate):
     if model_id == ACTIVE_MODEL_ID:
         _apply_model(model_id)
         _save_active_model_id(model_id)
-    return {"ok": True}
+    return {"ok": True, "model": _public_model(MODEL_CONFIGS[model_id])}
 
 
 @app.post("/api/settings/models")

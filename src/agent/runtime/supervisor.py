@@ -1,0 +1,139 @@
+import asyncio
+import uuid
+from collections.abc import AsyncIterator
+from typing import Any
+
+
+_TERMINAL_STATUSES = {
+    "completed", "incomplete", "failed", "blocked", "cancelled", "interrupted",
+}
+_TERMINAL_EVENT_TYPES = {
+    "task_completed": "completed",
+    "task_failed": "failed",
+    "task_waiting_approval": "waiting_approval",
+    "task_cancelled": "cancelled",
+    "task_finished": None,
+}
+
+
+class AgentTaskSupervisor:
+    """Own Agent coroutines independently from HTTP event subscribers."""
+
+    def __init__(self, runtime: Any, task_store: Any, *, poll_interval: float = 0.1) -> None:
+        self.runtime = runtime
+        self.task_store = task_store
+        self.poll_interval = poll_interval
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    def start(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        history: list[dict] | None = None,
+        model_context: dict | None = None,
+        task_id: str | None = None,
+    ) -> str:
+        active = self.task_store.get_latest_nonterminal_agent_task(session_id)
+        if active is not None:
+            raise ValueError(f"当前会话已有任务正在运行: {active['task_id']}")
+
+        task_id = task_id or uuid.uuid4().hex
+        self.runtime.register_task(session_id, task_id)
+        worker = asyncio.create_task(self._consume(
+            session_id,
+            message,
+            history=history or [],
+            task_id=task_id,
+            model_context=model_context or {},
+        ))
+        self._tasks[task_id] = worker
+        worker.add_done_callback(lambda _: self._tasks.pop(task_id, None))
+        return task_id
+
+    async def wait(self, task_id: str) -> None:
+        worker = self._tasks.get(task_id)
+        if worker is not None:
+            await asyncio.shield(worker)
+
+    async def subscribe(
+        self,
+        task_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[dict]:
+        cursor = max(0, int(after_sequence))
+        while True:
+            task = self.task_store.get_agent_task(task_id)
+            if task is None:
+                raise KeyError(f"任务不存在: {task_id}")
+
+            events = self.task_store.get_agent_events(task_id)
+            for stored in events:
+                sequence = int(stored["sequence"])
+                if sequence <= cursor:
+                    continue
+                cursor = sequence
+                event = self._project_event(stored, task)
+                yield event
+                if event["type"] == "done":
+                    return
+
+            if task.get("status") in _TERMINAL_STATUSES:
+                yield {
+                    "type": "done",
+                    "task_id": task_id,
+                    "session_id": task.get("session_id", ""),
+                    "sequence": cursor + 1,
+                    "content": task.get("final_text", ""),
+                    "status": task.get("status"),
+                }
+                return
+            await asyncio.sleep(self.poll_interval)
+
+    async def _consume(self, session_id: str, message: str, **kwargs) -> None:
+        task_id = kwargs["task_id"]
+        try:
+            async for _ in self.runtime.run(session_id, message, **kwargs):
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            state = self.task_store.get_agent_task(task_id) or {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_message": message,
+                "summary": {},
+            }
+            if state.get("status") not in _TERMINAL_STATUSES:
+                state["status"] = "failed"
+                state["final_text"] = f"Agent 后台任务失败（{type(exc).__name__}）：{str(exc).strip() or '未提供错误信息'}"
+                self.task_store.save_agent_task(state)
+                self.task_store.record_agent_event({
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "type": "task_failed",
+                    "content": state["final_text"],
+                    "status": "failed",
+                })
+
+    @staticmethod
+    def _project_event(stored: dict, task: dict) -> dict:
+        event_type = stored["type"]
+        payload = stored.get("payload") or {}
+        projected = {
+            "task_id": stored["task_id"],
+            "session_id": stored.get("session_id", ""),
+            "sequence": stored["sequence"],
+            **payload,
+            "type": event_type,
+        }
+        if event_type in _TERMINAL_EVENT_TYPES:
+            projected["type"] = "done"
+            projected["status"] = (
+                _TERMINAL_EVENT_TYPES[event_type]
+                or payload.get("status")
+                or task.get("status")
+            )
+            projected["content"] = payload.get("content") or task.get("final_text", "")
+        return projected

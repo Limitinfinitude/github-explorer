@@ -6,6 +6,7 @@ import type {
   AgentAcceptanceItem,
 } from '../types'
 import { normalizeProcessStatus, reconcileProcesses } from '../lib/processState'
+import { isRecoverableTaskStatus } from '../lib/taskRecovery'
 
 export type StreamState = {
   isGenerating: boolean
@@ -30,6 +31,13 @@ type DoneHandler = (
   cmdBlocks: CmdBlockData[],
   agentRun: AgentRunSummary,
 ) => void
+
+type StreamConsumer = (
+  stream: AsyncGenerator<SSEEvent>,
+  ctrl: AbortController,
+  reset: boolean,
+  seedTaskId?: string | null,
+) => Promise<void>
 
 function initialState(workspace: string): StreamState {
   return {
@@ -72,6 +80,8 @@ export function useChatStream(
   onError: (msg: string) => void,
 ) {
   const abortRef = useRef<AbortController | null>(null)
+  const consumeRef = useRef<StreamConsumer | null>(null)
+  const lastSequenceRef = useRef(0)
   const [state, setState] = useState<StreamState>(() => initialState(workspace))
   const stateRef = useRef(state)
 
@@ -90,9 +100,11 @@ export function useChatStream(
     if (!agentMode) return
     let active = true
     api.getActiveTask(sessionId).then(({ task, activity }) => {
-      if (!active || !task || task.status !== 'waiting_approval' || !task.active_batch) return
-      const tool = task.active_batch.tool_uses[task.active_batch.next_index]
-      if (!tool) return
+      if (!active || !task || !isRecoverableTaskStatus(task.status)) return
+      lastSequenceRef.current = activity.events.reduce(
+        (highest, event) => Math.max(highest, event.sequence),
+        0,
+      )
       const verification = task.summary?.verification ?? []
       const processes = (task.summary?.processes ?? []).map(process => ({
         processId: String(process.process_id),
@@ -104,6 +116,8 @@ export function useChatStream(
       commit(current => ({
         ...current,
         taskId: task.task_id,
+        status: task.status as AgentRunSummary['status'],
+        isGenerating: task.status !== 'waiting_approval',
         plan: task.plan ?? [],
         repoMap: task.repo_map ?? '',
         fileChanges: activity.changesets.map(change => ({ files: change.files, diff: change.diff })),
@@ -112,15 +126,36 @@ export function useChatStream(
           : null,
         acceptance: task.summary?.acceptance ?? [],
         processes,
-        approval: {
-          taskId: task.task_id,
-          toolName: tool.name,
-          args: tool.input,
-          reason: '该任务在服务重启或页面刷新前等待确认',
-        },
+        approval: null,
       }))
+      if (task.status === 'waiting_approval' && task.active_batch) {
+        const tool = task.active_batch.tool_uses[task.active_batch.next_index]
+        if (!tool) return
+        commit(current => ({
+          ...current,
+          isGenerating: false,
+          approval: {
+            taskId: task.task_id,
+            toolName: tool.name,
+            args: tool.input,
+            reason: '该任务正在等待操作确认',
+          },
+        }))
+        return
+      }
+      const ctrl = new AbortController()
+      abortRef.current = ctrl
+      void consumeRef.current?.(
+        api.taskEvents(task.task_id, ctrl.signal, 0),
+        ctrl,
+        true,
+        task.task_id,
+      )
     }).catch(() => {})
-    return () => { active = false }
+    return () => {
+      active = false
+      abortRef.current?.abort()
+    }
   }, [agentMode, sessionId, commit])
 
   useEffect(() => {
@@ -145,14 +180,21 @@ export function useChatStream(
     stream: AsyncGenerator<SSEEvent>,
     ctrl: AbortController,
     reset: boolean,
+    seedTaskId: string | null = null,
   ) => {
     const steps = reset ? [] : [...stateRef.current.steps]
     const cmdBlocks = reset ? [] : [...stateRef.current.cmdBlocks]
     let activeCmdId: string | null = null
     let fullContent = ''
+    let terminalSeen = false
 
     if (reset) {
-      commit(current => ({ ...initialState(workspace), workspace: current.workspace || workspace, isGenerating: true }))
+      commit(current => ({
+        ...initialState(workspace),
+        workspace: current.workspace || workspace,
+        taskId: seedTaskId,
+        isGenerating: true,
+      }))
     } else {
       commit(current => ({ ...current, isGenerating: true, approval: null, partialContent: '' }))
     }
@@ -161,6 +203,9 @@ export function useChatStream(
       for await (const event of stream) {
         if (ctrl.signal.aborted) return
         const e = event as SSEEvent
+        if ('sequence' in e && typeof e.sequence === 'number') {
+          lastSequenceRef.current = Math.max(lastSequenceRef.current, e.sequence)
+        }
         if (e.type === 'workspace') {
           commit(current => ({ ...current, workspace: e.path, taskId: e.task_id ?? current.taskId }))
         } else if (e.type === 'plan') {
@@ -276,8 +321,14 @@ export function useChatStream(
           commit(current => ({ ...current, partialContent: fullContent }))
           onToken(e.content)
         } else if (e.type === 'done') {
+          terminalSeen = true
           if (e.status === 'waiting_approval') {
-            commit(current => ({ ...current, isGenerating: false, partialContent: '' }))
+            commit(current => ({
+              ...current,
+              status: 'waiting_approval',
+              isGenerating: false,
+              partialContent: '',
+            }))
             return
           }
           fullContent = e.content || fullContent
@@ -292,23 +343,53 @@ export function useChatStream(
           onDone(fullContent, steps, cmdBlocks, summaryOf(completed))
           return
         } else if (e.type === 'error') {
-          commit(current => ({ ...current, isGenerating: false }))
-          onError(e.content)
-          return
+          steps.push({ icon: 'activity', text: e.content, done: true, status: 'failed' })
+          commit(current => ({ ...current, steps: [...steps] }))
         }
+      }
+      if (!terminalSeen && !ctrl.signal.aborted) {
+        commit(current => ({ ...current, isGenerating: false }))
+        onError('任务事件连接已结束；任务仍由后台管理，重新进入会话可恢复进度。')
       }
     } catch (err: unknown) {
       commit(current => ({ ...current, isGenerating: false }))
       if (err instanceof Error && err.name !== 'AbortError') onError(err.message)
     }
   }, [commit, onDone, onError, onToken, workspace])
+  consumeRef.current = consume
 
-  const send = useCallback((message: string, repo?: string) => {
+  const send = useCallback((message: string) => {
     abortRef.current?.abort()
     const ctrl = new AbortController()
     abortRef.current = ctrl
-    void consume(api.chatStream(message, repo, ctrl.signal, sessionId, agentMode, workspace || undefined), ctrl, true)
-  }, [sessionId, agentMode, workspace, consume])
+    lastSequenceRef.current = 0
+    commit(current => ({
+      ...initialState(workspace),
+      workspace: current.workspace || workspace,
+      isGenerating: true,
+    }))
+    void api.startAgentTask(message, sessionId, workspace || undefined)
+      .then(started => {
+        if (ctrl.signal.aborted) return
+        commit(current => ({
+          ...current,
+          taskId: started.task_id,
+          workspace: started.workspace || current.workspace,
+          status: 'pending',
+        }))
+        return consume(
+          api.taskEvents(started.task_id, ctrl.signal, 0),
+          ctrl,
+          false,
+          started.task_id,
+        )
+      })
+      .catch(err => {
+        if (ctrl.signal.aborted) return
+        commit(current => ({ ...current, isGenerating: false }))
+        onError(err instanceof Error ? err.message : '无法启动任务')
+      })
+  }, [sessionId, workspace, consume, commit, onError])
 
   const stop = useCallback(() => {
     const taskId = stateRef.current.taskId

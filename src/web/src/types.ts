@@ -119,7 +119,7 @@ export interface AgentAcceptanceItem {
 
 export interface AgentRunSummary {
   taskId: string | null
-  status: 'completed' | 'incomplete' | 'failed' | 'blocked' | 'cancelled' | null
+  status: 'pending' | 'queued' | 'running' | 'waiting_approval' | 'completed' | 'incomplete' | 'failed' | 'blocked' | 'cancelled' | 'interrupted' | null
   plan: string[]
   fileChanges: AgentFileChange[]
   verification: AgentVerification | null
@@ -200,6 +200,7 @@ export interface AgentTraceDetail {
 
 export interface ProjectOverview {
   project_id: string
+  project_session_id: string
   workspace_root: string
   current_path: string
   stage: 'intake' | 'inspect' | 'run' | 'understand' | 'experiment' | 'verify'

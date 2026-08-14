@@ -56,6 +56,15 @@ _CONTINUE_TASK_RE = re.compile(
     r"按(?:照)?\s*(?:todo|计划)\s*继续(?:进行|推进)?(?:吧)?)\s*[。.!！]*\s*$",
     re.IGNORECASE,
 )
+_STATUS_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:失败|成功|完成)了?吗(?:[？?，,、 ]*(?:原因|结果|情况)(?:是)?什么?)?|"
+    r"(?:完成|做|处理)(?:得|的)?(?:如何|怎么样)|"
+    r"(?:当前|现在|刚才|上次|上一项|前一个)?(?:任务|工作)?(?:的)?"
+    r"(?:进度|结果|状态|情况|原因)(?:是)?(?:什么|如何|怎么样)?|"
+    r"你说的什么(?:[？?，,、 ]*(?:完成|结果)(?:得|的)?(?:如何|怎么样))?)"
+    r"\s*[。.!！？?]*\s*$",
+    re.IGNORECASE,
+)
 
 
 class LocalAgentRuntime:
@@ -70,7 +79,7 @@ class LocalAgentRuntime:
         max_output_tokens: int = 12_000,
         diagnostic_tool_budget: int = 8,
         replan_extra_rounds: int = 4,
-        tool_result_preview_chars: int = 30_000,
+        tool_result_preview_chars: int = 12_000,
         task_store: Any | None = None,
         context_engine: ContextEngine | None = None,
         compaction_engine: CompactionEngine | None = None,
@@ -164,6 +173,47 @@ class LocalAgentRuntime:
             return
         workspace = self.workspaces.get(session_id)
         current_path = workspace.current_path or workspace.root
+        if (
+            _STATUS_FOLLOWUP_RE.fullmatch(user_message)
+            and self.task_store is not None
+            and hasattr(self.task_store, "get_previous_agent_task")
+        ):
+            previous = self.task_store.get_previous_agent_task(
+                session_id,
+                exclude_task_id=task_id,
+            )
+            if previous is not None:
+                final_text = self._previous_task_status_response(previous)
+                state = {
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "user_message": user_message,
+                    "status": "completed",
+                    "final_text": final_text,
+                    "workspace_root": str(workspace.root),
+                    "current_path": str(current_path),
+                    "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
+                    "plan": [],
+                    "tool_call_ledger": {},
+                    "active_batch": None,
+                    "allow_tools": False,
+                }
+                self._save_task(state)
+                self._record_event({
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "type": "task_started",
+                    "workspace_root": str(workspace.root),
+                    "current_path": str(current_path),
+                    "status_followup_for": previous.get("task_id"),
+                })
+                token = {"session_id": session_id, "task_id": task_id, "type": "token", "content": final_text}
+                done = {**token, "type": "done", "status": "completed"}
+                self._record_event(token)
+                self._record_event(done)
+                yield token
+                yield done
+                return
         instruction_context = InstructionLoader(workspace.root, current_path).load()
         project_memories = self._search_project_memories(str(workspace.root), user_message)
         workspace_snapshot = self._workspace_snapshot(workspace.root, current_path)
@@ -441,6 +491,7 @@ class LocalAgentRuntime:
                             response_text,
                             flags=re.IGNORECASE,
                         )
+                    empty_model_response = not response_text.strip()
                     final_text = format_final_response(response_text, state["summary"])
                     has_failed_verification = any(
                         not check.get("success", False)
@@ -460,6 +511,7 @@ class LocalAgentRuntime:
                         or has_failed_verification
                         or missing_material_change
                         or missing_criteria
+                        or empty_model_response
                         or self._has_explicit_unfinished(response_text)
                         or (acceptance and not all(
                             item["status"] == "passed" for item in acceptance
@@ -657,6 +709,37 @@ class LocalAgentRuntime:
     @staticmethod
     def _has_explicit_unfinished(response_text: str) -> bool:
         return bool(_EXPLICIT_UNFINISHED_RE.search(response_text))
+
+    @staticmethod
+    def _previous_task_status_response(previous: dict) -> str:
+        labels = {
+            "completed": "已完成",
+            "incomplete": "未完成",
+            "failed": "失败",
+            "blocked": "受阻",
+            "cancelled": "已取消",
+            "interrupted": "已中断",
+            "waiting_approval": "等待确认",
+            "running": "仍在运行",
+            "pending": "等待执行",
+        }
+        status = str(previous.get("status") or "unknown")
+        lines = [f"上一项任务{labels.get(status, status)}。"]
+        goal = str(previous.get("user_message") or "").strip()
+        if goal:
+            lines.append(f"任务：{goal}")
+        final_text = str(previous.get("final_text") or "").strip()
+        if final_text:
+            lines.append(final_text)
+        summary = previous.get("summary") or {}
+        files = list(dict.fromkeys(str(path) for path in summary.get("changed_files", [])))
+        if files:
+            lines.append("已记录文件变更：" + "、".join(files))
+        checks = [item for item in summary.get("verification", []) if isinstance(item, dict)]
+        if checks:
+            passed = sum(bool(item.get("success")) for item in checks)
+            lines.append(f"验证：{passed}/{len(checks)} 项通过。")
+        return "\n\n".join(lines)
 
     def _fit_context(
         self,
@@ -985,8 +1068,12 @@ class LocalAgentRuntime:
 
     @staticmethod
     def _terminal_error(exc: Exception, state: dict) -> str:
-        detail = str(exc).strip() or "未提供错误信息"
-        error = f"Agent 运行失败（{type(exc).__name__}）：{detail}"
+        error_type = type(exc).__name__
+        detail = str(exc).strip()
+        if not detail and error_type in {"ReadTimeout", "ConnectTimeout"}:
+            detail = "模型服务读取超时，请稍后重试"
+        detail = detail or "未提供错误信息"
+        error = f"Agent 运行失败（{error_type}）：{detail}"
         summary = state.get("summary") or {}
         facts = []
         changed_files = [str(path) for path in summary.get("changed_files", [])]
@@ -1366,25 +1453,43 @@ class LocalAgentRuntime:
             "protocol": model_context.get("protocol", ""),
             "base_url": model_context.get("base_url", ""),
         }
-        self._record_event({**event, "type": "model_request_started"})
-        started_at = time.perf_counter()
-        try:
-            response = await self.llm_call(**kwargs)
-        except Exception as exc:
-            self._record_event({
-                **event,
-                "type": "model_request_failed",
-                "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                "error_type": type(exc).__name__,
-            })
-            raise
-        self._record_event({
+        for attempt in range(1, 3):
+            started_event = {**event, "type": "model_request_started"}
+            if attempt > 1:
+                started_event["attempt"] = attempt
+            self._record_event(started_event)
+            started_at = time.perf_counter()
+            try:
+                response = await self.llm_call(**kwargs)
+                break
+            except Exception as exc:
+                error_type = type(exc).__name__
+                self._record_event({
+                    **event,
+                    "type": "model_request_failed",
+                    "attempt": attempt,
+                    "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error_type": error_type,
+                })
+                if attempt == 1 and error_type in {"ReadTimeout", "ConnectTimeout"}:
+                    self._record_event({
+                        **event,
+                        "type": "model_request_retrying",
+                        "attempt": attempt + 1,
+                        "error_type": error_type,
+                    })
+                    continue
+                raise
+        completed_event = {
             **event,
             "type": "model_request_completed",
             "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
             "stop_reason": str(response.get("stop_reason", "")),
             "usage": response.get("usage_metadata") or {},
-        })
+        }
+        if attempt > 1:
+            completed_event["attempt"] = attempt
+        self._record_event(completed_event)
         return response
 
     def _record_stream_event(self, state: dict, event: dict) -> None:

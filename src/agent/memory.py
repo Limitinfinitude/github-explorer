@@ -541,6 +541,30 @@ class Memory:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def get_latest_nonterminal_agent_task(self, session_id: str) -> Optional[Dict]:
+        row = self.conn.execute(
+            """SELECT state_json FROM agent_tasks
+               WHERE session_id = ?
+                 AND status IN ('pending', 'queued', 'running', 'waiting_approval')
+               ORDER BY updated_at DESC, rowid DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_previous_agent_task(
+        self,
+        session_id: str,
+        *,
+        exclude_task_id: str,
+    ) -> Optional[Dict]:
+        row = self.conn.execute(
+            """SELECT state_json FROM agent_tasks
+               WHERE session_id = ? AND task_id != ?
+               ORDER BY updated_at DESC, rowid DESC LIMIT 1""",
+            (session_id, exclude_task_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
     def reconcile_interrupted_runtime(self) -> List[str]:
         """Settle task and process snapshots that cannot survive a process restart."""
         rows = self.conn.execute(

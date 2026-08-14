@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Activity, Check, ChevronDown, CircleAlert, Copy, Download, FileCode2, FolderOpen, GitBranch, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Waypoints } from 'lucide-react'
+import { Activity, BookOpen, Check, ChevronDown, CircleAlert, Copy, Download, FileCode2, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Waypoints } from 'lucide-react'
 import { api } from '../../lib/api'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
@@ -32,6 +32,14 @@ const CATEGORY_LABELS = {
 const BUDGET_LABELS: Record<string, string> = {
   inspect: '体检', implement: '实现', test: '测试', run: '运行验收',
 }
+
+const PROJECT_ACTIONS = [
+  { id: 'inspect', label: '项目体检', icon: Search },
+  { id: 'prepare', label: '准备环境', icon: PackageCheck },
+  { id: 'start', label: '启动并验证', icon: Play },
+  { id: 'guide', label: '生成导读', icon: BookOpen },
+  { id: 'verify', label: '运行验证', icon: ShieldCheck },
+]
 
 function entrySummary(details: Record<string, unknown>) {
   const args = details.args && typeof details.args === 'object' ? details.args as Record<string, unknown> : details
@@ -135,12 +143,18 @@ function EvidenceDrawer({ projectId, overview }: { projectId: string; overview: 
   )
 }
 
-export function ProjectWorkspaceView() {
+export function ProjectWorkspaceView({
+  onOpenProjectConversation,
+}: {
+  onOpenProjectConversation: (sessionId: string, title: string, userMessage?: string) => void
+}) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [projectId, setProjectId] = useState('')
   const [overview, setOverview] = useState<ProjectOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [actionPending, setActionPending] = useState('')
+  const [actionError, setActionError] = useState('')
 
   async function refresh() {
     setLoading(true); setError('')
@@ -157,6 +171,21 @@ export function ProjectWorkspaceView() {
   const activeStage = useMemo(() => overview?.stage || 'inspect', [overview])
   const activeProcess = overview?.active_processes.find(process => process.status === 'running') || overview?.active_processes[0]
   const quality = overview ? qualityState(overview.quality_metrics) : null
+  const projectTitle = overview?.workspace_root.split(/[\\/]/).filter(Boolean).pop() || '项目'
+
+  async function startAction(action: string) {
+    if (!overview || actionPending) return
+    setActionPending(action); setActionError('')
+    try {
+      const started = await api.startProjectAction(overview.project_id, action)
+      const label = PROJECT_ACTIONS.find(item => item.id === action)?.label || '项目任务'
+      onOpenProjectConversation(started.session_id, `${projectTitle} 项目`, label)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '无法启动项目动作')
+    } finally {
+      setActionPending('')
+    }
+  }
   return (
     <div className="project-workspace-view">
       <header className="project-workspace__header">
@@ -170,6 +199,16 @@ export function ProjectWorkspaceView() {
             <div className="project-hero__icon"><GitBranch size={18} /></div>
             <div className="project-hero__main"><strong>{overview.summary.message}</strong><code>{overview.workspace_root || '工作区尚未绑定'}</code></div>
             <span className={`project-status project-status--${overview.stage_status}`}>{statusLabel(overview.stage_status)}</span>
+            <button type="button" className="project-open-chat" onClick={() => onOpenProjectConversation(overview.project_session_id, `${projectTitle} 项目`)}><MessageSquare size={14} />打开项目对话</button>
+          </section>
+          <section className="project-actions" aria-label="项目动作">
+            {PROJECT_ACTIONS.map(action => { const Icon = action.icon; const pending = actionPending === action.id; return (
+              <button key={action.id} type="button" disabled={Boolean(actionPending)} onClick={() => void startAction(action.id)}>
+                <Icon size={15} />
+                <span>{pending ? '正在启动…' : action.label}</span>
+              </button>
+            ) })}
+            {actionError && <div className="project-actions__error" role="alert"><CircleAlert size={14} />{actionError}</div>}
           </section>
           <section className="project-stage-rail" aria-label="项目旅程">
             {STAGES.map(stage => { const Icon = stage.icon; const current = stage.id === activeStage; return <div key={stage.id} className={`project-stage ${current ? 'is-current' : ''}`}><Icon size={15} /><span>{stage.label}</span></div> })}

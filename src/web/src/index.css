@@ -446,9 +446,12 @@ button { cursor: pointer; }
 .settings-section-heading h2 { margin: 0; color: #c9d1d9; font-size: 12px; }
 .settings-section-heading span { color: #5f6873; font-size: 9px; }
 .model-list { border-top: 1px solid #292d34; }
-.model-row { width: 100%; min-height: 64px; padding: 10px 8px; display: flex; align-items: center; gap: 11px; color: inherit; background: transparent; border: 0; border-bottom: 1px solid #23262c; text-align: left; }
+.model-row { width: 100%; min-height: 64px; display: flex; align-items: center; color: inherit; background: transparent; border-bottom: 1px solid #23262c; }
 .model-row:hover { background: #12151a; }
 .model-row.is-active { background: #101a28; }
+.model-row__select { min-width: 0; flex: 1; min-height: 63px; padding: 10px 8px; display: flex; align-items: center; gap: 11px; color: inherit; background: transparent; border: 0; text-align: left; }
+.model-row__edit { width: 32px; height: 32px; margin-right: 8px; flex: 0 0 auto; display: grid; place-items: center; color: #737c88; background: transparent; border: 0; border-radius: 5px; }
+.model-row__edit:hover { color: #dbeafe; background: #1d3554; }
 .model-row__icon { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; color: #fff; border-radius: 6px; font-size: 12px; font-weight: 700; }
 .model-row__body { flex: 1; min-width: 0; display: grid; gap: 5px; }
 .model-row__title { display: flex; align-items: center; gap: 7px; }
@@ -482,6 +485,14 @@ button { cursor: pointer; }
 .project-status--incomplete, .project-status--failed { color: #ff7b72; background: #2b1719; }
 .project-status--waiting_approval { color: #d29922; background: #2b2312; }
 .project-status--running { color: #79c0ff; background: #13233a; }
+.project-open-chat { min-height: 32px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; color: #c9d1d9; background: #1b1e24; border: 1px solid #30343b; border-radius: 5px; font-size: 10px; white-space: nowrap; }
+.project-open-chat:hover { color: #f0f3f6; border-color: #505762; }
+.project-actions { max-width: 1080px; margin: 0 auto 12px; padding: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; border-block: 1px solid #252930; }
+.project-actions > button { min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; color: #b7c0ca; background: #17191e; border: 1px solid #30343b; border-radius: 5px; font-size: 10px; }
+.project-actions > button:hover:not(:disabled) { color: #f0f3f6; background: #20242a; border-color: #505762; }
+.project-actions > button:disabled { color: #656d77; cursor: wait; }
+.project-actions > button:focus-visible, .project-open-chat:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+.project-actions__error { flex: 1 0 100%; min-height: 30px; display: flex; align-items: center; gap: 7px; color: #ffb4ac; font-size: 10px; overflow-wrap: anywhere; }
 .project-stage-rail { max-width: 1080px; margin: 0 auto 12px; padding: 7px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; background: #121419; border: 1px solid #292d34; border-radius: 8px; }
 .project-stage { min-height: 54px; display: grid; place-content: center; justify-items: center; gap: 5px; color: #6e7681; border-radius: 5px; font-size: 10px; }
 .project-stage.is-current { color: #dbeafe; background: #17263b; box-shadow: inset 0 0 0 1px #2f81f7; }

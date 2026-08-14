@@ -4,12 +4,12 @@ import {
   GitBranch, Map, ShieldAlert, Square, TerminalSquare, XCircle,
 } from 'lucide-react'
 import type {
-  AgentAcceptanceItem, AgentApproval, AgentFileChange, AgentProcess, AgentVerification,
+  AgentAcceptanceItem, AgentApproval, AgentFileChange, AgentProcess, AgentRunSummary, AgentVerification,
 } from '../../types'
 import { summarizeAcceptanceLedger } from '../../lib/acceptanceLedger'
 
 interface Props {
-  status?: 'completed' | 'incomplete' | 'failed' | 'blocked' | 'cancelled' | null
+  status?: AgentRunSummary['status']
   plan: string[]
   repoMap?: string
   fileChanges: AgentFileChange[]
@@ -198,15 +198,25 @@ export function AgentStatusPanel({
 
   if (compact) {
     const failed = status === 'failed' || verification?.success === false
-    const incomplete = status === 'incomplete' || status === 'blocked' || status === 'cancelled'
+    const incomplete = status === 'incomplete' || status === 'blocked' || status === 'cancelled' || status === 'interrupted'
     const StatusIcon = failed ? XCircle : incomplete ? CircleDashed : CheckCircle2
     const statusText = failed
       ? '执行失败'
       : status === 'cancelled'
         ? '已取消'
+        : status === 'interrupted'
+          ? '执行已中断'
         : incomplete
           ? '执行未完成'
-          : status === 'completed' ? '执行完成' : '执行状态未知'
+          : status === 'completed'
+            ? '执行完成'
+            : status === 'waiting_approval'
+              ? '等待确认'
+              : status === 'running'
+                ? '执行中'
+                : status === 'pending' || status === 'queued'
+                  ? '等待执行'
+                  : '执行状态未知'
     const meta = [
       fileCount ? `${fileCount} 个文件` : '无文件变更',
       verification ? (verification.success ? '验证通过' : '验证失败') : '未运行验证',

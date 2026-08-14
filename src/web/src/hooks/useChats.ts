@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import type { Chat, Message } from '../types'
 import { api } from '../lib/api'
 import { historyToMessages } from '../lib/chatHistory'
-import { appendNewChat } from '../lib/chatState'
+import { appendNewChat, ensureSessionChat } from '../lib/chatState'
 
 const STORAGE_KEY = 'explorer_chats'
 
@@ -43,6 +43,26 @@ export function useChats() {
     const result = appendNewChat(chats, id, now)
     setChats(prev => {
       const next = appendNewChat(prev, id, now).chats
+      save(next)
+      return next
+    })
+    setActiveChatId(result.activeChatId)
+    return result.chat
+  }, [chats])
+
+  const openSession = useCallback((sessionId: string, title: string, userMessage?: string) => {
+    const id = nextId++
+    const now = Date.now()
+    const message: Message | undefined = userMessage ? {
+      id: `msg-${now}`,
+      role: 'user',
+      content: userMessage,
+      time: new Date(now).toISOString(),
+    } : undefined
+    const result = ensureSessionChat(chats, id, now, sessionId, title, message)
+    if (result.chat.id !== id) nextId -= 1
+    setChats(prev => {
+      const next = ensureSessionChat(prev, id, now, sessionId, title, message).chats
       save(next)
       return next
     })
@@ -99,5 +119,5 @@ export function useChats() {
     })
   }, [])
 
-  return { chats, activeChat, activeChatId, setActiveChatId, newChat, deleteChat, pushMessage, updateLastMessage, hydrateChat }
+  return { chats, activeChat, activeChatId, setActiveChatId, newChat, openSession, deleteChat, pushMessage, updateLastMessage, hydrateChat }
 }
