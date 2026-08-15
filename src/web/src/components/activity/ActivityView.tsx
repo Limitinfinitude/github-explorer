@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Activity, CheckCircle2, ChevronDown, Clock3, Database, RefreshCw, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, ChevronDown, Clock3, Database, Gauge, RefreshCw, Wrench, XCircle } from 'lucide-react'
 import { api } from '../../lib/api'
 import { localCoverageLabels } from '../../lib/observability'
 import { formatLocalTimestamp } from '../../lib/time'
@@ -35,8 +35,43 @@ function eventLabel(event: AgentEvent): string {
     stage_budget_exhausted: '阶段预算已用尽',
     runtime_reconciled: '重启状态已对账',
     context_compacted: '上下文已压缩',
+    model_response_truncated: '模型输出被截断',
     error: '运行错误',
   }[event.type] || event.type
+}
+
+function terminalReasonLabel(reason?: string) {
+  return ({
+    completed: '正常完成',
+    stage_budget_exhausted: '阶段预算阻塞',
+    diagnostic_budget_exhausted: '诊断预算阻塞',
+    approval_pending: '等待审批',
+    tool_repair_exhausted: '工具修复耗尽',
+    unrecovered_tool_failure: '工具失败未恢复',
+    interrupted: '运行被中断',
+    cancelled: '已取消',
+    model_error: '模型请求失败',
+    no_execution_facts: '没有执行事实',
+    running: '仍在运行',
+  } as Record<string, string>)[reason || ''] || '未分类结束'
+}
+
+type TraceFilters = {
+  status: string
+  terminal_reason: string
+  completion_evidence: string
+  workspace: string
+  from: string
+  to: string
+}
+
+const EMPTY_TRACE_FILTERS: TraceFilters = {
+  status: '',
+  terminal_reason: '',
+  completion_evidence: '',
+  workspace: '',
+  from: '',
+  to: '',
 }
 
 function TraceDetails({ taskId }: { taskId: string }) {
@@ -86,8 +121,10 @@ function TraceDetails({ taskId }: { taskId: string }) {
   )
 }
 
-function TraceRow({ trace }: { trace: AgentTrace }) {
+function TraceRow({ trace, onResume }: { trace: AgentTrace; onResume: (trace: AgentTrace) => void }) {
   const [open, setOpen] = useState(false)
+  const evidenceLabel = trace.completion_evidence === 'verified' ? '作品已验证' : trace.completion_evidence === 'partial' ? '作品部分完成' : '无完成证据'
+  const evidenceTone = trace.completion_evidence === 'verified' ? 'passed' : trace.completion_evidence === 'partial' ? 'recovered' : 'failed'
   return (
     <div className={`activity-trace ${trace.failed_tool_count > 0 || trace.status === 'failed' ? 'has-failure' : ''}`}>
       <button type="button" className="activity-trace__summary" onClick={() => setOpen(value => !value)} aria-expanded={open}>
@@ -100,31 +137,51 @@ function TraceRow({ trace }: { trace: AgentTrace }) {
         </span>
         <span className="activity-trace__metrics">
           <b>{trace.tool_count}</b><small>工具</small>
-          <b>{trace.changed_file_count}</b><small>文件</small>
-          {trace.recovered_tool_count > 0 && <span className="trace-badge trace-badge--recovered">{trace.recovered_tool_count} 已恢复</span>}
-          <span className={`trace-badge trace-badge--${trace.verification}`}>{trace.verification === 'passed' ? '验证通过' : trace.verification === 'failed' ? '验证失败' : '未验证'}</span>
-        </span>
+           <b>{trace.changed_file_count}</b><small>文件</small>
+           {trace.recovered_tool_count > 0 && <span className="trace-badge trace-badge--recovered">{trace.recovered_tool_count} 已恢复</span>}
+           <span className={`trace-badge trace-badge--${trace.verification}`}>{trace.verification === 'passed' ? '验证通过' : trace.verification === 'failed' ? '验证失败' : '未验证'}</span>
+           <span className={`trace-badge trace-badge--${evidenceTone}`}>{evidenceLabel}</span>
+           <span className="trace-badge trace-badge--reason">{terminalReasonLabel(trace.terminal_reason)}</span>
+           {trace.model_error_count ? <span className="trace-badge trace-badge--failed">模型错误 {trace.model_error_count}</span> : null}
+           {trace.provider_truncation_count ? <span className="trace-badge trace-badge--recovered">输出截断 {trace.provider_truncation_count}</span> : null}
+           {trace.message_encoding_status === 'legacy_corrupted' ? <span className="trace-badge trace-badge--failed">编码异常</span> : null}
+         </span>
         <ChevronDown size={15} className={open ? 'is-open' : ''} />
       </button>
+      {trace.status === 'interrupted' && trace.resume_available && (
+        <div className="activity-trace__actions">
+          <button type="button" onClick={() => onResume(trace)}>继续任务</button>
+        </div>
+      )}
       {open && <TraceDetails taskId={trace.task_id} />}
-    </div>
+      </div>
   )
 }
 
 export function ActivityView() {
   const [traces, setTraces] = useState<AgentTrace[]>([])
   const [observability, setObservability] = useState<ObservabilityStatus | null>(null)
+  const [filters, setFilters] = useState<TraceFilters>(EMPTY_TRACE_FILTERS)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const refresh = useCallback(() => {
     setLoading(true)
     setError('')
-    Promise.all([api.getTraces(), api.getObservability()])
+    Promise.all([api.getTraces(100, filters), api.getObservability()])
       .then(([nextTraces, nextStatus]) => { setTraces(nextTraces); setObservability(nextStatus) })
       .catch(err => setError(err instanceof Error ? err.message : '读取运行记录失败'))
       .finally(() => setLoading(false))
-  }, [])
+  }, [filters])
+
+  const resumeTask = useCallback(async (trace: AgentTrace) => {
+    try {
+      await api.resumeTask(trace.session_id, trace.task_id)
+      refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '恢复任务失败')
+    }
+  }, [refresh])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -148,11 +205,50 @@ export function ActivityView() {
             {localCoverageLabels(observability?.local.coverage).map(item => <span key={item}>{item}</span>)}
           </div>
         </div>
+        <div className="observability-summary" aria-label="本地观测汇总">
+          <div><Gauge size={14} /><span>任务</span><strong>{observability?.local.summary.task_count ?? 0}</strong></div>
+          <div><CheckCircle2 size={14} /><span>正常完成</span><strong>{observability?.local.summary.status_counts.completed ?? 0}</strong></div>
+          <div><AlertTriangle size={14} /><span>预算阻塞</span><strong>{observability?.local.summary.budget_exhausted_count ?? 0}</strong></div>
+          <div><Wrench size={14} /><span>失败 / 恢复</span><strong>{observability?.local.summary.failed_tool_count ?? 0} / {observability?.local.summary.recovered_tool_count ?? 0}</strong></div>
+          <div><AlertTriangle size={14} /><span>已验证未收尾</span><strong>{observability?.local.summary.false_incomplete_count ?? 0}</strong></div>
+          <div><Clock3 size={14} /><span>平均模型延迟</span><strong>{observability?.local.summary.average_model_latency_ms ?? 0} ms</strong></div>
+          <div><span>Token</span><strong>{(observability?.local.summary.total_tokens ?? 0).toLocaleString()}</strong></div>
+        </div>
+      </section>
+
+      <section className="activity-view__filters" aria-label="运行记录筛选">
+        <select value={filters.status} onChange={event => setFilters(current => ({ ...current, status: event.target.value }))} aria-label="任务状态">
+          <option value="">全部状态</option>
+          <option value="completed">已完成</option>
+          <option value="incomplete">未完成</option>
+          <option value="failed">失败</option>
+          <option value="interrupted">中断</option>
+          <option value="cancelled">已取消</option>
+          <option value="running">运行中</option>
+        </select>
+        <select value={filters.terminal_reason} onChange={event => setFilters(current => ({ ...current, terminal_reason: event.target.value }))} aria-label="结束原因">
+          <option value="">全部结束原因</option>
+          <option value="completed">正常完成</option>
+          <option value="stage_budget_exhausted">阶段预算阻塞</option>
+          <option value="unrecovered_tool_failure">工具失败未恢复</option>
+          <option value="model_error">模型请求失败</option>
+          <option value="interrupted">运行中断</option>
+        </select>
+        <select value={filters.completion_evidence} onChange={event => setFilters(current => ({ ...current, completion_evidence: event.target.value }))} aria-label="作品证据">
+          <option value="">全部证据</option>
+          <option value="verified">已验证</option>
+          <option value="partial">部分完成</option>
+          <option value="none">无证据</option>
+        </select>
+        <input value={filters.workspace} onChange={event => setFilters(current => ({ ...current, workspace: event.target.value }))} placeholder="工作区路径" aria-label="工作区路径" />
+        <label><span>从</span><input type="date" value={filters.from} onChange={event => setFilters(current => ({ ...current, from: event.target.value }))} aria-label="开始日期" /></label>
+        <label><span>到</span><input type="date" value={filters.to} onChange={event => setFilters(current => ({ ...current, to: event.target.value }))} aria-label="结束日期" /></label>
+        <button type="button" className="activity-filter-clear" onClick={() => setFilters(EMPTY_TRACE_FILTERS)} disabled={!Object.values(filters).some(Boolean)}>清除</button>
       </section>
 
       <section className="activity-view__list">
         <div className="activity-view__list-header"><h2>最近任务</h2><span>{traces.length} 条记录</span></div>
-        {loading ? <div className="activity-empty">正在读取本地记录…</div> : error ? <div className="activity-empty activity-empty--error">{error}<button type="button" onClick={refresh}>重试</button></div> : traces.length === 0 ? <div className="activity-empty">还没有运行记录</div> : traces.map(trace => <TraceRow key={trace.task_id} trace={trace} />)}
+        {loading ? <div className="activity-empty">正在读取本地记录…</div> : error ? <div className="activity-empty activity-empty--error">{error}<button type="button" onClick={refresh}>重试</button></div> : traces.length === 0 ? <div className="activity-empty">还没有运行记录</div> : traces.map(trace => <TraceRow key={trace.task_id} trace={trace} onResume={resumeTask} />)}
       </section>
     </div>
   )

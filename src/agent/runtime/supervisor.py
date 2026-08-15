@@ -51,6 +51,33 @@ class AgentTaskSupervisor:
         worker.add_done_callback(lambda _: self._tasks.pop(task_id, None))
         return task_id
 
+    def resume_interrupted(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        model_context: dict | None = None,
+    ) -> str:
+        state = self.task_store.get_agent_task(task_id)
+        if (
+            state is None
+            or state.get("session_id") != session_id
+            or state.get("status") != "interrupted"
+            or not state.get("resume_available")
+        ):
+            raise ValueError(f"任务不可恢复: {task_id}")
+        worker = self._tasks.get(task_id)
+        if worker is not None and not worker.done():
+            raise ValueError(f"任务正在恢复: {task_id}")
+        worker = asyncio.create_task(self._consume_resume(
+            session_id,
+            task_id,
+            model_context=model_context or {},
+        ))
+        self._tasks[task_id] = worker
+        worker.add_done_callback(lambda _: self._tasks.pop(task_id, None))
+        return task_id
+
     async def wait(self, task_id: str) -> None:
         worker = self._tasks.get(task_id)
         if worker is not None:
@@ -108,6 +135,31 @@ class AgentTaskSupervisor:
             if state.get("status") not in _TERMINAL_STATUSES:
                 state["status"] = "failed"
                 state["final_text"] = f"Agent 后台任务失败（{type(exc).__name__}）：{str(exc).strip() or '未提供错误信息'}"
+                self.task_store.save_agent_task(state)
+                self.task_store.record_agent_event({
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "type": "task_failed",
+                    "content": state["final_text"],
+                    "status": "failed",
+                })
+
+    async def _consume_resume(self, session_id: str, task_id: str, *, model_context: dict) -> None:
+        try:
+            async for _ in self.runtime.resume_interrupted(
+                session_id,
+                task_id,
+                model_context=model_context,
+            ):
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            state = self.task_store.get_agent_task(task_id)
+            if state is not None and state.get("status") not in _TERMINAL_STATUSES:
+                state["status"] = "failed"
+                state["resume_available"] = False
+                state["final_text"] = f"恢复任务失败（{type(exc).__name__}）：{str(exc).strip() or '未提供错误信息'}"
                 self.task_store.save_agent_task(state)
                 self.task_store.record_agent_event({
                     "task_id": task_id,

@@ -48,7 +48,7 @@ _DIAGNOSTIC_TOOLS = {
 _STAGE_TOOLS = {
     "inspect": _DIAGNOSTIC_TOOLS - {"check_port", "wait_http"},
     "test": {"verify_project"},
-    "run": {"start_process", "get_process", "list_processes", "stop_process", "check_port", "wait_http", "http_request"},
+    "run": {"start_process", "get_process", "list_processes", "stop_process", "check_port", "wait_http", "http_request", "http_request_batch"},
 }
 _STAGE_LIMITS = {"inspect": 24, "implement": 16, "test": 8, "run": 8}
 _CONTINUE_TASK_RE = re.compile(
@@ -77,7 +77,7 @@ class LocalAgentRuntime:
         max_identical_failures: int = 3,
         max_context_tokens: int = 128_000,
         max_output_tokens: int = 12_000,
-        diagnostic_tool_budget: int = 8,
+        diagnostic_tool_budget: int = 16,
         replan_extra_rounds: int = 4,
         tool_result_preview_chars: int = 12_000,
         task_store: Any | None = None,
@@ -235,6 +235,7 @@ class LocalAgentRuntime:
         acceptance_criteria = self._extract_acceptance_criteria(user_message)
         explicit_acceptance = bool(acceptance_criteria)
         session_requirements = []
+        requirement_context = {"pending": [], "pending_total": 0, "pending_truncated": False, "recent_completed": []}
         implicit_requirement_positions = []
         engages_backlog = bool(
             acceptance_criteria
@@ -268,6 +269,8 @@ class LocalAgentRuntime:
                 session_id,
                 status="pending",
             )
+            if hasattr(self.task_store, "get_session_requirement_context"):
+                requirement_context = self.task_store.get_session_requirement_context(session_id)
             if explicit_acceptance or existing_requirements or _CONTINUE_TASK_RE.fullmatch(user_message):
                 acceptance_criteria = [
                     {"id": item["position"], "text": item["text"]}
@@ -286,6 +289,8 @@ class LocalAgentRuntime:
             "round": 0,
             "round_limit": self.max_rounds,
             "diagnostic_tool_count": 0,
+            "diagnostic_unique_count": 0,
+            "diagnostic_observations": [],
             "material_tool_seen": False,
             "requires_material_change": requires_material_change,
             "replanned": False,
@@ -313,6 +318,7 @@ class LocalAgentRuntime:
             "plan": plan,
             "acceptance_criteria": acceptance_criteria,
             "session_requirements": session_requirements,
+            "requirement_context": requirement_context,
             "implicit_requirement_positions": implicit_requirement_positions,
             "context_emitted": False,
             "allow_tools": not direct_chat,
@@ -325,13 +331,13 @@ class LocalAgentRuntime:
             "current_path": str(current_path),
             "workspace_snapshot": workspace_snapshot,
             "model_context": safe_model_context,
-            "requirement_backlog": session_requirements,
+            "requirement_backlog": requirement_context,
         })
         if session_requirements:
             self._record_event({
                 **base_event,
                 "type": "requirement_backlog_loaded",
-                "items": session_requirements,
+                "items": requirement_context,
             })
 
         try:
@@ -343,6 +349,9 @@ class LocalAgentRuntime:
             if state.get("status") == "running":
                 self._settle_open_tool_calls(state, "Task stream closed before completion.")
                 state["status"] = "interrupted"
+                state["resume_available"] = True
+                state["resume_count"] = int(state.get("resume_count", 0))
+                state["resume_reason"] = "stream_closed"
                 self._save_task(state)
                 self._record_event({
                     **base_event,
@@ -394,6 +403,77 @@ class LocalAgentRuntime:
             self._record_stream_event(state, event)
             yield event
 
+    async def resume_interrupted(
+        self,
+        session_id: str,
+        task_id: str,
+        model_context: dict | None = None,
+    ) -> AsyncIterator[dict]:
+        """Continue a restart-reconciled task from its persisted state.
+
+        The interrupted batch is never replayed blindly. Its settled tool-call
+        ledger is kept as evidence, the open batch is discarded, and the model
+        receives a bounded continuation budget on the same task and workspace.
+        """
+        state = self._load_task(task_id)
+        base_event = {"session_id": session_id, "task_id": task_id}
+        if state is None or state.get("session_id") != session_id:
+            error = f"浠诲姟涓嶅瓨鍦ㄦ垨涓嶅睘浜庡綋鍓嶄細璇? {task_id}"
+            yield {**base_event, "type": "error", "content": error}
+            yield {**base_event, "type": "done", "content": error, "status": "failed"}
+            return
+        if state.get("status") != "interrupted" or not state.get("resume_available"):
+            error = f"浠诲姟涓嶅彲鎭㈠: {task_id}"
+            yield {**base_event, "type": "error", "content": error}
+            yield {**base_event, "type": "done", "content": error, "status": "failed"}
+            return
+
+        workspace = self._restore_task_workspace(state)
+        registry = self.registry_factory(session_id)
+        discarded_batch = state.get("active_batch")
+        state.setdefault("messages", [])
+        state.setdefault("tool_call_ledger", {})
+        state["active_batch"] = None
+        state["status"] = "running"
+        state["resume_available"] = False
+        state["resume_count"] = int(state.get("resume_count", 0)) + 1
+        state["resume_reason"] = "manual_resume"
+        if model_context:
+            state["model_context"] = {
+                key: str(value)
+                for key, value in model_context.items()
+                if key in {"id", "protocol", "base_url"} and value is not None
+            }
+        state["round_limit"] = max(
+            int(state.get("round_limit", self.max_rounds)),
+            int(state.get("round", 0)) + max(1, self.replan_extra_rounds),
+        )
+        self._save_task(state)
+        self._record_event({
+            **base_event,
+            "type": "task_resumed",
+            "resume_count": state["resume_count"],
+            "discarded_batch_id": (discarded_batch or {}).get("batch_id"),
+            "round_limit": state["round_limit"],
+        })
+
+        try:
+            async for event in self._drive(state, registry, str(workspace.root)):
+                self._record_stream_event(state, event)
+                yield event
+        finally:
+            if state.get("status") == "running":
+                self._settle_open_tool_calls(state, "Resumed task stream closed before completion.")
+                state["status"] = "interrupted"
+                state["resume_available"] = True
+                state["resume_reason"] = "resume_stream_closed"
+                self._save_task(state)
+                self._record_event({
+                    **base_event,
+                    "type": "task_interrupted",
+                    "content": "Resumed task stream closed before completion.",
+                })
+
     def _restore_task_workspace(self, state: dict):
         session_id = state["session_id"]
         workspace = self.workspaces.bind(session_id, state["workspace_root"])
@@ -411,6 +491,7 @@ class LocalAgentRuntime:
             state.get("instruction_context", ""),
             state.get("project_memories", []),
             state.get("acceptance_criteria", []),
+            state.get("requirement_context"),
         )
         try:
             while state["round"] < state.get("round_limit", self.max_rounds):
@@ -448,6 +529,12 @@ class LocalAgentRuntime:
                         and bool(_UNFINISHED_TEXT_RE.search(response_text.rstrip()))
                     )
                     if explicit_truncation or incomplete_plain_chat:
+                        self._record_event({
+                            **base_event,
+                            "type": "model_response_truncated",
+                            "stop_reason": stop_reason,
+                            "phase": "reasoning",
+                        })
                         continuation = await self._call_model(
                             state,
                             "continuation",
@@ -486,7 +573,7 @@ class LocalAgentRuntime:
                         state["summary"]["work_product_evaluation"] = evaluation
                         self._settle_session_requirements(state, acceptance)
                         response_text = re.sub(
-                            r"\s*\[证据:(?:file|check|process):[^\]]+\]",
+                            r"\s*\[(?:证据|evidence):(?:file|check|process):[^\]]+\]",
                             "",
                             response_text,
                             flags=re.IGNORECASE,
@@ -555,7 +642,7 @@ class LocalAgentRuntime:
                 repeated_diagnostics = (
                     state.get("replanned")
                     and not state.get("material_tool_seen")
-                    and int(state.get("diagnostic_tool_count", 0)) >= self.diagnostic_tool_budget
+                    and int(state.get("diagnostic_unique_count", 0)) >= self.diagnostic_tool_budget
                     and tool_uses
                     and all(tool_use["name"] in _DIAGNOSTIC_TOOLS for tool_use in tool_uses)
                 )
@@ -571,6 +658,7 @@ class LocalAgentRuntime:
                         **base_event,
                         "type": "budget_warning",
                         "diagnostic_tool_count": state["diagnostic_tool_count"],
+                        "diagnostic_unique_count": state.get("diagnostic_unique_count", 0),
                         "round_limit": state["round_limit"],
                         "message": message,
                         "plan": state["plan"],
@@ -660,7 +748,7 @@ class LocalAgentRuntime:
                 state["summary"]["work_product_evaluation"] = evaluation
                 self._settle_session_requirements(state, acceptance)
                 response_text = re.sub(
-                    r"\s*\[证据:(?:file|check|process):[^\]]+\]",
+                    r"\s*\[(?:证据|evidence):(?:file|check|process):[^\]]+\]",
                     "",
                     response_text,
                     flags=re.IGNORECASE,
@@ -934,7 +1022,15 @@ class LocalAgentRuntime:
                 for failed_call_id, failure in list(
                     state.setdefault("unrecovered_failures", {}).items()
                 ):
-                    if not recovery_key or failure.get("recovery_key") != recovery_key:
+                    same_lineage = bool(
+                        recovery_key
+                        and failure.get("recovery_key") == recovery_key
+                    )
+                    corrected_schema = (
+                        failure.get("tool_name") == name
+                        and failure.get("error_kind") == "invalid_input"
+                    )
+                    if not same_lineage and not corrected_schema:
                         continue
                     state["tool_call_ledger"][failed_call_id]["recovered_by_call_id"] = call_id
                     if self.task_store is not None and hasattr(
@@ -956,6 +1052,7 @@ class LocalAgentRuntime:
                 state.setdefault("unrecovered_failures", {})[call_id] = {
                     "tool_name": name,
                     "recovery_key": recovery_key,
+                    "error_kind": result.error_kind,
                     "error": result.error or "tool failed",
                 }
             self._record_tool_run(
@@ -994,6 +1091,11 @@ class LocalAgentRuntime:
                     return events, True
             if name in _DIAGNOSTIC_TOOLS:
                 state["diagnostic_tool_count"] = int(state.get("diagnostic_tool_count", 0)) + 1
+                observation = self._diagnostic_observation_key(name, args)
+                observations = state.setdefault("diagnostic_observations", [])
+                if observation not in observations:
+                    observations.append(observation)
+                state["diagnostic_unique_count"] = len(observations)
             elif result.success:
                 state["material_tool_seen"] = True
                 state["summary"]["successful_tools"] = list(dict.fromkeys([
@@ -1035,7 +1137,7 @@ class LocalAgentRuntime:
         return {**base_event, "type": "done", "content": state["final_text"], "status": "cancelled"}
 
     def _maybe_replan_after_diagnostics(self, state: dict, base_event: dict) -> dict | None:
-        count = int(state.get("diagnostic_tool_count", 0))
+        count = int(state.get("diagnostic_unique_count", 0))
         if (
             state.get("replanned")
             or state.get("material_tool_seen")
@@ -1060,7 +1162,8 @@ class LocalAgentRuntime:
         return {
             **base_event,
             "type": "budget_warning",
-            "diagnostic_tool_count": count,
+            "diagnostic_tool_count": int(state.get("diagnostic_tool_count", count)),
+            "diagnostic_unique_count": count,
             "round_limit": state["round_limit"],
             "message": message,
             "plan": state["plan"],
@@ -1160,6 +1263,27 @@ class LocalAgentRuntime:
             ]
             summary["verification"] = checks
             events.append({**base_event, "type": "verification", "success": result.success, "checks": checks})
+        elif (
+            name == "http_request_batch"
+            and isinstance(result.data, dict)
+            and isinstance(result.data.get("checks"), list)
+        ):
+            check = {
+                "kind": "http_batch",
+                "group_id": result.data.get("group_id"),
+                "success": result.success,
+                "total": result.data.get("total", 0),
+                "passed": result.data.get("passed", 0),
+                "failed": result.data.get("failed", 0),
+                "checks": result.data.get("checks", []),
+            }
+            summary["verification"] = [*summary.get("verification", []), check]
+            events.append({
+                **base_event,
+                "type": "verification",
+                "success": result.success,
+                "checks": [check],
+            })
         elif result.data.get("verification"):
             checks = [
                 self._normalize_evidence_fields(check, workspace_root)
@@ -1246,6 +1370,13 @@ class LocalAgentRuntime:
             stage: {"used": 0, "limit": limit, "status": "pending"}
             for stage, limit in _STAGE_LIMITS.items()
         }
+
+    @staticmethod
+    def _diagnostic_observation_key(name: str, args: dict) -> str:
+        stable = dict(args or {})
+        for key in ("timeout", "limit", "offset"):
+            stable.pop(key, None)
+        return json.dumps({"name": name, "args": stable}, ensure_ascii=False, sort_keys=True, default=str)
 
     @staticmethod
     def _tool_stage(name: str) -> str:
@@ -1514,6 +1645,8 @@ class LocalAgentRuntime:
             status="pending",
         )
         state["session_requirements"] = remaining
+        if hasattr(self.task_store, "get_session_requirement_context"):
+            state["requirement_context"] = self.task_store.get_session_requirement_context(state["session_id"])
         self._record_event({
             "session_id": state["session_id"],
             "task_id": state["task_id"],
@@ -1699,6 +1832,7 @@ class LocalAgentRuntime:
         instruction_context: str = "",
         project_memories: list[dict] | None = None,
         acceptance_criteria: list[dict] | None = None,
+        requirement_context: dict | None = None,
     ) -> str:
         context = f"\n\n当前 Repo Map：\n{repo_map}" if repo_map else ""
         instructions = (
@@ -1717,15 +1851,31 @@ class LocalAgentRuntime:
             if items:
                 memories = "\n\n相关项目记忆（仅作已来源事实参考）：\n" + "\n".join(items)
         acceptance = ""
-        if acceptance_criteria:
-            lines = [f"[{item['id']}] {item['text']}" for item in acceptance_criteria]
+        display_criteria = acceptance_criteria or []
+        if requirement_context and requirement_context.get("pending_truncated"):
+            allowed = {int(item.get("position")) for item in requirement_context.get("pending", [])}
+            display_criteria = [item for item in display_criteria if int(item.get("id", -1)) in allowed]
+        if display_criteria:
+            lines = [f"[{item['id']}] {item['text']}" for item in display_criteria]
             acceptance = (
                 f"\n\n验收清单（{len(lines)} 项）：\n"
                 + "\n".join(lines)
                 + "\n执行中持续核对这些条目。最终回复必须按相同编号逐项说明结果与证据。"
                 "完成项使用 `[完成]`，并引用至少一个真实执行证据："
-                "`[证据:file:工具返回的文件路径]`、`[证据:check:成功验证的 kind]` 或"
-                " `[证据:process:进程ID]`。无法完成的条目使用 `[未完成]` 并说明原因；不得省略。"
+                "优先使用 ASCII 标记 `[evidence:file:工具返回的文件路径]`、"
+                "`[evidence:check:成功验证的 kind]` 或 `[evidence:process:进程ID]`；"
+                "中文 `[证据:...]` 也兼容。无法完成的条目使用 `[未完成]` 并说明原因；不得省略。"
+            )
+        if requirement_context and requirement_context.get("pending_truncated"):
+            acceptance += (
+                f"\n需求账本共有 {requirement_context.get('pending_total', 0)} 条未完成项，"
+                "本轮仅注入前 24 条；不要臆造未注入条目的完成状态。"
+            )
+        recent_completed = (requirement_context or {}).get("recent_completed") or []
+        if recent_completed:
+            acceptance += "\n最近已完成项证据摘要：" + "; ".join(
+                f"完成项 {item.get('position')}：{item.get('text')} -> {item.get('evidence', [])}"
+                for item in recent_completed
             )
         return f"""你是一个通用本地操作 Agent。当前工作区根目录：{workspace_root}
 
@@ -1735,8 +1885,9 @@ class LocalAgentRuntime:
 2. 文件修改使用 edit_files，搜索文本必须唯一；修改后运行 verify_project 或明确的检查命令。
 3. Python 项目只能使用目标项目目录自己的 .venv；缺失时先对该项目调用 ensure_venv。不得复用父目录、兄弟目录、其他任务目录或系统 Python；验证结果必须以工具返回的 python_executable 和 cwd 为准。
 4. 长时间服务使用 start_process，不要用前台命令阻塞。
-5. 工具失败后根据错误改变策略，不要重复完全相同的失败调用。
-6. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
-7. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
-8. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
-9. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""
+5. 端到端验收包含多个 HTTP 请求时，优先使用 http_request_batch 一次提交检查清单；只有需要根据上一步响应动态决定下一步时才拆成多个 http_request。
+6. 工具失败后根据错误改变策略，不要重复完全相同的失败调用；复测 http_request_batch 时沿用返回的 group_id。
+7. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
+8. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
+9. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
+10. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""

@@ -131,6 +131,19 @@ class Memory:
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_task_metrics (
+                task_id TEXT PRIMARY KEY,
+                metrics_version TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_task_metrics_version "
+            "ON agent_task_metrics(metrics_version, computed_at)"
+        )
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS session_requirements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -476,6 +489,24 @@ class Memory:
             items.append(item)
         return items
 
+    def get_session_requirement_context(
+        self,
+        session_id: str,
+        *,
+        pending_limit: int = 24,
+        recent_completed_limit: int = 8,
+    ) -> Dict:
+        """Return a bounded prompt view without discarding the full ledger."""
+        pending = self.list_session_requirements(session_id, status="pending")
+        completed = self.list_session_requirements(session_id, status="completed")
+        limit = max(1, int(pending_limit))
+        return {
+            "pending": pending[:limit],
+            "pending_total": len(pending),
+            "pending_truncated": len(pending) > limit,
+            "recent_completed": completed[-max(0, int(recent_completed_limit)):],
+        }
+
     def settle_session_requirements(
         self,
         session_id: str,
@@ -521,6 +552,8 @@ class Memory:
             ),
         )
         self.conn.commit()
+        if state.get("status") in {"completed", "incomplete", "failed", "blocked", "cancelled", "interrupted"}:
+            self.refresh_agent_metrics_snapshot(state["task_id"])
 
     def get_agent_task(self, task_id: str) -> Optional[Dict]:
         row = self.conn.execute(
@@ -574,6 +607,9 @@ class Memory:
         for task_id, state_json in rows:
             state = json.loads(state_json)
             state["status"] = "interrupted"
+            state["resume_available"] = True
+            state["resume_count"] = int(state.get("resume_count", 0))
+            state["resume_reason"] = "runtime_restarted"
             state["final_text"] = "服务重启前任务未结束，已标记为中断。"
             summary = state.setdefault("summary", {})
             processes = summary.get("processes", [])
@@ -606,6 +642,7 @@ class Memory:
             (task_id, tool_name, json.dumps(args, ensure_ascii=False), json.dumps(result, ensure_ascii=False, default=str)),
         )
         self.conn.commit()
+        self.invalidate_agent_metrics_snapshot(task_id)
 
     def record_agent_artifact(
         self,
@@ -625,6 +662,7 @@ class Memory:
             (artifact_id, task_id, call_id, tool_name, mime_type, size, content),
         )
         self.conn.commit()
+        self.invalidate_agent_metrics_snapshot(task_id)
         return self.get_agent_artifact(task_id, artifact_id)
 
     def get_agent_artifact(self, task_id: str, artifact_id: str) -> Optional[Dict]:
@@ -677,6 +715,7 @@ class Memory:
             ),
         )
         self.conn.commit()
+        self.invalidate_agent_metrics_snapshot(task_id)
 
     def get_agent_tool_calls(self, task_id: str) -> List[Dict]:
         rows = self.conn.execute(
@@ -709,6 +748,7 @@ class Memory:
         error_kind: str | None = None,
     ) -> Dict:
         terminal = {"succeeded", "failed", "rejected", "interrupted"}
+        self.invalidate_agent_metrics_snapshot(task_id)
         transitions = {
             "parsed": {"awaiting_approval", "running", "failed", "interrupted"},
             "awaiting_approval": {"running", "rejected", "interrupted"},
@@ -768,6 +808,7 @@ class Memory:
         if cursor.rowcount != 1:
             raise ValueError(f"失败调用不能标记为已恢复: {task_id}/{failed_call_id}")
         self.conn.commit()
+        self.invalidate_agent_metrics_snapshot(task_id)
         return next(
             call for call in self.get_agent_tool_calls(task_id)
             if call["call_id"] == failed_call_id
@@ -798,6 +839,7 @@ class Memory:
             (task_id, json.dumps(files, ensure_ascii=False), diff),
         )
         self.conn.commit()
+        self.invalidate_agent_metrics_snapshot(task_id)
 
     def record_agent_event(self, event: Dict) -> int:
         """Append one redacted event and return its task-local sequence number."""
@@ -833,6 +875,11 @@ class Memory:
         except Exception:
             self.conn.rollback()
             raise
+        if event_type in {
+            "task_completed", "task_failed", "task_finished", "task_cancelled",
+            "runtime_reconciled", "stage_budget_exhausted", "tool_repair_exhausted",
+        }:
+            self.refresh_agent_metrics_snapshot(task_id)
         return sequence
 
     def get_agent_events(self, task_id: str, limit: int | None = None) -> List[Dict]:
@@ -965,6 +1012,101 @@ class Memory:
         )
         return [dict(zip(columns, row)) for row in rows]
 
+    def invalidate_agent_metrics_snapshot(self, task_id: str) -> None:
+        self.conn.execute("DELETE FROM agent_task_metrics WHERE task_id = ?", (task_id,))
+        self.conn.commit()
+
+    def get_agent_metrics_snapshot(self, task_id: str) -> Optional[Dict]:
+        row = self.conn.execute(
+            "SELECT metrics_version, metrics_json, computed_at "
+            "FROM agent_task_metrics WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "task_id": task_id,
+            "metrics_version": row[0],
+            "metrics": json.loads(row[1]),
+            "computed_at": row[2],
+        }
+
+    def save_agent_metrics_snapshot(self, task_id: str, metrics: Dict) -> Dict:
+        from agent.runtime.metrics import METRICS_VERSION
+
+        self.conn.execute(
+            """INSERT INTO agent_task_metrics (task_id, metrics_version, metrics_json, computed_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(task_id) DO UPDATE SET
+                   metrics_version = excluded.metrics_version,
+                   metrics_json = excluded.metrics_json,
+                   computed_at = CURRENT_TIMESTAMP""",
+            (task_id, METRICS_VERSION, json.dumps(metrics, ensure_ascii=False, default=str)),
+        )
+        self.conn.commit()
+        return metrics
+
+    def get_agent_trace_activity(self, task_id: str) -> Dict:
+        """Read only fields required for trace metrics; omit artifacts and diff bodies."""
+        tool_rows = self.conn.execute(
+            "SELECT tool_name, args_json, result_json, created_at "
+            "FROM agent_tool_runs WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        tool_calls = self.get_agent_tool_calls(task_id)
+        recovery_links = {
+            call["call_id"]: call.get("recovered_by_call_id")
+            for call in tool_calls
+            if call.get("recovered_by_call_id")
+        }
+        tool_runs = []
+        for tool_name, args_json, result_json, created_at in tool_rows:
+            result = json.loads(result_json)
+            call_id = str(result.get("call_id") or "")
+            tool_runs.append({
+                "tool_name": tool_name,
+                "args": json.loads(args_json),
+                "result": result,
+                "recovered_by_call_id": recovery_links.get(call_id),
+                "created_at": created_at,
+            })
+        if tool_calls:
+            tool_runs = [
+                {
+                    "tool_name": call["tool_name"],
+                    "args": call["input"],
+                    "result": call.get("result") or {
+                        "success": call.get("status") == "succeeded",
+                        "call_id": call["call_id"],
+                    },
+                    "recovered_by_call_id": call.get("recovered_by_call_id"),
+                    "created_at": call["created_at"],
+                }
+                for call in tool_calls
+            ]
+        change_rows = self.conn.execute(
+            "SELECT files_json FROM agent_changesets WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        return {
+            "events": self.get_agent_events(task_id),
+            "tool_runs": tool_runs,
+            "changesets": [{"files": json.loads(row[0])} for row in change_rows],
+        }
+
+    def refresh_agent_metrics_snapshot(self, task_id: str) -> Optional[Dict]:
+        state = self.get_agent_task(task_id)
+        if state is None:
+            return None
+        from agent.runtime.metrics import calculate_task_metrics
+
+        metrics = calculate_task_metrics(
+            task=state,
+            activity=self.get_agent_trace_activity(task_id),
+        )
+        self.save_agent_metrics_snapshot(task_id, metrics)
+        return metrics
+
     def get_agent_task_activity(self, task_id: str) -> Dict:
         tool_rows = self.conn.execute(
             "SELECT tool_name, args_json, result_json, created_at FROM agent_tool_runs WHERE task_id = ? ORDER BY id",
@@ -1000,49 +1142,67 @@ class Memory:
             ],
         }
 
-    def list_agent_traces(self, limit: int = 50) -> List[Dict]:
-        """Build compact, local task summaries from persisted agent facts."""
+    def list_agent_traces(
+        self,
+        limit: int = 50,
+        *,
+        status: str | None = None,
+        terminal_reason: str | None = None,
+        completion_evidence: str | None = None,
+        workspace: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> List[Dict]:
+        """Build compact trace summaries from snapshots and lightweight raw facts."""
+        from agent.runtime.metrics import METRICS_VERSION, calculate_task_metrics
+
+        clauses = []
+        params: list = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if from_date:
+            clauses.append("created_at >= ?")
+            params.append(from_date)
+        if to_date:
+            clauses.append("created_at <= ?")
+            params.append(to_date)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.conn.execute(
-            """SELECT task_id, session_id, user_message, status, state_json,
+            f"""SELECT task_id, session_id, user_message, status, state_json,
                       created_at, updated_at
                FROM agent_tasks
-               ORDER BY updated_at DESC, rowid DESC
-               LIMIT ?""",
-            (limit,),
+               {where}
+               ORDER BY updated_at DESC, rowid DESC""",
+            params,
         ).fetchall()
         traces = []
-        for task_id, session_id, message, status, state_json, created_at, updated_at in rows:
+        terminal_statuses = {"completed", "incomplete", "failed", "blocked", "cancelled", "interrupted"}
+        for task_id, session_id, message, task_status, state_json, created_at, updated_at in rows:
             state = json.loads(state_json)
-            tool_rows = self.conn.execute(
-                "SELECT status, recovered_by_call_id FROM agent_tool_calls WHERE task_id = ?",
-                (task_id,),
-            ).fetchall()
-            if tool_rows:
-                tool_count = len(tool_rows)
-                failed_tools = sum(
-                    1 for tool_status, recovered_by in tool_rows
-                    if tool_status in {"failed", "rejected", "interrupted"} and not recovered_by
-                )
-                recovered_tools = sum(1 for _, recovered_by in tool_rows if recovered_by)
+            snapshot = self.get_agent_metrics_snapshot(task_id)
+            if snapshot and snapshot["metrics_version"] == METRICS_VERSION:
+                quality_metrics = snapshot["metrics"]
+                metrics_version = snapshot["metrics_version"]
+                computed_at = snapshot["computed_at"]
             else:
-                legacy_rows = self.conn.execute(
-                    "SELECT result_json FROM agent_tool_runs WHERE task_id = ?",
-                    (task_id,),
-                ).fetchall()
-                tool_count = len(legacy_rows)
-                failed_tools = 0
-                for (result_json,) in legacy_rows:
-                    try:
-                        if not json.loads(result_json).get("success", False):
-                            failed_tools += 1
-                    except (TypeError, json.JSONDecodeError):
-                        failed_tools += 1
-                recovered_tools = 0
-            changed_files = set()
-            for (files_json,) in self.conn.execute(
-                "SELECT files_json FROM agent_changesets WHERE task_id = ?", (task_id,)
-            ).fetchall():
-                changed_files.update(json.loads(files_json))
+                quality_metrics = calculate_task_metrics(
+                    task=state,
+                    activity=self.get_agent_trace_activity(task_id),
+                )
+                metrics_version = METRICS_VERSION
+                computed_at = None
+                if task_status in terminal_statuses:
+                    self.save_agent_metrics_snapshot(task_id, quality_metrics)
+                    computed_at = self.get_agent_metrics_snapshot(task_id)["computed_at"]
+
+            workspace_root = state.get("workspace_root") or ""
+            if workspace and workspace_root != workspace:
+                continue
+            if terminal_reason and quality_metrics["terminal_reason"] != terminal_reason:
+                continue
+            if completion_evidence and quality_metrics["completion_evidence"] != completion_evidence:
+                continue
             checks = state.get("summary", {}).get("verification", [])
             verification = "not_run"
             if checks:
@@ -1054,15 +1214,39 @@ class Memory:
                 "message_encoding_status": (
                     "legacy_corrupted" if re.search(r"\?{6,}", str(message)) else "intact"
                 ),
-                "status": status,
-                "tool_count": tool_count,
-                "failed_tool_count": failed_tools,
-                "recovered_tool_count": recovered_tools,
-                "changed_file_count": len(changed_files),
+                "status": task_status,
+                "resume_available": bool(state.get("resume_available")),
+                "workspace_root": workspace_root,
+                "tool_count": quality_metrics.get("tool_count", 0),
+                "failed_tool_count": quality_metrics["unrecovered_tool_failures"],
+                "recovered_tool_count": quality_metrics["recovered_tool_count"],
+                "changed_file_count": quality_metrics.get("changed_file_count", 0),
                 "verification": verification,
                 "created_at": created_at,
                 "updated_at": updated_at,
+                "metrics_version": metrics_version,
+                "metrics_computed_at": computed_at,
+                "terminal_reason": quality_metrics["terminal_reason"],
+                "completion_evidence": quality_metrics["completion_evidence"],
+                "false_completion": quality_metrics["false_completion"],
+                "false_incomplete": quality_metrics["false_incomplete"],
+                "unrecovered_tool_failures": quality_metrics["unrecovered_tool_failures"],
+                "budget_exhausted_stages": quality_metrics["budget_exhausted_stages"],
+                "approval_count": quality_metrics["approval_count"],
+                "successful_tool_count": quality_metrics["successful_tool_count"],
+                "acceptance_passed": quality_metrics["acceptance_passed"],
+                "acceptance_total": quality_metrics["acceptance_total"],
+                "model_rounds": quality_metrics["model_rounds"],
+                "model_error_count": quality_metrics.get("model_error_count", 0),
+                "provider_truncation_count": quality_metrics.get("provider_truncation_count", 0),
+                "model_latency_ms": quality_metrics["model_latency_ms"],
+                "total_tokens": quality_metrics["total_tokens"],
+                "event_count": quality_metrics["event_count"],
+                "last_event_type": quality_metrics["last_event_type"],
+                "last_event_at": quality_metrics["last_event_at"],
             })
+            if len(traces) >= max(1, int(limit)):
+                break
         return traces
 
     # ========== 用户偏好 ==========

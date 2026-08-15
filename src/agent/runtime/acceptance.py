@@ -1,5 +1,7 @@
+import json
 import ntpath
 import re
+from pathlib import Path
 
 
 _BEHAVIOR_TERMS = (
@@ -28,7 +30,7 @@ class WorkProductEvaluator:
     """Evaluate requirement evidence independently from the producing model."""
 
     _evidence_pattern = re.compile(
-        r"\[证据:(file|check|process):([^\]]+)\]",
+        r"\[(?:证据|evidence):(file|check|process):([^\]]+)\]",
         re.IGNORECASE,
     )
     _item_pattern = re.compile(
@@ -43,16 +45,26 @@ class WorkProductEvaluator:
         response_text: str,
         summary: dict,
     ) -> dict:
-        checks = [
+        raw_checks = [
             check for check in summary.get("verification", [])
             if isinstance(check, dict)
         ]
+        checks = self._validate_verification_checks(raw_checks, str(summary.get("workspace_root", "")))
         passed_checks = sum(bool(check.get("success")) for check in checks)
         failed_checks = len(checks) - passed_checks
         technical_status = (
             "not_run" if not checks else "failed" if failed_checks else "passed"
         )
-        items = self._requirement_items(criteria, response_text, summary)
+        evidence_summary = {**summary, "verification": checks}
+        items = self._requirement_items(criteria, response_text, evidence_summary)
+        technical_verification = {
+            "status": technical_status,
+            "passed": passed_checks,
+            "failed": failed_checks,
+            "total": len(checks),
+        }
+        if any(check.get("evidence_status") == "invalid" for check in checks):
+            technical_verification["checks"] = checks
         return {
             "requirement_coverage": {
                 "success": bool(items) and all(item["status"] == "passed" for item in items),
@@ -62,13 +74,49 @@ class WorkProductEvaluator:
                 "total": len(items),
                 "items": items,
             },
-            "technical_verification": {
-                "status": technical_status,
-                "passed": passed_checks,
-                "failed": failed_checks,
-                "total": len(checks),
-            },
+            "technical_verification": technical_verification,
         }
+
+    @staticmethod
+    def _validate_verification_checks(checks: list[dict], workspace_root: str) -> list[dict]:
+        """Cross-check provider claims against local project manifests."""
+        root = Path(workspace_root) if workspace_root else None
+        validated: list[dict] = []
+        for check in checks:
+            item = dict(check)
+            item.setdefault("evidence_status", "verified" if item.get("success") else "failed")
+            command = str(item.get("command") or "").strip()
+            if item.get("success") and root and command:
+                cwd = Path(str(item.get("cwd") or root))
+                if not cwd.is_absolute():
+                    cwd = root / cwd
+                npm_script = None
+                if command == "npm test":
+                    npm_script = "test"
+                elif command.startswith("npm run "):
+                    npm_script = command.split(None, 2)[2].split()[0]
+                if npm_script:
+                    manifest = cwd / "package.json"
+                    try:
+                        data = json.loads(manifest.read_text(encoding="utf-8"))
+                        scripts = data.get("scripts") or {}
+                    except (OSError, json.JSONDecodeError, TypeError):
+                        scripts = {}
+                    if npm_script not in scripts:
+                        item["success"] = False
+                        item["evidence_status"] = "invalid"
+                        item["evidence_reason"] = f"package.json 未声明 scripts.{npm_script}"
+                elif command.startswith("pytest"):
+                    has_tests = any(
+                        path.is_file() and (path.name.startswith("test_") or path.name.endswith("_test.py"))
+                        for path in cwd.rglob("*.py")
+                    ) if cwd.is_dir() else False
+                    if not has_tests:
+                        item["success"] = False
+                        item["evidence_status"] = "invalid"
+                        item["evidence_reason"] = "工作目录未发现 pytest 测试文件"
+            validated.append(item)
+        return validated
 
     def _requirement_items(
         self,
@@ -130,6 +178,18 @@ class WorkProductEvaluator:
                     item["sufficient"] = False
                 evidence.append(item)
 
+            if (
+                not evidence
+                and "[完成]" in section
+                and self._has_consistent_actions(criterion_text, section)
+            ):
+                evidence = self._automatic_evidence(
+                    criterion_text,
+                    changed_files=changed_files,
+                    successful_checks=successful_checks,
+                    process_ids=process_ids,
+                )
+
             if "[未完成]" in section:
                 status = "failed"
                 reason = "回复明确标记为未完成"
@@ -156,6 +216,28 @@ class WorkProductEvaluator:
                 "reason": reason,
             })
         return ledger
+
+    @staticmethod
+    def _automatic_evidence(
+        criterion_text: str,
+        *,
+        changed_files: set[str],
+        successful_checks: set[str],
+        process_ids: set[str],
+    ) -> list[dict]:
+        """Use only persisted facts when a provider omits the evidence marker."""
+        criterion = criterion_text.casefold()
+        if process_ids and any(term in criterion for term in ("服务", "进程", "端口", "启动", "运行")):
+            return [{"type": "process", "ref": sorted(process_ids)[0], "valid": True, "auto": True}]
+        if any(term in criterion for term in _BEHAVIOR_TERMS):
+            behavior_checks = sorted(successful_checks & _BEHAVIOR_CHECKS)
+            if behavior_checks:
+                return [{"type": "check", "ref": behavior_checks[0], "valid": True, "auto": True}]
+        if changed_files:
+            return [{"type": "file", "ref": sorted(changed_files)[0], "valid": True, "auto": True}]
+        if successful_checks:
+            return [{"type": "check", "ref": sorted(successful_checks)[0], "valid": True, "auto": True}]
+        return []
 
     @staticmethod
     def _normalize_file_ref(path: object, workspace_root: str) -> str:

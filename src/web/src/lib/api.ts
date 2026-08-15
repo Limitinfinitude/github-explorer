@@ -1,6 +1,6 @@
 import type {
   AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
-  DefaultWorkspaceResponse, Model, ObservabilityStatus, ProjectEvidence, ProjectOverview, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
+  DefaultWorkspaceResponse, EvaluationReport, Model, ObservabilityStatus, ProjectEvidence, ProjectOverview, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
@@ -10,22 +10,36 @@ async function* readSSE(res: Response): AsyncGenerator<SSEEvent> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   if (!res.body) throw new Error('Response body is null')
   const reader = res.body.getReader()
-  const decoder = new TextDecoder()
+  const decoder = new TextDecoder('utf-8')
   let buffer = ''
+  const emit = function* (line: string): Generator<SSEEvent> {
+    if (!line.startsWith('data: ')) return
+    try { yield JSON.parse(line.slice(6)) as SSEEvent } catch { /* ignore malformed event */ }
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      try { yield JSON.parse(line.slice(6)) } catch { /* ignore malformed event */ }
-    }
+    for (const line of lines) yield* emit(line.trimEnd())
   }
+  buffer += decoder.decode()
+  if (buffer) yield* emit(buffer.trimEnd())
 }
 
 export const api = {
+  async getEncodingHealth() {
+    const res = await fetch('/api/agent/health/encoding')
+    if (!res.ok) throw new Error(`编码健康检查失败：HTTP ${res.status}`)
+    return res.json() as Promise<{
+      ok: boolean
+      encoding: string
+      round_trip: boolean
+      python_encoding: string
+      locale_encoding: string
+    }>
+  },
   async startAgentTask(message: string, sessionId: string, workspace?: string) {
     const res = await fetch('/api/agent/tasks/start', {
       method: 'POST',
@@ -121,8 +135,21 @@ export const api = {
     return res.json() as Promise<DefaultWorkspaceResponse>
   },
 
-  async getTraces(limit = 50): Promise<AgentTrace[]> {
-    const res = await fetch(`/api/agent/traces?limit=${limit}`)
+  async getTraces(limit = 50, filters: {
+    status?: string
+    terminal_reason?: string
+    completion_evidence?: string
+    workspace?: string
+    from?: string
+    to?: string
+  } = {}): Promise<AgentTrace[]> {
+    const params = new URLSearchParams({ limit: String(limit) })
+    Object.entries(filters).forEach(([key, value]) => {
+      if (!value) return
+      const normalized = key === 'to' && value.length === 10 ? `${value} 23:59:59` : key === 'from' && value.length === 10 ? `${value} 00:00:00` : value
+      params.set(key, normalized)
+    })
+    const res = await fetch(`/api/agent/traces?${params.toString()}`)
     if (!res.ok) throw new Error(`读取运行记录失败：HTTP ${res.status}`)
     const data = await res.json() as { traces: AgentTrace[] }
     return data.traces
@@ -132,6 +159,12 @@ export const api = {
     const res = await fetch('/api/agent/observability')
     if (!res.ok) throw new Error(`读取监控状态失败：HTTP ${res.status}`)
     return res.json()
+  },
+
+  async getEvaluationReport(limit = 100): Promise<EvaluationReport> {
+    const res = await fetch(`/api/agent/evaluation-report?limit=${Math.max(1, Math.min(limit, 500))}`)
+    if (!res.ok) throw new Error(`读取测评报告失败：HTTP ${res.status}`)
+    return res.json() as Promise<EvaluationReport>
   },
 
   async getTraceDetail(taskId: string): Promise<AgentTraceDetail> {
@@ -233,6 +266,17 @@ export const api = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || `取消任务失败：HTTP ${res.status}`)
     }
+    return data
+  },
+
+  async resumeTask(sessionId: string, taskId: string) {
+    const res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    })
+    const data = await res.json().catch(() => ({})) as { detail?: string; task_id?: string }
+    if (!res.ok || !data.task_id) throw new Error(data.detail || `恢复任务失败：HTTP ${res.status}`)
     return data
   },
 

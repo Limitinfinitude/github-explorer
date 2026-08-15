@@ -345,6 +345,11 @@ export function useChatStream(
         } else if (e.type === 'error') {
           steps.push({ icon: 'activity', text: e.content, done: true, status: 'failed' })
           commit(current => ({ ...current, steps: [...steps] }))
+          onError(e.content)
+        } else if (e.type === 'input_warning') {
+          steps.push({ icon: 'activity', text: e.message, done: true, status: 'failed' })
+          commit(current => ({ ...current, steps: [...steps], isGenerating: false }))
+          onError(e.message)
         }
       }
       if (!terminalSeen && !ctrl.signal.aborted) {

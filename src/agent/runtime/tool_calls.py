@@ -58,6 +58,8 @@ def tool_recovery_key(name: str, args: dict, current_path: Path) -> str | None:
         parsed = urlparse(str(args.get("url", "")))
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         return f"network:{(parsed.hostname or '').casefold()}:{port}"
+    if name == "http_request_batch" and args.get("group_id"):
+        return f"http-batch:{str(args['group_id']).strip()}"
     if name in {"get_process", "stop_process"} and args.get("process_id"):
         return f"process:{args['process_id']}"
     if name == "start_process":

@@ -1,117 +1,225 @@
 # GitHub Explorer
 
-GitHub Explorer 是一个 Windows 本地优先的开源项目探索工作台。它帮助用户从 GitHub 项目发现开始，完成可运行性体检、环境搭建、代码理解和隔离二改，并把工具调用、文件变更、验证结果和进程状态保存成可复读的本地记录。
+GitHub Explorer 是一个 **Windows 本地优先的项目探索与开发 Harness**：从发现 GitHub 仓库开始，在隔离的本地工作区中完成项目理解、环境搭建、依赖安装、代码修改、测试和服务验收，并把整个过程保存为可回放的事实记录。
 
-它不是云端 IDE，也不是另一个只会生成代码的聊天框。当前产品重点是把陌生仓库变成一个可运行、可解释、可实验和可复盘的本地对象。
+它面向三类用户：
 
-## 当前版本
+- 想把 GitHub 项目跑起来、学习和二次修改的学生与初学者；
+- 需要快速研究陌生仓库的开发者；
+- 需要观察 Agent 工具调用、失败恢复和代码产出的 Harness 研究者。
 
-- 服务地址：`http://127.0.0.1:7788/`
-- 监听地址：仅 `127.0.0.1`，不会监听 `0.0.0.0`
-- 主源码：`src/`
-- Python 环境：`.venv/`（本地开发时创建，不提交）
-- 前端：React + TypeScript + Vite，构建产物位于 `src/web_dist/`
+GitHub Explorer 不是云端 IDE，也不是只生成代码的聊天框。它的核心价值是把“找到项目”变成“在本地真实运行、修改、验证并能复盘的项目旅程”。
 
-## 核心能力
+![GitHub Explorer 当前架构](docs/diagrams/2026-08-15-github-explorer-current-architecture.svg)
+
+## 当前状态
+
+- 主服务：`http://127.0.0.1:7788/`
+- 监听范围：仅 `127.0.0.1`，不会监听 `0.0.0.0`
+- 最新源码：`src/`
+- Python 环境：项目根目录 `.venv/`
+- 当前 Harness 评估：`6.8 / 10`
+- 当前生产编排：`AgentTaskSupervisor + LocalAgentRuntime`
+- LangGraph / LangSmith：不再属于生产主链路；本地 SQLite 和事件回放承担观测职责
+
+当前仍处于快速迭代阶段，尚未宣称达到企业级安全、跨平台或部署标准。
+
+## 主要能力
+
+### 发现与理解项目
 
 - GitHub 搜索、趋势探索和仓库信息查看
-- 会话级工作区与全局默认工作区
 - 目录浏览、文件读取、文本搜索和 Repo Map
-- 结构化文件编辑、diff、ChangeSet 和最近一次撤销
-- 项目识别、`.venv` 准备、依赖安装、测试与构建验证
-- 前台命令和后台进程管理
-- 端口检查与 HTTP 就绪检查
-- 分级自动执行：普通操作自动执行，删除、管理员操作和外部发布前确认
-- Anthropic 原生协议与 OpenAI Compatible 协议
-- SSE 执行轨迹、SQLite 任务记录和本地事件回放
-- 工具调用账本、失败恢复、验收证据与上下文压缩
-- 后端任务取消、诊断预算与一次性重新规划
-- 后台进程状态对账：运行中、已停止、已退出和已失联
-- 进程与端口所有权：稳定进程 ID、进程树、命令指纹、监听 PID 与 `wait_http` 联合验收
-- 结构化工具恢复：字段级 schema 错误、修复建议、单次自动修复和明确的恢复耗尽终态
-- 四阶段执行预算：项目体检、实现、测试和运行验收分别计数，耗尽后在工具副作用前停止
-- 结构化本地 HTTP：仅允许访问 loopback 地址，避免用自由命令绕过本地网络边界
-- 重启恢复：遗留任务、开放工具调用和后台进程分别对账为 interrupted/orphaned
-- 项目工作台：按项目聚合阶段、任务、变更、验证和开发者证据
-- 项目工作台可信度事实带：同页展示服务身份、终态仲裁、阶段预算、模型轮数与 token
-- SQLite 本地观测总线：模型、工具、审批、文件、验证、进程和终态
-- 确定性终态仲裁：没有有效证据或明确标记未完成时不会误报完成
-- 本地质量指标：误报完成、误报未完成、证据覆盖、工具恢复率、模型轮数、延迟和 token
+- 项目类型识别、依赖清单分析和运行入口探测
+- 会话级工作区、全局默认工作区和当前路径记忆
 
-## 启动
+### 本地执行与修改
 
-Windows 推荐使用项目根目录的 `.venv`：
+- 结构化文件创建、编辑、diff、ChangeSet 和最近一次撤销
+- `.venv` 准备、依赖安装、测试、构建和服务启动
+- 前台命令、后台进程、端口检查和 HTTP 就绪检查
+- 分级自动执行：普通读取和验证自动执行，高风险操作需要确认
+- 工作区边界、loopback HTTP 边界和工具参数 Schema 校验
+
+### Agent 可靠性与恢复
+
+- 单一生产编排链，避免多套状态机互相串线
+- 工具调用账本、唯一 `call_id`、失败恢复和恢复耗尽终态
+- 四阶段预算：项目体检、实现、测试、运行验收分别计数
+- 重启后将遗留任务、开放工具调用和后台进程标记为 `interrupted/orphaned`
+- 任务取消、一次性重新规划、上下文压缩和需求账本
+
+### 观测与开发者证据
+
+- SQLite 本地事实源：任务、事件、模型、工具、审批、变更、验证、进程和记忆
+- SSE 实时轨迹与 `sequence` 回放，页面切换或重连后可以继续读取任务
+- 项目工作台按项目聚合阶段、任务、变更、验证和开发者证据
+- 终态仲裁：没有有效证据时不会把任务误报为完成
+- 本地质量指标：误报完成、证据覆盖、工具恢复率、模型轮数、延迟和 token
+
+## 快速开始
+
+### 1. 准备 Python 环境
+
+PowerShell：
 
 ```powershell
 cd E:\github探索者\github-explorer
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe src\main.py
 ```
 
-然后打开 [http://127.0.0.1:7788/](http://127.0.0.1:7788/)。也可以使用 `启动.bat` 或 `GitHub Explorer.bat`。
+项目已约定使用根目录 `.venv`，不要把依赖安装到系统 Python。
 
-## 配置模型
+### 2. 配置模型
 
-复制 `.env.example` 为 `.env`，再填写本机配置。`.env` 已被 `.gitignore` 排除，真实 API Key 不应提交到 Git 或 README；共享代码时只提交 `.env.example`。
+```powershell
+Copy-Item .env.example .env
+```
 
-模型也可以在 Web 界面的“设置”中配置 Base URL、协议和模型 ID，并使用 URL 测速、模型发现和最小推理连接测试。模型配置保存在本机 `data/` 目录，该目录不会提交到 Git。
+在 `.env` 或 Web 界面的“设置”中配置模型协议、Base URL、模型 ID 和 API Key。支持 Anthropic 原生协议与 OpenAI Compatible 协议，也支持获取模型、URL 测速和最小连接测试。
 
-## 架构
+真实密钥只保存在本机配置中，不要写入 README、源码、日志或 Git 历史。`.env`、`data/`、数据库、克隆仓库和本地日志均已加入忽略规则。
+
+### 3. 启动 7788 服务
+
+推荐入口：
+
+```powershell
+\.venv\Scripts\python.exe run_full.py
+```
+
+然后打开 [http://127.0.0.1:7788/](http://127.0.0.1:7788/)。也可以使用根目录的 `启动桌面.bat` 或 `GitHub Explorer.bat` 启动桌面封装。
+
+服务默认只绑定 loopback 地址。需要变更端口时可以设置 `PORT`，但不要把服务暴露到 `0.0.0.0`：
+
+```powershell
+$env:PORT = "7788"
+\.venv\Scripts\python.exe run_full.py
+```
+
+## 系统架构
 
 ```text
-React / TypeScript UI
+React + TypeScript UI
         |
- FastAPI + SSE API
+FastAPI + SSE API
         |
- LocalAgentRuntime
-   |      |       |
- Context  Tool    Acceptance
- Engine   Pipeline Evaluator
+AgentTaskSupervisor
         |
- SQLite Event Store
+LocalAgentRuntime
+   |       |        |
+Context  Tool     Acceptance
+Engine   Pipeline  Evaluator
+        |
+SQLite Fact Store
+        |
+Activity / Project Workbench / Evaluation Report
 ```
 
-生产环境只有一条 Agent 编排链：`LocalAgentRuntime`。模型负责提出行动和解释结果，Runtime 负责工作区边界、权限、工具执行、失败恢复、证据仲裁和终态。SQLite 是任务、模型调用、工具、审批、变更、验证、进程与记忆的唯一事实源。
+请求链路是：
 
-运行记录页使用同一事实源展示本地全链路，不依赖远程观测服务。API Key、Authorization、密码和完整 Prompt 不写入 Agent 事件。
+```text
+用户消息
+  -> 会话工作区解析
+  -> 任务与需求账本
+  -> 模型决策
+  -> 工具 Schema / 权限 / 工作区校验
+  -> 工具执行与副作用记录
+  -> 文件、测试、进程、HTTP 证据
+  -> 终态仲裁
+  -> SSE 实时回复与 SQLite 回放
+```
+
+Runtime 是唯一生产编排入口。模型负责提出行动并解释结果，Runtime 负责边界、权限、工具执行、恢复、证据和最终状态；SQLite 是本地事实源，SSE 只是事实的实时投影。
+
+详细架构、生命周期和评分对比见：
+
+- [项目技术报告](docs/项目技术报告.md)
+- [Harness 横向评估报告](docs/reports/2026-08-15-Harness横向评估报告.md)
+- [Agent 生命周期图](docs/diagrams/2026-08-15-agent-lifecycle.svg)
+- [Harness 分数对比图](docs/diagrams/2026-08-15-harness-score-comparison.svg)
+
+## 工作区与数据边界
+
+工作目录采用以下优先级：
+
+```text
+会话固定目录 > 全局默认目录 > 项目 fallback 目录
+```
+
+这样不同项目的对话不会串线，且同一会话可以记住当前路径。所有文件和命令操作都必须经过工作区边界检查。
+
+本地数据位置：
+
+```text
+data/                 本地模型配置、SQLite 数据库和记忆
+cloned_repos/         Agent 克隆的仓库
+.venv/                Python 虚拟环境
+项目推进记录/         本地测试与推进日志
+```
+
+以上目录不属于公开源码发布内容。测试文件和推进记录保留在本地，用于开发和测评，不随仓库上传。
 
 ## 开发与验证
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+后端：
 
+```powershell
+\.venv\Scripts\python.exe -m pytest -q
+```
+
+前端：
+
+```powershell
 cd src\web
+npm ci
 npm test -- --run
 npm run build
 ```
 
-当前验收基线：内部 Python 回归测试 `222 passed`，前端 Node 测试 `28 passed`，TypeScript 与 Vite 生产构建成功。服务只监听 `127.0.0.1:7788`。
+当前已验证的基线包括后端回归测试、前端测试、Vite 生产构建、7788 健康检查、SSE 回放和结构化测评报告。Playwright 真浏览器依赖暂不接入主链路，未来作为可选 skill/插件使用。
 
-## 目录说明
+## 发布边界
 
-```text
-src/                 最新 FastAPI、Agent Runtime 和 React 源码
-docs/                使用说明和公开技术文档
-desktop/             Windows 桌面启动封装
-mcp-servers/         MCP 配置与服务
-config/              非敏感配置模板
-data/                本地模型配置与 SQLite 数据，不提交
+允许进入公开仓库的内容：
+
+- `src/`、`desktop/`、启动脚本和依赖声明
+- `docs/` 中的公开技术文档与 SVG 图
+- `.env.example` 等不含真实凭据的配置模板
+- README 和产品说明
+
+禁止进入仓库的内容：
+
+- `.env`、API Key、Authorization、密码和完整 Prompt
+- `data/`、SQLite 数据库、`cloned_repos/`、`.venv/`
+- `tests/`、`项目推进记录/`、本地日志和缓存
+- 任何由个人项目运行产生的构建临时文件或运行产物
+
+提交前请检查：
+
+```powershell
+git status --short
+git diff --check
+git grep -n -I -E "sk-[A-Za-z0-9]|gho_[A-Za-z0-9]|Bearer [A-Za-z0-9]" -- ':!*.md'
 ```
 
-运行数据库、克隆仓库、`.venv`、缓存和日志不属于源码仓库内容，统一放在本地或 `_explorer-cleanup/` 归档目录。
+## 当前成熟度与路线图
 
-## 安全边界
+GitHub Explorer 当前评分为 `6.8 / 10`。它已经在“GitHub 项目发现 + 本地执行 + 事实观测”这个交叉场景形成差异化，但与成熟 Harness 相比仍有差距：
 
-本项目默认只允许本机访问。删除、覆盖、管理员操作、系统级安装和外部发布需要确认。工作区 root 是文件和命令操作的边界。
+- 真实 OS 级沙箱和跨平台隔离还不完整；
+- 插件、Provider、Skill 的生命周期边界仍需进一步接口化；
+- 长任务恢复、多 Agent 协作和生态集成仍较薄；
+- 真实浏览器 E2E、发布闭环和更大规模测试矩阵尚未完成。
 
-项目仍处于持续开发阶段，尚未宣称达到企业级安全、审计和部署标准。提交前仍应确认源码、日志、构建产物和提交历史中不存在真实凭据。
+后续路线：
 
-## 当前阶段
+1. 固化工具执行协议、恢复语义和能力 Seam；
+2. 用多轮真实任务校准观测指标和验收阈值；
+3. 完善项目学习、运行和二次开发旅程；
+4. 再评估可选浏览器 skill、沙箱和发布插件。
 
-- P4 已完成：进程与端口所有权、证据路径规范化、工具参数恢复、结构化最终化
-- P5 已完成：事件恢复与上下文压缩、阶段预算、结构化 HTTP、本地质量指标
-- 前端已完成当前阶段：项目旅程作为用户主线，开发者证据和可信度事实作为同页可展开的第二层
-- 后续重点：运行真实多轮评测矩阵，用历史数据校准质量指标阈值并继续改善项目学习与二改体验
+## 许可证
 
-以上“完成”指当前 P4/P5 TODO 的代码与自动化验收闭环，不代表项目已达到企业级安全、可用性或部署标准。
+项目当前处于持续开发阶段。正式发布前请补充适合项目依赖和二次分发的许可证文件，并再次审查第三方代码、模型服务条款与本地数据处理边界。

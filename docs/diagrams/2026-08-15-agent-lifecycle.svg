@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="700" viewBox="0 0 1440 700" role="img" aria-labelledby="title desc">
+  <title id="title">GitHub Explorer Agent 任务生命周期</title>
+  <desc id="desc">展示用户请求从入口、计划、模型请求、工具执行到验证、终态和断线回放的事件链。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#334155"/></marker>
+    <style>
+      .box { stroke:#334155; stroke-width:2; rx:12; }
+      .label { font:700 18px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#0f172a; }
+      .small { font:14px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#334155; }
+      .edge { stroke:#334155; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
+      .event { fill:#ecfeff; }
+      .state { fill:#dcfce7; }
+      .risk { fill:#fee2e2; }
+      .store { fill:#e2e8f0; }
+    </style>
+  </defs>
+  <rect width="1440" height="700" fill="#f8fafc"/>
+  <text x="60" y="54" class="label" style="font-size:24px">Agent 任务生命周期与事件账本</text>
+  <text x="60" y="82" class="small">后台任务独立于 SSE 订阅；断线后按 sequence 从 SQLite 回放，不依赖浏览器内存</text>
+
+  <rect x="60" y="145" width="170" height="90" class="box event"/>
+  <text x="145" y="180" text-anchor="middle" class="label">用户请求</text>
+  <text x="145" y="208" text-anchor="middle" class="small">message + session</text>
+  <rect x="280" y="145" width="170" height="90" class="box event"/>
+  <text x="365" y="180" text-anchor="middle" class="label">入口校验</text>
+  <text x="365" y="208" text-anchor="middle" class="small">UTF-8 / workspace</text>
+  <rect x="500" y="145" width="190" height="90" class="box state"/>
+  <text x="595" y="180" text-anchor="middle" class="label">任务登记</text>
+  <text x="595" y="208" text-anchor="middle" class="small">pending → running</text>
+  <rect x="740" y="145" width="190" height="90" class="box event"/>
+  <text x="835" y="180" text-anchor="middle" class="label">模型 Step</text>
+  <text x="835" y="208" text-anchor="middle" class="small">prompt + tools + usage</text>
+  <rect x="980" y="145" width="190" height="90" class="box event"/>
+  <text x="1075" y="180" text-anchor="middle" class="label">工具流水线</text>
+  <text x="1075" y="208" text-anchor="middle" class="small">validate → execute → settle</text>
+  <rect x="1220" y="145" width="160" height="90" class="box state"/>
+  <text x="1300" y="180" text-anchor="middle" class="label">继续/结束</text>
+  <text x="1300" y="208" text-anchor="middle" class="small">next step / done</text>
+
+  <path d="M230 190 H280" class="edge"/><path d="M450 190 H500" class="edge"/><path d="M690 190 H740" class="edge"/><path d="M930 190 H980" class="edge"/><path d="M1170 190 H1220" class="edge"/>
+
+  <rect x="240" y="355" width="260" height="105" class="box store"/>
+  <text x="370" y="392" text-anchor="middle" class="label">agent_events</text>
+  <text x="370" y="420" text-anchor="middle" class="small">sequence / payload / timestamp</text>
+  <text x="370" y="442" text-anchor="middle" class="small">唯一可回放事实源</text>
+  <rect x="590" y="355" width="260" height="105" class="box store"/>
+  <text x="720" y="392" text-anchor="middle" class="label">需求与验收</text>
+  <text x="720" y="420" text-anchor="middle" class="small">pending / passed / unverified</text>
+  <text x="720" y="442" text-anchor="middle" class="small">文件、测试、进程证据</text>
+  <rect x="940" y="355" width="260" height="105" class="box store"/>
+  <text x="1070" y="392" text-anchor="middle" class="label">任务快照</text>
+  <text x="1070" y="420" text-anchor="middle" class="small">agent_tasks + metrics</text>
+  <text x="1070" y="442" text-anchor="middle" class="small">轻量查询与报告投影</text>
+
+  <path d="M595 235 V300 H370 V355" class="edge"/>
+  <path d="M835 235 V300 H720 V355" class="edge"/>
+  <path d="M1075 235 V355" class="edge"/>
+  <path d="M1300 235 V520 H720 V460" class="edge"/>
+
+  <rect x="100" y="545" width="280" height="80" class="box risk"/>
+  <text x="240" y="578" text-anchor="middle" class="label">失败/恢复</text>
+  <text x="240" y="605" text-anchor="middle" class="small">recovery_key · retry · interrupted</text>
+  <rect x="500" y="545" width="280" height="80" class="box event"/>
+  <text x="640" y="578" text-anchor="middle" class="label">SSE 订阅</text>
+  <text x="640" y="605" text-anchor="middle" class="small">实时投影，不拥有任务</text>
+  <rect x="900" y="545" width="280" height="80" class="box state"/>
+  <text x="1040" y="578" text-anchor="middle" class="label">断线重连</text>
+  <text x="1040" y="605" text-anchor="middle" class="small">after_sequence → done</text>
+  <rect x="1240" y="545" width="140" height="80" class="box store"/>
+  <text x="1310" y="578" text-anchor="middle" class="label">Activity</text>
+  <text x="1310" y="605" text-anchor="middle" class="small">报告</text>
+  <path d="M500 585 H380" class="edge"/><path d="M780 585 H900" class="edge"/><path d="M1180 585 H1240" class="edge"/>
+</svg>

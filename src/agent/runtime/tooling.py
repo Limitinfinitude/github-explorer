@@ -1,5 +1,7 @@
+import json
 import re
 import urllib.error
+import uuid
 from dataclasses import dataclass
 
 from .commands import CommandRunner
@@ -211,6 +213,82 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         "json": {},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
     }, ["method", "url"], ToolRisk.READ, http_request)
+
+    def http_request_batch(a):
+        group_id = str(a.get("group_id") or f"batch-{uuid.uuid4().hex[:12]}")
+        checks = []
+        for index, request in enumerate(a.get("requests", [])[:32], start=1):
+            method = str(request.get("method", "GET")).upper()
+            url = str(request.get("url", ""))
+            try:
+                status, body, headers = services.network.request(
+                    method,
+                    url,
+                    request.get("headers"),
+                    request.get("json"),
+                    request.get("timeout", 15),
+                )
+                expected_status = request.get("expected_status")
+                success = (
+                    status == int(expected_status)
+                    if expected_status is not None
+                    else 200 <= status < 400
+                )
+                checks.append({
+                    "index": index,
+                    "method": method,
+                    "url": url,
+                    "status": status,
+                    "expected_status": expected_status,
+                    "success": success,
+                    "headers": headers,
+                    "body": str(body)[:4000],
+                    "error": None if success else f"HTTP 请求失败: {status}",
+                })
+            except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+                checks.append({
+                    "index": index,
+                    "method": method,
+                    "url": url,
+                    "status": None,
+                    "expected_status": request.get("expected_status"),
+                    "success": False,
+                    "headers": {},
+                    "body": "",
+                    "error": str(exc),
+                })
+        passed = sum(bool(item["success"]) for item in checks)
+        failed = len(checks) - passed
+        data = {"group_id": group_id, "checks": checks, "total": len(checks), "passed": passed, "failed": failed}
+        return ToolResult(
+            success=failed == 0,
+            data=data,
+            output=json.dumps(data, ensure_ascii=False),
+            error=None if failed == 0 else f"{failed} 个 HTTP 检查失败",
+            error_kind=None if failed == 0 else "http_batch_failed",
+        )
+
+    add("http_request_batch", "一次顺序执行最多 32 个本机 HTTP 检查并返回每一步结果，适合端到端验收", {
+        "group_id": {"type": "string", "description": "同一验收批次的稳定标识；复测时沿用返回的 group_id"},
+        "requests": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "json": {},
+                    "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+                    "expected_status": {"type": "integer", "minimum": 100, "maximum": 599},
+                },
+                "required": ["method", "url"],
+                "additionalProperties": False,
+            },
+        },
+    }, ["requests"], ToolRisk.READ, http_request_batch)
     add("wait_http", "等待本地 HTTP 服务开始响应", {
         "url": {"type": "string"},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},

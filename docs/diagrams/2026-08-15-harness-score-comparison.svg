@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Harness 十分制综合评分对比</title>
+  <desc id="desc">基于公开资料和当前源码评估的 Harness 综合评分，GitHub Explorer 当前为 6.8 分。</desc>
+  <style>
+    .title { font:700 24px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#0f172a; }
+    .label { font:600 16px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#0f172a; }
+    .small { font:13px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#475569; }
+    .grid { stroke:#cbd5e1; stroke-width:1; }
+  </style>
+  <rect width="1200" height="760" fill="#f8fafc"/>
+  <text x="50" y="55" class="title">公开 Harness 综合评分（10 分制）</text>
+  <text x="50" y="83" class="small">工程判断，不是官方排名；评分时点：2026-08-15；Explorer 以当前源码和 270 项后端测试为依据。</text>
+  <line x1="300" y1="125" x2="1100" y2="125" class="grid"/>
+  <line x1="300" y1="185" x2="1100" y2="185" class="grid"/>
+  <line x1="300" y1="245" x2="1100" y2="245" class="grid"/>
+  <line x1="300" y1="305" x2="1100" y2="305" class="grid"/>
+  <line x1="300" y1="365" x2="1100" y2="365" class="grid"/>
+  <line x1="300" y1="425" x2="1100" y2="425" class="grid"/>
+  <line x1="300" y1="485" x2="1100" y2="485" class="grid"/>
+  <line x1="300" y1="545" x2="1100" y2="545" class="grid"/>
+  <line x1="300" y1="605" x2="1100" y2="605" class="grid"/>
+  <line x1="300" y1="665" x2="1100" y2="665" class="grid"/>
+  <line x1="300" y1="125" x2="300" y2="665" class="grid"/>
+  <line x1="380" y1="125" x2="380" y2="665" class="grid"/>
+  <line x1="460" y1="125" x2="460" y2="665" class="grid"/>
+  <line x1="540" y1="125" x2="540" y2="665" class="grid"/>
+  <line x1="620" y1="125" x2="620" y2="665" class="grid"/>
+  <line x1="700" y1="125" x2="700" y2="665" class="grid"/>
+  <line x1="780" y1="125" x2="780" y2="665" class="grid"/>
+  <line x1="860" y1="125" x2="860" y2="665" class="grid"/>
+  <line x1="940" y1="125" x2="940" y2="665" class="grid"/>
+  <line x1="1020" y1="125" x2="1020" y2="665" class="grid"/>
+  <line x1="1100" y1="125" x2="1100" y2="665" class="grid"/>
+  <text x="300" y="112" class="small">0</text><text x="376" y="112" class="small">1</text><text x="456" y="112" class="small">2</text><text x="536" y="112" class="small">3</text><text x="616" y="112" class="small">4</text><text x="696" y="112" class="small">5</text><text x="776" y="112" class="small">6</text><text x="856" y="112" class="small">7</text><text x="936" y="112" class="small">8</text><text x="1016" y="112" class="small">9</text><text x="1092" y="112" class="small">10</text>
+  <text x="50" y="160" class="label">GitHub Explorer</text><rect x="300" y="140" width="544" height="28" rx="8" fill="#0ea5e9"/><text x="858" y="160" class="label">6.8</text>
+  <text x="50" y="220" class="label">DeepSeek Harness</text><rect x="300" y="200" width="688" height="28" rx="8" fill="#2563eb"/><text x="1002" y="220" class="label">8.6</text>
+  <text x="50" y="280" class="label">OpenHands</text><rect x="300" y="260" width="680" height="28" rx="8" fill="#16a34a"/><text x="994" y="280" class="label">8.5</text>
+  <text x="50" y="340" class="label">Aider</text><rect x="300" y="320" width="640" height="28" rx="8" fill="#ca8a04"/><text x="954" y="340" class="label">8.0</text>
+  <text x="50" y="400" class="label">OpenCode</text><rect x="300" y="380" width="696" height="28" rx="8" fill="#7c3aed"/><text x="1010" y="400" class="label">8.7</text>
+  <text x="50" y="460" class="label">OpenHarness</text><rect x="300" y="440" width="648" height="28" rx="8" fill="#db2777"/><text x="962" y="460" class="label">8.1</text>
+  <text x="50" y="520" class="label">Claude Code</text><rect x="300" y="500" width="728" height="28" rx="8" fill="#475569"/><text x="1042" y="520" class="label">9.1</text>
+  <text x="50" y="600" class="small">Explorer 的优势集中在：本地项目工作流、SQLite 事实账本、证据验收、可查询观测。</text>
+  <text x="50" y="625" class="small">主要差距集中在：插件/能力 Seam、跨平台成熟度、沙箱与权限深度、生态和真实 E2E 覆盖。</text>
+  <text x="50" y="690" class="small">评分依据详见《Harness 横向评估报告》，不代表生产安全认证或商业产品排名。</text>
+</svg>

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
+  <title id="title">GitHub Explorer 当前架构</title>
+  <desc id="desc">展示 React 前端、FastAPI 接入、Agent Runtime、工具策略、SQLite 事实账本和本地项目之间的关系。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#334155"/></marker>
+    <style>
+      .box { stroke:#334155; stroke-width:2; rx:14; }
+      .title { font:700 22px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#0f172a; }
+      .label { font:600 17px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#0f172a; }
+      .small { font:14px 'Microsoft YaHei', 'Segoe UI', sans-serif; fill:#334155; }
+      .edge { stroke:#334155; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
+      .dashed { stroke-dasharray:8 7; }
+    </style>
+  </defs>
+  <rect width="1440" height="860" fill="#f8fafc"/>
+  <text x="60" y="58" class="title">GitHub Explorer · 2026-08-15 当前主链路</text>
+  <text x="60" y="88" class="small">本地优先、单一 Agent Runtime、事件账本驱动的项目发现与执行工作台</text>
+
+  <rect x="60" y="140" width="270" height="150" class="box" fill="#dbeafe"/>
+  <text x="195" y="180" text-anchor="middle" class="label">React Web UI</text>
+  <text x="195" y="212" text-anchor="middle" class="small">Chat / Explore / Project</text>
+  <text x="195" y="236" text-anchor="middle" class="small">Activity / Settings</text>
+  <text x="195" y="260" text-anchor="middle" class="small">SSE 回放与任务状态</text>
+
+  <rect x="410" y="120" width="300" height="190" class="box" fill="#e0e7ff"/>
+  <text x="560" y="158" text-anchor="middle" class="label">FastAPI 接入层</text>
+  <text x="560" y="190" text-anchor="middle" class="small">/api/agent/tasks/*</text>
+  <text x="560" y="214" text-anchor="middle" class="small">/api/agent/chat/stream</text>
+  <text x="560" y="238" text-anchor="middle" class="small">workspace / settings / report</text>
+  <text x="560" y="262" text-anchor="middle" class="small">127.0.0.1:7788</text>
+
+  <rect x="790" y="100" width="340" height="230" class="box" fill="#dcfce7"/>
+  <text x="960" y="140" text-anchor="middle" class="label">AgentTaskSupervisor</text>
+  <text x="960" y="168" text-anchor="middle" class="small">后台任务与订阅解耦</text>
+  <rect x="820" y="190" width="280" height="105" class="box" fill="#f0fdf4"/>
+  <text x="960" y="222" text-anchor="middle" class="label">LocalAgentRuntime</text>
+  <text x="960" y="248" text-anchor="middle" class="small">模型循环 · tool call · recovery</text>
+  <text x="960" y="272" text-anchor="middle" class="small">acceptance · finalization · compaction</text>
+
+  <rect x="1180" y="120" width="210" height="170" class="box" fill="#fef3c7"/>
+  <text x="1285" y="158" text-anchor="middle" class="label">模型适配</text>
+  <text x="1285" y="190" text-anchor="middle" class="small">Anthropic</text>
+  <text x="1285" y="214" text-anchor="middle" class="small">OpenAI Compatible</text>
+  <text x="1285" y="238" text-anchor="middle" class="small">deepseek-v4-flash</text>
+  <text x="1285" y="262" text-anchor="middle" class="small">配置级 URL / Key</text>
+
+  <rect x="150" y="410" width="290" height="190" class="box" fill="#fce7f3"/>
+  <text x="295" y="450" text-anchor="middle" class="label">策略与工作区</text>
+  <text x="295" y="482" text-anchor="middle" class="small">WorkspaceManager</text>
+  <text x="295" y="506" text-anchor="middle" class="small">权限 / 风险 / 127.0.0.1</text>
+  <text x="295" y="530" text-anchor="middle" class="small">session sticky + default root</text>
+  <text x="295" y="554" text-anchor="middle" class="small">.venv / cwd / 进程所有权</text>
+
+  <rect x="570" y="390" width="300" height="230" class="box" fill="#ede9fe"/>
+  <text x="720" y="430" text-anchor="middle" class="label">统一工具注册表</text>
+  <text x="720" y="464" text-anchor="middle" class="small">read / search / edit</text>
+  <text x="720" y="488" text-anchor="middle" class="small">run / process / http</text>
+  <text x="720" y="512" text-anchor="middle" class="small">project / github / mcp</text>
+  <text x="720" y="548" text-anchor="middle" class="small">ToolResult + schema + recovery key</text>
+  <text x="720" y="576" text-anchor="middle" class="small">pre-check → execute → settle</text>
+
+  <rect x="1000" y="400" width="330" height="210" class="box" fill="#ffedd5"/>
+  <text x="1165" y="440" text-anchor="middle" class="label">本地项目服务</text>
+  <text x="1165" y="474" text-anchor="middle" class="small">文件系统与路径证据</text>
+  <text x="1165" y="498" text-anchor="middle" class="small">PowerShell / cmd 执行</text>
+  <text x="1165" y="522" text-anchor="middle" class="small">启动、端口、HTTP 验收</text>
+  <text x="1165" y="546" text-anchor="middle" class="small">cloned_repos / .venv</text>
+
+  <rect x="350" y="700" width="350" height="105" class="box" fill="#e2e8f0"/>
+  <text x="525" y="738" text-anchor="middle" class="label">SQLite 事实账本</text>
+  <text x="525" y="766" text-anchor="middle" class="small">agent_tasks · agent_events · tool_calls</text>
+  <text x="525" y="788" text-anchor="middle" class="small">requirements · changesets · artifacts · metrics</text>
+
+  <rect x="780" y="700" width="350" height="105" class="box" fill="#e2e8f0"/>
+  <text x="955" y="738" text-anchor="middle" class="label">本地观测投影</text>
+  <text x="955" y="766" text-anchor="middle" class="small">Activity / traces / evaluation-report</text>
+  <text x="955" y="788" text-anchor="middle" class="small">指标快照 + 结构化完成证据</text>
+
+  <path d="M330 215 H410" class="edge"/>
+  <path d="M710 215 H790" class="edge"/>
+  <path d="M1130 215 H1180" class="edge"/>
+  <path d="M890 330 V390" class="edge"/>
+  <path d="M830 305 C760 350 740 360 720 390" class="edge"/>
+  <path d="M920 330 C1040 350 1110 360 1165 400" class="edge"/>
+  <path d="M570 505 H440" class="edge"/>
+  <path d="M870 505 H1000" class="edge"/>
+  <path d="M525 600 V700" class="edge"/>
+  <path d="M955 610 V700" class="edge"/>
+  <path d="M720 620 C680 665 620 680 525 700" class="edge dashed"/>
+  <path d="M720 620 C780 665 860 680 955 700" class="edge dashed"/>
+
+  <text x="60" y="842" class="small">主编排链：FastAPI → AgentTaskSupervisor → LocalAgentRuntime；LangGraph/LangSmith 不再承担生产主链路。</text>
+</svg>

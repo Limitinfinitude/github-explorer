@@ -11,8 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 router_agent = APIRouter()
@@ -26,6 +26,13 @@ class LocalChatRequest(BaseModel):
     repo: Optional[str] = None
     workspace: Optional[str] = None
     agent_mode: bool = False
+
+
+def _input_encoding_issue(message: str) -> dict[str, object] | None:
+    from agent.runtime.input_health import inspect_text_encoding
+
+    result = inspect_text_encoding(message)
+    return result if result.get("status") == "corrupted" else None
 
 
 class ExecuteRequest(BaseModel):
@@ -56,6 +63,10 @@ class ApprovalRequest(BaseModel):
 
 
 class CancelTaskRequest(BaseModel):
+    session_id: str
+
+
+class ResumeTaskRequest(BaseModel):
     session_id: str
 
 
@@ -201,6 +212,10 @@ async def local_agent_chat_stream(request: LocalChatRequest):
             session_id = request.session_id
             user_msg = request.message
             repo = request.repo
+            issue = _input_encoding_issue(user_msg)
+            if issue:
+                yield f"data: {json.dumps({'type': 'input_warning', **issue}, ensure_ascii=False)}\n\n"
+                return
 
             # 加载对话历史
             history = memory.get_agent_chat_history(session_id, limit=10)
@@ -532,6 +547,9 @@ async def start_agent_task(request: LocalChatRequest):
     from agent.llm import get_model, get_protocol
     from agent.memory import memory
 
+    issue = _input_encoding_issue(request.message)
+    if issue:
+        raise HTTPException(status_code=400, detail=issue["message"])
     try:
         workspace, _ = require_agent_workspace(request.session_id, request.workspace)
         history = memory.get_agent_chat_history(request.session_id, limit=10)
@@ -557,6 +575,16 @@ async def start_agent_task(request: LocalChatRequest):
     }
 
 
+@router_agent.get("/api/agent/health/encoding")
+async def get_encoding_health():
+    from agent.runtime.input_health import encoding_health
+
+    return Response(
+        content=json.dumps(encoding_health(), ensure_ascii=False),
+        media_type="application/json; charset=utf-8",
+    )
+
+
 @router_agent.get("/api/agent/tasks/{task_id}/events")
 async def stream_agent_task_events(task_id: str, after_sequence: int = 0):
     from agent.memory import memory
@@ -572,6 +600,34 @@ async def stream_agent_task_events(task_id: str, after_sequence: int = 0):
             yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router_agent.post("/api/agent/tasks/{task_id}/resume", status_code=202)
+async def resume_agent_task(task_id: str, request: ResumeTaskRequest):
+    from agent.llm import get_model, get_protocol
+    from agent.memory import memory
+
+    state = memory.get_agent_task(task_id)
+    if state is None or state.get("session_id") != request.session_id:
+        raise HTTPException(status_code=404, detail="任务不存在或不属于当前会话")
+    try:
+        resumed_task_id = get_agent_task_supervisor().resume_interrupted(
+            request.session_id,
+            task_id,
+            model_context={
+                "id": get_model(),
+                "protocol": get_protocol(),
+                "base_url": os.environ.get("LLM_BASE_URL", ""),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "task_id": resumed_task_id,
+        "session_id": request.session_id,
+        "workspace": state.get("workspace_root"),
+        "status": "pending",
+    }
 
 
 # 项目环境配置
@@ -694,10 +750,26 @@ async def get_agent_workspace(session_id: str):
 
 
 @router_agent.get("/api/agent/traces")
-async def list_agent_traces(limit: int = 50):
+async def list_agent_traces(
+    limit: int = 50,
+    status: Optional[str] = None,
+    terminal_reason: Optional[str] = None,
+    completion_evidence: Optional[str] = None,
+    workspace: Optional[str] = None,
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
     from agent.memory import memory
 
-    return {"traces": memory.list_agent_traces(max(1, min(limit, 100)))}
+    return {"traces": memory.list_agent_traces(
+        max(1, min(limit, 100)),
+        status=status,
+        terminal_reason=terminal_reason,
+        completion_evidence=completion_evidence,
+        workspace=workspace,
+        from_date=from_date,
+        to_date=to_date,
+    )}
 
 
 def _project_task_states(memory, limit: int = 500):
@@ -853,14 +925,27 @@ async def search_agent_memory(
 
 @router_agent.get("/api/agent/observability")
 async def get_observability_status():
+    from agent.memory import memory
+    from agent.runtime.metrics import aggregate_observability
+
+    traces = memory.list_agent_traces(500)
     return {
         "local": {
             "enabled": True,
             "storage": "SQLite",
             "retention": "agent_tasks + agent_events + project_memories",
             "coverage": ["model", "tool", "approval", "file", "verification", "process", "terminal"],
+            "summary": aggregate_observability(traces),
         },
     }
+
+
+@router_agent.get("/api/agent/evaluation-report")
+async def get_evaluation_report(limit: int = 100):
+    from agent.memory import memory
+    from agent.runtime.reporting import build_evaluation_report
+
+    return build_evaluation_report(memory, limit=limit)
 
 
 @router_agent.post("/api/agent/approval")

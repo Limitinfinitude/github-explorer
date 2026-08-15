@@ -173,13 +173,58 @@ export interface AgentTrace {
   message: string
   message_encoding_status?: 'intact' | 'legacy_corrupted'
   status: string
+  resume_available?: boolean
+  workspace_root?: string
   tool_count: number
   failed_tool_count: number
   recovered_tool_count: number
   changed_file_count: number
   verification: 'passed' | 'failed' | 'not_run'
+  terminal_reason?: string
+  completion_evidence?: 'verified' | 'partial' | 'none'
+  budget_exhausted_stages?: string[]
+  approval_count?: number
+  successful_tool_count?: number
+  acceptance_passed?: boolean
+  acceptance_total?: number
+  model_rounds?: number
+  model_error_count?: number
+  provider_truncation_count?: number
+  diagnostic_tool_count?: number
+  diagnostic_unique_count?: number
+  model_latency_ms?: number
+  total_tokens?: number
+  event_count?: number
+  last_event_type?: string | null
+  last_event_at?: string | null
+  metrics_version?: string
+  metrics_computed_at?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface EvaluationReport {
+  generated_at: string
+  metrics_version: string | null
+  summary: {
+    task_count: number
+    status_counts: Record<string, number>
+    tool_count: number
+    changed_file_count: number
+    artifact_count: number
+  }
+  tasks: Array<{
+    task_id: string
+    session_id: string
+    workspace_root?: string
+    status: string
+    terminal_reason?: string
+    completion_evidence?: string
+    tool_count: number
+    tools: Array<Record<string, unknown>>
+    changed_files: string[]
+    artifacts: Array<Record<string, unknown>>
+  }>
 }
 
 export interface AgentTraceDetail {
@@ -236,6 +281,18 @@ export interface ProjectOverview {
     model_latency_ms: number
     total_tokens: number
     event_count: number
+    terminal_reason: string
+    completion_evidence: 'verified' | 'partial' | 'none'
+    budget_exhausted_stages: string[]
+    approval_count: number
+    failed_tool_count: number
+    recovered_tool_count: number
+    successful_tool_count: number
+    last_event_type: string | null
+    last_event_at: string | null
+    acceptance_passed: boolean
+    acceptance_total: number
+    acceptance_passed_count: number
   }
   trace: AgentTrace | null
 }
@@ -304,12 +361,32 @@ export interface AgentEvent {
 }
 
 export interface ObservabilityStatus {
-  local: { enabled: boolean; storage: string; retention: string; coverage: string[] }
+  local: {
+    enabled: boolean
+    storage: string
+    retention: string
+    coverage: string[]
+    summary: {
+      task_count: number
+      status_counts: Record<string, number>
+      terminal_reason_counts: Record<string, number>
+      completion_evidence_counts: Record<string, number>
+      budget_exhausted_count: number
+      approval_count: number
+      failed_tool_count: number
+      recovered_tool_count: number
+      false_completion_count: number
+      false_incomplete_count: number
+      average_model_latency_ms: number
+      total_tokens: number
+    }
+  }
 }
 
 export type View = 'chat' | 'project' | 'explore' | 'activity' | 'settings'
 
 export type SSEEvent =
+  | { type: 'input_warning'; status: 'corrupted'; reason: string; message: string }
   | { type: 'workspace'; path: string; session_id: string; task_id?: string }
   | { type: 'plan'; steps: string[]; session_id: string; task_id: string }
   | { type: 'repo_map'; content: string; files_scanned: number; session_id: string; task_id: string }

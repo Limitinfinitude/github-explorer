@@ -3,7 +3,7 @@ import { Activity, BookOpen, Check, ChevronDown, CircleAlert, Copy, Download, Fi
 import { api } from '../../lib/api'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
-import { processIdentityLabel, qualityState } from '../../lib/projectInsights'
+import { processIdentityLabel, qualityState, terminalReasonLabel } from '../../lib/projectInsights'
 import type { ProjectEvidence, ProjectEvidenceFilter, ProjectOverview, ProjectSummary } from '../../types'
 
 const STAGES = [
@@ -222,7 +222,9 @@ export function ProjectWorkspaceView({
           <section className="project-trust-strip" aria-label="运行与可信度">
             <div className="project-trust-strip__heading"><Waypoints size={15} /><span>运行与可信度</span></div>
             <div><small>服务身份</small><strong>{activeProcess ? processIdentityLabel(activeProcess) : '尚未启动服务'}</strong></div>
-            <div><small>终态仲裁</small><strong className={`project-trust--${quality?.tone || 'neutral'}`}>{quality?.label || '等待执行事实'}</strong></div>
+            <div><small>作品完成度</small><strong className={`project-trust--${quality?.tone || 'neutral'}`}>{quality?.label || '等待执行事实'}</strong></div>
+            <div><small>本轮结束原因</small><strong>{terminalReasonLabel(overview.quality_metrics.terminal_reason)}</strong></div>
+            <div><small>验收清单</small><strong>{overview.quality_metrics.acceptance_total ? `${overview.quality_metrics.acceptance_passed_count}/${overview.quality_metrics.acceptance_total} 项通过` : '暂无验收清单'}</strong></div>
             <div><small>阶段预算</small><strong>{Object.values(overview.stage_budgets).reduce((sum, item) => sum + item.used, 0)} 次操作</strong></div>
             <div><small>模型成本</small><strong>{overview.quality_metrics.model_rounds} 轮 · {overview.quality_metrics.total_tokens.toLocaleString()} tokens</strong></div>
             <div className="project-budget-track" aria-label="阶段预算明细">
