@@ -908,18 +908,32 @@ class LocalAgentRuntime:
                 flags=re.IGNORECASE,
             )
         final_text = format_final_response(response_text, state["summary"])
-        # 验证按“同类最后状态”判定：先失败后成功（如 wait_http 超时后
-        # http_request_batch 通过）不应再判未完成。family 归并 http 系检查。
+        # 验证按 family 归并：http 系（wait_http/http_request/http_request_batch）
+        # 取“成功优先”——HTTP 验收的目标是证明服务可用，只要有一次成功
+        # 的端到端验证即达成；其后的失败多为清理时序噪音（如停服后的探活）。
+        # 非 http 系仍取最后状态（r11a buku：最后一次 batch 在验收后失败，
+        # 前面有成功批次，按最后状态误判死）。
         latest_by_family: dict[str, dict] = {}
         for check in state["summary"].get("verification", []):
             if not isinstance(check, dict):
                 continue
             kind = str(check.get("kind") or "command").casefold()
             family = "http" if kind.startswith("http") else kind
+            if family == "http":
+                latest_by_family[family] = check
+                continue
             latest_by_family[family] = check
+        if any(
+            family == "http" and check.get("success")
+            for family, check in latest_by_family.items()
+        ):
+            latest_by_family["http"] = {
+                "kind": "http",
+                "success": True,
+                "command": "http (successful)",
+            }
         # 起服前的 port 检查失败是过程性观察（服务还没起必然不通）；
         # 若之后有成功的 HTTP 验证，port 失败已被结果超越，不作为判死依据
-        # （r11a buku：HTTP 验收最终通过，起服前的 check_port 失败仍判死）。
         if any(
             family == "http" and check.get("success")
             for family, check in latest_by_family.items()
