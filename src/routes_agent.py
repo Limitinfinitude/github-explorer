@@ -1198,6 +1198,14 @@ async def get_active_agent_task(session_id: str):
     return {"task": task, "activity": memory.get_agent_task_activity(task["task_id"])}
 
 
+@router_agent.get("/api/agent/token-usage")
+async def get_token_usage(days: int = 7, top: int = 10):
+    """Token 消耗统计：按天/按任务聚合 + 最近 5 小时窗口（对应 provider 限额）。"""
+    from agent.memory import memory
+
+    return memory.get_token_usage(days=days, top=top)
+
+
 @router_agent.get("/api/agent/processes/{session_id}")
 async def list_agent_processes(session_id: str):
     result = get_local_agent_services().processes.list(session_id)

@@ -5,6 +5,52 @@ import { localCoverageLabels } from '../../lib/observability'
 import { formatLocalTimestamp } from '../../lib/time'
 import type { AgentEvent, AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
 
+type TokenUsage = {
+  total: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }
+  last_5h: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }
+  by_day: Array<{ date: string; input: number; output: number; calls: number; total_tokens: number }>
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`
+  return String(value)
+}
+
+function TokenUsageStrip() {
+  const [usage, setUsage] = useState<TokenUsage | null>(null)
+
+  const load = useCallback(() => {
+    fetch('/api/agent/token-usage?days=7')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => setUsage(data))
+      .catch(() => setUsage(null))
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (!usage) return null
+  const days = usage.by_day.slice(-7)
+  const maxDay = Math.max(1, ...days.map(d => d.total_tokens))
+  return (
+    <div className="token-usage-strip" aria-label="Token 消耗统计">
+      <div className="token-usage-strip__headline">
+        <span>近 5 小时 <strong>{formatTokens(usage.last_5h.total_tokens)}</strong>（{usage.last_5h.calls} 次调用）</span>
+        <span>7 日累计 <strong>{formatTokens(usage.total.total_tokens)}</strong></span>
+        <span className="token-usage-strip__hint">输入 {formatTokens(usage.total.input_tokens)} / 输出 {formatTokens(usage.total.output_tokens)}</span>
+      </div>
+      <div className="token-usage-strip__bars">
+        {days.map(day => (
+          <div key={day.date} className="token-usage-strip__bar" title={`${day.date}：${day.total_tokens.toLocaleString()} tokens（${day.calls} 次调用）`}>
+            <div className="token-usage-strip__bar-fill" style={{ height: `${Math.max(4, Math.round(day.total_tokens / maxDay * 100))}%` }} />
+            <span>{day.date.slice(5)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function eventLabel(event: AgentEvent): string {
   const name = typeof event.payload.name === 'string' ? event.payload.name : ''
   if (event.type === 'tool_call') return name ? `调用 ${name}` : '调用工具'
@@ -214,6 +260,7 @@ export function ActivityView() {
           <div><Clock3 size={14} /><span>平均模型延迟</span><strong>{observability?.local.summary.average_model_latency_ms ?? 0} ms</strong></div>
           <div><span>Token</span><strong>{(observability?.local.summary.total_tokens ?? 0).toLocaleString()}</strong></div>
         </div>
+        <TokenUsageStrip />
       </section>
 
       <section className="activity-view__filters" aria-label="运行记录筛选">

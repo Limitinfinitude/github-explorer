@@ -5,7 +5,7 @@ import sqlite3
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -1271,6 +1271,99 @@ class Memory:
             "changesets": [
                 {"files": json.loads(row[0]), "diff": row[1], "created_at": row[2]}
                 for row in change_rows
+            ],
+        }
+
+    def get_token_usage(self, days: int = 7, top: int = 10) -> Dict:
+        """聚合模型调用 token 消耗：按天、按任务、按滑动窗口。
+
+        数据源是 agent_events 的 model_request_completed（每次调用都带
+        usage）；评测连跑时 5 小时限额（429）曾整轮覆没，消耗可视化是
+        预算管理的前提。
+        """
+        cutoff = (datetime.utcnow() - timedelta(days=max(1, days))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        rows = self.conn.execute(
+            """SELECT task_id, payload_json, created_at FROM agent_events
+               WHERE event_type = 'model_request_completed' AND created_at >= ?
+               ORDER BY id""",
+            (cutoff,),
+        ).fetchall()
+
+        def _usage_of(payload: str) -> tuple[int, int]:
+            try:
+                usage = (json.loads(payload) or {}).get("usage") or {}
+            except json.JSONDecodeError:
+                return 0, 0
+            inp = int(usage.get("input_tokens") or 0)
+            out = int(
+                usage.get("output_tokens")
+                or usage.get("completion_tokens")
+                or 0
+            )
+            return inp, out
+
+        by_day: Dict[str, Dict] = {}
+        by_task: Dict[str, Dict] = {}
+        total_in = total_out = calls = 0
+        five_hour_in = five_hour_out = five_hour_calls = 0
+        window_start = datetime.utcnow() - timedelta(hours=5)
+        window_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+
+        for task_id, payload, created in rows:
+            inp, out = _usage_of(payload)
+            day = str(created)[:10]
+            calls += 1
+            total_in += inp
+            total_out += out
+            by_day.setdefault(day, {"input": 0, "output": 0, "calls": 0})
+            by_day[day]["input"] += inp
+            by_day[day]["output"] += out
+            by_day[day]["calls"] += 1
+            task_key = str(task_id or "unknown")
+            by_task.setdefault(task_key, {"input": 0, "output": 0, "calls": 0})
+            by_task[task_key]["input"] += inp
+            by_task[task_key]["output"] += out
+            by_task[task_key]["calls"] += 1
+            if str(created) >= window_str:
+                five_hour_calls += 1
+                five_hour_in += inp
+                five_hour_out += out
+
+        top_tasks = sorted(
+            by_task.items(),
+            key=lambda kv: -(kv[1]["input"] + kv[1]["output"]),
+        )[: max(1, top)]
+        return {
+            "window_days": max(1, days),
+            "total": {
+                "calls": calls,
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+                "total_tokens": total_in + total_out,
+            },
+            "last_5h": {
+                "calls": five_hour_calls,
+                "input_tokens": five_hour_in,
+                "output_tokens": five_hour_out,
+                "total_tokens": five_hour_in + five_hour_out,
+            },
+            "by_day": [
+                {
+                    "date": day,
+                    **stats,
+                    "total_tokens": stats["input"] + stats["output"],
+                }
+                for day, stats in sorted(by_day.items())
+            ],
+            "top_tasks": [
+                {
+                    "task_id": task_id,
+                    **stats,
+                    "total_tokens": stats["input"] + stats["output"],
+                }
+                for task_id, stats in top_tasks
             ],
         }
 

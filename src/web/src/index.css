@@ -1075,3 +1075,45 @@ button { cursor: pointer; }
 .prose table thead { border-bottom-color: var(--border-2); }
 .prose table tr { border-top-color: var(--surface-2); }
 .prose table th, .prose table td { border-color: var(--border-2); }
+
+/* Token 消耗统计条（活动页） */
+.token-usage-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.token-usage-strip__headline {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.token-usage-strip__headline strong { font-size: 14px; }
+.token-usage-strip__hint { opacity: 0.7; }
+.token-usage-strip__bars {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  height: 46px;
+}
+.token-usage-strip__bar {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  height: 100%;
+}
+.token-usage-strip__bar-fill {
+  width: 100%;
+  min-height: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent-color, #3fb950);
+  opacity: 0.75;
+}
+.token-usage-strip__bar span { font-size: 10px; opacity: 0.65; }
