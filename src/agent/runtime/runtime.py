@@ -2389,6 +2389,19 @@ class LocalAgentRuntime:
                 f"{str(step_back.get('error', ''))[:300]}。"
                 "停止重复该调用；列出 3-5 种可能的原因并按可能性排序，选择与之前不同的方法。）"
             )
+        # 探索推动：诊断调用已多但从未动手实施时，提醒直接开始修改
+        diagnostic_count = int(state.get("diagnostic_tool_count", 0))
+        if (
+            not state.get("material_tool_seen")
+            and diagnostic_count >= 8
+            and int(state.get("round", 0)) >= 4
+        ):
+            parts.append(
+                f"\n\n（进度提醒：你已执行 {diagnostic_count} 次读取/搜索类调用。"
+                "通常这已足够定位问题；请基于已收集的信息直接实施修改"
+                "（edit_files / 命令执行），而不是继续探索。"
+                "如确有缺口，先说明还缺什么、为什么已有信息不够。）"
+            )
         return "\n".join(parts)
 
     def _track_token_scale(self, state: dict, system: str, response: dict) -> None:

@@ -49,6 +49,39 @@ class ToolRegistry:
         risk = definition.risk_resolver(args) if definition.risk_resolver else definition.risk
         return self._permission_gate.requires_confirmation(risk)
 
+    @staticmethod
+    def _schema_hint(definition: ToolDefinition) -> str:
+        """从 input_schema 生成参数说明与最小示例，供参数校验失败时回显。
+
+        模型传错参数结构时（如把 edits 数组的 path 提到顶层），光说
+        "不允许的字段"不足以自我纠正；回显正确结构一次即可（Aider 失败
+        反馈四件套的"参照"部分）。
+        """
+        props = definition.input_schema.get("properties") or {}
+        required = set(definition.input_schema.get("required") or [])
+        parts = []
+        example: dict = {}
+        for name, spec in props.items():
+            kind = spec.get("type", "?")
+            mark = "必填" if name in required else "可选"
+            extra = ""
+            if kind == "array" and isinstance(spec.get("items"), dict):
+                item_props = spec["items"].get("properties") or {}
+                inner = ", ".join(
+                    f"{k}:{v.get('type', '?')}" for k, v in item_props.items()
+                )
+                if inner:
+                    extra = f"，每项 {{{inner}}}"
+                example[name] = []
+            elif kind == "string":
+                example[name] = "..."
+            elif kind == "integer":
+                example[name] = 1
+            parts.append(f"{name}({kind},{mark}{extra})")
+        if not parts:
+            return ""
+        return f"正确参数：{'; '.join(parts)}。最小示例：{example}"
+
     def execute(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
         definition = self._definitions.get(name)
         if definition is None:
@@ -56,8 +89,14 @@ class ToolRegistry:
 
         validation_issue = schema_issue(args, definition.input_schema)
         if validation_issue:
+            hint = self._schema_hint(definition)
+            message = (
+                f"工具参数无效: {validation_issue.path}: {validation_issue.message}"
+            )
+            if hint:
+                message = f"{message}。{hint}"
             return ToolResult.fail(
-                f"工具参数无效: {validation_issue.path}: {validation_issue.message}",
+                message,
                 error_kind="invalid_input",
                 data={"validation": validation_issue.to_dict()},
             )
