@@ -1062,6 +1062,14 @@ class LocalAgentRuntime:
                 elif ctype == "done":
                     response = chunk.get("response") or {}
             if not response:
+                # 流正常结束但没有 done chunk（SSE 提前关闭）：静默整块重取
+                # 会多消耗一次 API 请求（账本只见一次 completed），必须可观测
+                self._record_event({
+                    **event,
+                    "type": "model_request_retrying",
+                    "attempt": 2,
+                    "reason": "stream_empty_response_fallback",
+                })
                 response = await self.llm_call(**kwargs, binding=binding)
             self._record_event({
                 **event,

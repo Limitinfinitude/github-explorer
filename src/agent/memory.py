@@ -1313,7 +1313,15 @@ class Memory:
 
         for task_id, payload, created in rows:
             inp, out = _usage_of(payload)
-            day = str(created)[:10]
+            # created_at 是 UTC；按天聚合换算本地时区，与用户控制台视角一致
+            try:
+                local_day = (
+                    datetime.strptime(str(created), "%Y-%m-%d %H:%M:%S")
+                    + timedelta(hours=8)
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                local_day = str(created)[:10]
+            day = local_day
             calls += 1
             total_in += inp
             total_out += out
