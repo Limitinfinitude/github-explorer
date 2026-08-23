@@ -60,6 +60,50 @@ def project_action_prompt(action: str) -> str:
         raise ValueError(f"不支持的项目动作: {action}") from exc
 
 
+def _first_error_line(result: Mapping[str, Any]) -> str:
+    """Extract the first meaningful line of a failed tool result."""
+    for key in ("error", "stderr", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().splitlines()[0][:160]
+    output = result.get("output")
+    if isinstance(output, str):
+        for line in output.strip().splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:160]
+    return "未知错误"
+
+
+def _failure_patterns(tool_runs: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate unrecovered tool failures into a compact failure catalog."""
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for run in tool_runs or []:
+        if not isinstance(run, Mapping):
+            continue
+        if run.get("recovered_by_call_id"):
+            continue
+        result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
+        if result.get("success", False):
+            continue
+        tool_name = str(run.get("tool_name") or "tool")
+        error = _first_error_line(result)
+        key = (tool_name, error)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "tool_name": tool_name,
+                "error": error,
+                "count": 0,
+                "last_at": str(run.get("created_at") or ""),
+            }
+        group["count"] += 1
+        created_at = str(run.get("created_at") or "")
+        if created_at and created_at > group["last_at"]:
+            group["last_at"] = created_at
+    return sorted(groups.values(), key=lambda item: item["count"], reverse=True)
+
+
 def build_project_summary(tasks: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     projects: dict[str, dict[str, Any]] = {}
     ordered = sorted(
@@ -202,6 +246,7 @@ def build_project_overview(*, project_id: str, workspace: Mapping[str, Any] | No
         "latest_verification": verification[-1] if verification else None,
         "stage_budgets": summary.get("stage_budgets", {}),
         "quality_metrics": calculate_task_metrics(task=task, activity=activity),
+        "failure_patterns": _failure_patterns(activity.get("tool_runs") or []),
         "trace": next(
             (trace for trace in (traces or []) if trace.get("task_id") == project_id),
             None,
@@ -301,3 +346,159 @@ def build_project_evidence(*, project_id: str, workspace: Mapping[str, Any] | No
         "developer_layers": ["events", "tools", "files", "verification", "processes", "local_trace"],
     }
     return sanitize(payload)
+
+
+_STATUS_LABELS = {
+    "completed": "已完成",
+    "incomplete": "未完成",
+    "failed": "失败",
+    "blocked": "受阻",
+    "cancelled": "已取消",
+    "interrupted": "已中断",
+    "waiting_approval": "等待确认",
+    "running": "进行中",
+    "not_started": "未开始",
+    "pending": "排队中",
+}
+
+_TERMINAL_REASON_LABELS = {
+    "completed": "正常完成",
+    "stage_budget_exhausted": "阶段预算已用尽",
+    "diagnostic_budget_exhausted": "诊断预算已用尽",
+    "approval_pending": "等待审批",
+    "tool_repair_exhausted": "工具修复已耗尽",
+    "unrecovered_tool_failure": "存在未恢复工具失败",
+    "interrupted": "运行被中断",
+    "cancelled": "任务已取消",
+    "model_error": "模型请求失败",
+    "no_execution_facts": "没有执行事实",
+    "running": "仍在运行",
+}
+
+_STAGE_LABELS = {
+    "intake": "材料导入",
+    "inspect": "项目体检",
+    "run": "跑起来",
+    "understand": "看懂",
+    "experiment": "实验室",
+    "verify": "验证",
+    "record": "记录",
+}
+
+_VERIFICATION_LABELS = {
+    "verified": "已验证",
+    "partial": "部分完成",
+    "none": "无证据",
+}
+
+
+def _project_report_label(mapping: dict[str, str], key: str | None, fallback: str) -> str:
+    return mapping.get(str(key or "")) or (str(key or "") if key else fallback)
+
+
+def build_project_report_markdown(
+    *,
+    overview: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    memories: list[Mapping[str, Any]] | None = None,
+) -> str:
+    """Render a self-contained Markdown project report from persisted facts."""
+    import datetime as _dt
+    from collections.abc import Mapping as _Mapping
+
+    def _lines() -> list[str]:
+        summary = overview.get("summary") if isinstance(overview.get("summary"), _Mapping) else {}
+        metrics = overview.get("quality_metrics") if isinstance(overview.get("quality_metrics"), _Mapping) else {}
+        counts = overview.get("evidence_counts") if isinstance(overview.get("evidence_counts"), _Mapping) else {}
+        root = str(overview.get("workspace_root") or "")
+        workspace_name = ntpath.basename(ntpath.normpath(root)) if root else "未绑定工作区"
+        lines = [
+            f"# 项目报告 — {workspace_name}",
+            "",
+            f"> 生成时间：{_dt.datetime.now().astimezone().isoformat(timespec='seconds')} · 项目 ID：{overview.get('project_id', '')}",
+            "",
+            "## 概览",
+            "",
+            f"- 工作区：`{root or '未绑定'}`",
+            f"- 当前阶段：{_project_report_label(_STAGE_LABELS, overview.get('stage'), '项目体检')}",
+            f"- 阶段状态：{_project_report_label(_STATUS_LABELS, overview.get('stage_status'), '未开始')}",
+            f"- 下一步：{overview.get('next_action') or '—'}",
+            f"- 最近任务：{summary.get('message') or '—'}",
+            f"- 变更文件：{summary.get('changed_file_count', 0)} · 验证项：{summary.get('verification_count', 0)} · 后台进程：{summary.get('process_count', 0)}",
+            "",
+            "## 终态与可信度",
+            "",
+            f"- 完成证据：{_project_report_label(_VERIFICATION_LABELS, metrics.get('completion_evidence'), '无证据')}",
+            f"- 结束原因：{_project_report_label(_TERMINAL_REASON_LABELS, metrics.get('terminal_reason'), '未分类')}",
+            f"- 完成状态误报：{'是' if metrics.get('false_completion') else '否'}",
+            f"- 未完成误判：{'是' if metrics.get('false_incomplete') else '否'}",
+            f"- 验收清单：{metrics.get('acceptance_passed_count', 0)}/{metrics.get('acceptance_total', 0)} 项通过",
+            f"- 恢复率：{_fmt_ratio(metrics.get('tool_recovery_rate'))}（未恢复失败 {metrics.get('unrecovered_tool_failures', 0)} 次）",
+            "",
+            "## 模型成本",
+            "",
+            f"- 模型轮次：{metrics.get('model_rounds', 0)}",
+            f"- 总 token：{metrics.get('total_tokens', 0)}",
+            f"- 平均延迟：{metrics.get('model_latency_ms', 0)} ms",
+            f"- 模型错误：{metrics.get('model_error_count', 0)} · 提供方截断：{metrics.get('provider_truncation_count', 0)}",
+            "",
+        ]
+        failures = overview.get("failure_patterns") or []
+        lines.append("## 失败模式")
+        lines.append("")
+        if not failures:
+            lines.append("未发现未恢复的工具失败。")
+        else:
+            lines.append("| 工具 | 次数 | 错误摘要 |")
+            lines.append("|---|---|---|")
+            for pattern in failures:
+                error = str(pattern.get("error") or "").replace("|", "\\|")
+                lines.append(f"| {pattern.get('tool_name', '')} | {pattern.get('count', 0)} | {error} |")
+        lines.append("")
+        history = evidence.get("task_history") if isinstance(evidence.get("task_history"), list) else []
+        lines.append("## 任务历史")
+        lines.append("")
+        if not history:
+            lines.append("暂无任务记录。")
+        else:
+            for item in history:
+                status = _project_report_label(_STATUS_LABELS, item.get("status"), "未知")
+                lines.append(
+                    f"- {item.get('created_at') or '未知时间'} · {status} · "
+                    f"{str(item.get('message') or '未命名任务').replace(chr(10), ' ')} "
+                    f"(`{item.get('task_id') or ''}`)"
+                )
+        lines.append("")
+        lines.append("## 项目记忆")
+        lines.append("")
+        if not memories:
+            lines.append("尚未沉淀项目事实。")
+        else:
+            for fact in memories:
+                confidence = float(fact.get("confidence") or 0)
+                lines.append(
+                    f"- **{str(fact.get('content') or '').replace(chr(10), ' ')}**"
+                    f"（来源 {fact.get('source_type') or '未知'}，"
+                    f"验证 {fact.get('verification_status') or 'unverified'}，"
+                    f"置信度 {confidence:.0%}）"
+                )
+        lines.append("")
+        lines.append("## 执行证据统计")
+        lines.append("")
+        lines.append(f"- 事件 {counts.get('events', 0)} 条 · 工具运行 {counts.get('tool_runs', 0)} 次 · "
+                     f"变更集 {counts.get('changesets', 0)} 个 · 涉及文件 {counts.get('files', 0)} 个 · "
+                     f"产物 {counts.get('artifacts', 0)} 个")
+        lines.append("")
+        lines.append("_本报告由本地工作台生成；完整逐条证据请使用工作台中的「开发者证据层」导出。_")
+        return lines
+
+    return "\n".join(_lines())
+
+
+def _fmt_ratio(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return str(value)

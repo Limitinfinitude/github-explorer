@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Pencil, PlugZap, Plus, Save, X } from 'lucide-react'
+import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Moon, Palette, Pencil, PlugZap, Plus, Save, ShieldCheck, Sun, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { modelProbeReadiness, probeStatusText } from '../../lib/modelProbe'
 import type { ModelDiscoveryResult, ProbeResult } from '../../lib/modelProbe'
@@ -8,9 +8,19 @@ import type { CustomModelInput, Model } from '../../types'
 interface Props {
   models: Model[]
   currentModel: string
+  theme: 'dark' | 'light'
+  onThemeChange: (theme: 'dark' | 'light') => void
   onSelectModel: (id: string) => void
   onModelCreated: (id: string) => Promise<void>
 }
+
+type ApprovalMode = 'confirm' | 'auto' | 'open'
+
+const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string }[] = [
+  { value: 'confirm', label: '需要审批', description: '高风险操作等待人工确认' },
+  { value: 'auto', label: '自动审批', description: '高风险操作自动放行并记录' },
+  { value: 'open', label: '完全开放', description: '不检查权限，直接执行' },
+]
 
 const EMPTY_FORM: CustomModelInput = {
   name: '',
@@ -18,9 +28,10 @@ const EMPTY_FORM: CustomModelInput = {
   protocol: 'anthropic',
   base_url: '',
   api_key: '',
+  thinking_effort: 'off',
 }
 
-export function SettingsView({ models, currentModel, onSelectModel, onModelCreated }: Props) {
+export function SettingsView({ models, currentModel, theme, onThemeChange, onSelectModel, onModelCreated }: Props) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [showKey, setShowKey] = useState(false)
@@ -35,6 +46,9 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
   const [workspaceDraft, setWorkspaceDraft] = useState('')
   const [workspaceSource, setWorkspaceSource] = useState<'configured' | 'fallback'>('fallback')
   const [workspaceSaving, setWorkspaceSaving] = useState(false)
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('confirm')
+  const [approvalSaving, setApprovalSaving] = useState(false)
+  const [approvalStatus, setApprovalStatus] = useState<{ ok: boolean; text: string } | null>(null)
   const [workspaceStatus, setWorkspaceStatus] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
@@ -45,6 +59,10 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
     }).catch(reason => {
       setWorkspaceStatus({ ok: false, text: reason instanceof Error ? reason.message : '读取失败' })
     })
+  }, [])
+
+  useEffect(() => {
+    api.getApprovalMode().then(mode => setApprovalMode(mode)).catch(() => {})
   }, [])
 
   const saveDefaultWorkspace = async () => {
@@ -61,6 +79,21 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
       setWorkspaceStatus({ ok: false, text: reason instanceof Error ? reason.message : '保存失败' })
     } finally {
       setWorkspaceSaving(false)
+    }
+  }
+
+  const saveApprovalMode = async (mode: ApprovalMode) => {
+    if (mode === approvalMode) return
+    setApprovalSaving(true)
+    setApprovalStatus(null)
+    try {
+      await api.setApprovalMode(mode)
+      setApprovalMode(mode)
+      setApprovalStatus({ ok: true, text: '已保存' })
+    } catch (reason) {
+      setApprovalStatus({ ok: false, text: reason instanceof Error ? reason.message : '保存失败' })
+    } finally {
+      setApprovalSaving(false)
     }
   }
 
@@ -96,6 +129,7 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
       protocol: model.protocol ?? 'anthropic',
       base_url: model.base_url ?? '',
       api_key: '',
+      thinking_effort: model.thinking_effort ?? 'off',
     })
     setLatencyResult(null)
     setDiscoveryResult(null)
@@ -194,6 +228,54 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
         )}
       </section>
 
+      <section className="workspace-settings" aria-labelledby="approval-mode-title">
+        <div className="workspace-settings__heading">
+          <span className="workspace-settings__icon"><ShieldCheck size={16} /></span>
+          <div>
+            <h2 id="approval-mode-title">权限模式</h2>
+            <p>高风险操作（删除/系统级命令等）的执行策略。</p>
+          </div>
+          {approvalStatus && (
+            <span className={`workspace-settings__source ${approvalStatus.ok ? 'is-configured' : ''}`}>
+              {approvalStatus.ok ? '已保存' : '保存失败'}
+            </span>
+          )}
+        </div>
+        <div className="approval-mode__selector">
+          {APPROVAL_MODES.map(mode => (
+            <button
+              key={mode.value}
+              type="button"
+              className={approvalMode === mode.value ? 'is-active' : ''}
+              onClick={() => void saveApprovalMode(mode.value)}
+              disabled={approvalSaving}
+              title={mode.description}
+            >
+              <strong>{mode.label}</strong>
+              <small>{mode.description}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="workspace-settings" aria-labelledby="appearance-title">
+        <div className="workspace-settings__heading">
+          <span className="workspace-settings__icon"><Palette size={16} /></span>
+          <div>
+            <h2 id="appearance-title">外观主题</h2>
+            <p>切换界面深色 / 浅色主题，选择会保存在本机并立即生效。</p>
+          </div>
+        </div>
+        <div className="theme-switch" role="radiogroup" aria-label="界面主题">
+          <button type="button" className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')} aria-pressed={theme === 'dark'}>
+            <Moon size={13} />深色
+          </button>
+          <button type="button" className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')} aria-pressed={theme === 'light'}>
+            <Sun size={13} />浅色
+          </button>
+        </div>
+      </section>
+
       {adding && (
         <form className="model-editor" onSubmit={submit}>
           <div className="model-editor__header">
@@ -216,6 +298,22 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
                 OpenAI Compatible
               </button>
             </div>
+          </div>
+
+          <div className="model-field model-field--wide">
+            <label>思考程度（Think）</label>
+            <div className="protocol-selector">
+              <button type="button" className={form.thinking_effort === 'off' ? 'is-active' : ''} onClick={() => update('thinking_effort', 'off')}>
+                关闭
+              </button>
+              <button type="button" className={form.thinking_effort === 'high' ? 'is-active' : ''} onClick={() => update('thinking_effort', 'high')}>
+                高
+              </button>
+              <button type="button" className={form.thinking_effort === 'max' ? 'is-active' : ''} onClick={() => update('thinking_effort', 'max')}>
+                最大
+              </button>
+            </div>
+            <p className="model-field__hint">Anthropic 协议开启后 temperature 强制为 1；OpenAI 兼容协议对应 reasoning_effort。需要模型/网关支持思考模式。</p>
           </div>
 
           <div className="model-editor__grid">

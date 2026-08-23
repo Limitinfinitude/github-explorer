@@ -6,6 +6,8 @@ export interface Message {
   toolCalls?: ToolCall[]
   steps?: Step[]
   cmdBlocks?: CmdBlockData[]
+  thinking?: string[]
+  narrations?: string[]
   agentRun?: AgentRunSummary
 }
 
@@ -15,6 +17,10 @@ export interface Chat {
   sessionId: string
   messages: Message[]
   created: number
+  /** 归属项目（工作台项目栏）；未设置则为普通任务对话，显示在任务栏。 */
+  projectId?: string
+  /** 会话绑定的工作区根目录（项目对话 = 项目目录；未绑定前用于首次打开自动绑定）。 */
+  workspace?: string
 }
 
 export interface Model {
@@ -28,6 +34,7 @@ export interface Model {
   api_key_masked?: string
   base_url?: string
   has_key?: boolean
+  thinking_effort?: 'off' | 'high' | 'max'
 }
 
 export interface CustomModelInput {
@@ -36,6 +43,7 @@ export interface CustomModelInput {
   protocol: 'anthropic' | 'openai'
   base_url: string
   api_key: string
+  thinking_effort: 'off' | 'high' | 'max'
 }
 
 export interface ToolCall {
@@ -51,6 +59,9 @@ export interface Step {
   done: boolean
   callId?: string
   toolName?: string
+  args?: Record<string, unknown>
+  output?: string
+  error?: string
   status?: 'running' | 'succeeded' | 'failed' | 'rejected' | 'interrupted'
   recoveredByCallId?: string
 }
@@ -271,6 +282,7 @@ export interface ProjectOverview {
   active_processes: Array<Record<string, unknown>>
   latest_verification: Record<string, unknown> | null
   stage_budgets: Record<string, { used: number; limit: number; status: string }>
+  failure_patterns: ProjectFailurePattern[]
   quality_metrics: {
     false_completion: boolean
     false_incomplete: boolean
@@ -303,6 +315,40 @@ export interface ProjectSummary {
   latest_task_id: string
   task_count: number
   updated_at?: string
+}
+
+export interface ProjectFailurePattern {
+  tool_name: string
+  error: string
+  count: number
+  last_at: string
+}
+
+export interface ProjectMemory {
+  id: number
+  workspace_root: string
+  content: string
+  source_type: string
+  source_ref: string
+  confidence: number
+  verification_status: string
+  expires_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectReport {
+  project_id: string
+  generated_at: string
+  markdown: string
+}
+
+export interface ProjectImportResult {
+  project_id: string
+  session_id: string
+  task_id: string
+  workspace: string
+  status: string
 }
 
 export interface ProjectEvidence {
@@ -391,6 +437,8 @@ export type SSEEvent =
   | { type: 'plan'; steps: string[]; session_id: string; task_id: string }
   | { type: 'repo_map'; content: string; files_scanned: number; session_id: string; task_id: string }
   | { type: 'step'; step: string; icon: string }
+  | { type: 'narration'; tool_name: string; content: string }
+  | { type: 'thinking'; content: string }
   | { type: 'tool_call'; name: string; tool_name?: string; args: Record<string, unknown>; call_id: string; batch_id: string }
   | { type: 'tool_result'; name: string; tool_name?: string; success: boolean; output: string; error?: string; error_kind?: string; data?: Record<string, unknown>; artifact?: AgentArtifact | null; call_id: string; batch_id: string }
   | { type: 'tool_recovered'; name: string; failed_call_id: string; recovered_by_call_id: string; recovery_key: string }

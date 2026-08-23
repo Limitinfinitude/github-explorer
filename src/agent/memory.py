@@ -190,6 +190,24 @@ class Memory:
             "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_task ON agent_artifacts(task_id, created_at)"
         )
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                msg_time TEXT,
+                thinking_json TEXT NOT NULL DEFAULT '[]',
+                narrations_json TEXT NOT NULL DEFAULT '[]',
+                steps_json TEXT NOT NULL DEFAULT '[]',
+                cmd_blocks_json TEXT NOT NULL DEFAULT '[]',
+                agent_run_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id)"
+        )
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS agent_tool_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -598,18 +616,44 @@ class Memory:
         ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def prune_agent_events(self, days: int = 30) -> Dict[str, int]:
+        """清理超过 days 天的运行时事件记录，防止 SQLite 无限膨胀。
+
+        保留 agent_tasks（任务状态与回放仍需要），只清理事件流水、
+        工具运行记录与操作日志。created_at 为 UTC 的 'YYYY-MM-DD HH:MM:SS'。
+        """
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.utcnow() - timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M:%S")
+        counts: Dict[str, int] = {}
+        for table in ("agent_events", "agent_tool_runs", "action_logs"):
+            try:
+                counts[table] = self.conn.execute(
+                    f"DELETE FROM {table} WHERE created_at < ?", (cutoff,)
+                ).rowcount
+            except sqlite3.OperationalError:
+                counts[table] = 0
+        self.conn.commit()
+        return counts
+
     def reconcile_interrupted_runtime(self) -> List[str]:
         """Settle task and process snapshots that cannot survive a process restart."""
         rows = self.conn.execute(
-            "SELECT task_id, state_json FROM agent_tasks WHERE status IN ('queued', 'running')"
+            "SELECT task_id, state_json FROM agent_tasks WHERE status IN ('queued', 'running', 'pending')"
         ).fetchall()
         reconciled: List[str] = []
         for task_id, state_json in rows:
             state = json.loads(state_json)
-            state["status"] = "interrupted"
-            state["resume_available"] = True
+            # pending 任务（注册后未启动）重启后不可恢复，直接中断
+            if state.get("status") == "pending":
+                state["status"] = "interrupted"
+                state["resume_available"] = False
+                state["resume_reason"] = "task_never_started"
+            else:
+                state["status"] = "interrupted"
+                state["resume_available"] = True
+                state["resume_reason"] = "runtime_restarted"
             state["resume_count"] = int(state.get("resume_count", 0))
-            state["resume_reason"] = "runtime_restarted"
             state["final_text"] = "服务重启前任务未结束，已标记为中断。"
             summary = state.setdefault("summary", {})
             processes = summary.get("processes", [])
@@ -841,6 +885,49 @@ class Memory:
         self.conn.commit()
         self.invalidate_agent_metrics_snapshot(task_id)
 
+    def save_chat_message(self, session_id: str, message: Dict) -> None:
+        """保存一条前端聊天消息（含思考/工具步骤等过程数据）。"""
+        self.conn.execute(
+            """INSERT INTO chat_messages
+               (session_id, role, content, msg_time, thinking_json, narrations_json,
+                steps_json, cmd_blocks_json, agent_run_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                str(message.get("role", "assistant")),
+                str(message.get("content", "")),
+                str(message.get("time", "")),
+                json.dumps(message.get("thinking") or [], ensure_ascii=False, default=str),
+                json.dumps(message.get("narrations") or [], ensure_ascii=False, default=str),
+                json.dumps(message.get("steps") or [], ensure_ascii=False, default=str),
+                json.dumps(message.get("cmdBlocks") or [], ensure_ascii=False, default=str),
+                json.dumps(message.get("agentRun") or {}, ensure_ascii=False, default=str),
+            ),
+        )
+        self.conn.commit()
+
+    def get_chat_messages(self, session_id: str) -> List[Dict]:
+        """读取一个会话的完整聊天消息（按保存顺序）。"""
+        rows = self.conn.execute(
+            """SELECT role, content, msg_time, thinking_json, narrations_json,
+                      steps_json, cmd_blocks_json, agent_run_json
+               FROM chat_messages WHERE session_id = ? ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+        messages: List[Dict] = []
+        for role, content, msg_time, thinking_json, narrations_json, steps_json, cmd_blocks_json, agent_run_json in rows:
+            messages.append({
+                "role": role,
+                "content": content,
+                "time": msg_time or "",
+                "thinking": json.loads(thinking_json or "[]"),
+                "narrations": json.loads(narrations_json or "[]"),
+                "steps": json.loads(steps_json or "[]"),
+                "cmdBlocks": json.loads(cmd_blocks_json or "[]"),
+                "agentRun": json.loads(agent_run_json or "{}"),
+            })
+        return messages
+
     def record_agent_event(self, event: Dict) -> int:
         """Append one redacted event and return its task-local sequence number."""
         task_id = str(event.get("task_id", ""))
@@ -882,12 +969,12 @@ class Memory:
             self.refresh_agent_metrics_snapshot(task_id)
         return sequence
 
-    def get_agent_events(self, task_id: str, limit: int | None = None) -> List[Dict]:
+    def get_agent_events(self, task_id: str, limit: int | None = None, after_sequence: int = 0) -> List[Dict]:
         query = (
             "SELECT sequence, session_id, event_type, payload_json, created_at "
-            "FROM agent_events WHERE task_id = ? ORDER BY sequence"
+            "FROM agent_events WHERE task_id = ? AND sequence > ? ORDER BY sequence"
         )
-        params: list = [task_id]
+        params: list = [task_id, max(0, int(after_sequence))]
         if limit is not None:
             query += " LIMIT ?"
             params.append(max(1, int(limit)))
@@ -976,6 +1063,24 @@ class Memory:
             raise
         return memory_id
 
+    def delete_project_memories(self, workspace_root: str) -> int:
+        """删除一个项目的全部记忆（评测隔离 / 用户清理）。同时清理 FTS 索引。"""
+        rows = self.conn.execute(
+            "SELECT id FROM project_memories WHERE workspace_root = ?", (workspace_root,)
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"DELETE FROM project_memory_fts WHERE memory_id IN ({placeholders})", ids
+        )
+        self.conn.execute(
+            f"DELETE FROM project_memories WHERE id IN ({placeholders})", ids
+        )
+        self.conn.commit()
+        return len(ids)
+
     def search_project_memories(
         self,
         workspace_root: str,
@@ -1009,6 +1114,33 @@ class Memory:
         columns = (
             "id", "workspace_root", "content", "source_type", "source_ref",
             "confidence", "verification_status", "expires_at", "created_at", "updated_at", "rank",
+        )
+        return [dict(zip(columns, row)) for row in rows]
+
+    def list_project_memories(
+        self,
+        workspace_root: str,
+        *,
+        limit: int = 20,
+        verified_only: bool = False,
+    ) -> List[Dict]:
+        """List all non-expired project facts without requiring FTS search terms."""
+        verified_filter = "AND verification_status = 'verified'" if verified_only else ""
+        rows = self.conn.execute(
+            f"""SELECT id, workspace_root, content, source_type, source_ref,
+                       confidence, verification_status, expires_at,
+                       created_at, updated_at
+                FROM project_memories
+                WHERE workspace_root = ?
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                  {verified_filter}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?""",
+            (workspace_root, max(1, min(int(limit), 100))),
+        ).fetchall()
+        columns = (
+            "id", "workspace_root", "content", "source_type", "source_ref",
+            "confidence", "verification_status", "expires_at", "created_at", "updated_at",
         )
         return [dict(zip(columns, row)) for row in rows]
 

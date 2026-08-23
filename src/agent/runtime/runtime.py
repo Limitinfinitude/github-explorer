@@ -1,5 +1,7 @@
 import asyncio
+import datetime
 import json
+import platform
 import re
 import time
 import uuid
@@ -23,6 +25,7 @@ from .tool_calls import (
     reconcile_tool_messages,
     tool_recovery_key,
 )
+from ..llm import ModelBinding, capture_model_binding
 from .tracing import tool_call_context
 from .workspace import WorkspaceManager
 
@@ -41,6 +44,20 @@ _EXPLICIT_UNFINISHED_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CLAUSE_MARK_RE = re.compile(r"[，。！？,.!?；;：:\n]")
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context length",
+    "context window",
+    "context_window",
+    "maximum context",
+    "prompt is too long",
+    "context_length_exceeded",
+    "exceeds the maximum",
+    "too many tokens",
+)
+_VERIFICATION_COMMAND_RE = re.compile(
+    r"\b(build|test|pytest|vitest|compileall|lint|tsc|go\s+vet|npm\s+run|pnpm\s+run)\b",
+    re.IGNORECASE,
+)
 _DIAGNOSTIC_TOOLS = {
     "list_directory", "read_file", "search_text", "repo_map", "detect_project",
     "get_process", "list_processes", "check_port", "wait_http",
@@ -50,7 +67,7 @@ _STAGE_TOOLS = {
     "test": {"verify_project"},
     "run": {"start_process", "get_process", "list_processes", "stop_process", "check_port", "wait_http", "http_request", "http_request_batch"},
 }
-_STAGE_LIMITS = {"inspect": 24, "implement": 16, "test": 8, "run": 8}
+_STAGE_LIMITS = {"inspect": 36, "implement": 24, "test": 8, "run": 8}
 _CONTINUE_TASK_RE = re.compile(
     r"^\s*(?:(?:继续|接着)(?:做|来|进行|推进|优化|完善)?(?:一下)?(?:吧)?|"
     r"按(?:照)?\s*(?:todo|计划)\s*继续(?:进行|推进)?(?:吧)?)\s*[。.!！]*\s*$",
@@ -80,6 +97,8 @@ class LocalAgentRuntime:
         diagnostic_tool_budget: int = 16,
         replan_extra_rounds: int = 4,
         tool_result_preview_chars: int = 12_000,
+        tool_execution_timeout: float = 300,
+        llm_stream_call: Callable[..., Any] | None = None,
         task_store: Any | None = None,
         context_engine: ContextEngine | None = None,
         compaction_engine: CompactionEngine | None = None,
@@ -87,6 +106,7 @@ class LocalAgentRuntime:
         self.workspaces = workspaces
         self.registry_factory = registry_factory
         self.llm_call = llm_call
+        self.llm_stream_call = llm_stream_call
         self.max_rounds = max_rounds
         self.max_identical_failures = max_identical_failures
         self.max_context_tokens = max_context_tokens
@@ -94,12 +114,14 @@ class LocalAgentRuntime:
         self.diagnostic_tool_budget = diagnostic_tool_budget
         self.replan_extra_rounds = replan_extra_rounds
         self.tool_result_preview_chars = max(1, int(tool_result_preview_chars))
+        self.tool_execution_timeout = float(tool_execution_timeout or 180)
         self.task_store = task_store
         self.context_engine = context_engine
         self.compaction_engine = compaction_engine or CompactionEngine()
         self.work_product_evaluator = WorkProductEvaluator()
         self._task_cache: dict[str, dict] = {}
         self._cancelled_tasks: set[str] = set()
+        self._model_bindings: dict[str, ModelBinding] = {}
 
     def register_task(self, session_id: str, task_id: str) -> None:
         if self._load_task(task_id) is not None:
@@ -155,6 +177,7 @@ class LocalAgentRuntime:
         history: list[dict] | None = None,
         task_id: str | None = None,
         model_context: dict | None = None,
+        approval_mode: str = "confirm",
     ) -> AsyncIterator[dict]:
         task_id = task_id or uuid.uuid4().hex
         registered = self._load_task(task_id)
@@ -220,7 +243,7 @@ class LocalAgentRuntime:
         safe_model_context = {
             key: str(value)
             for key, value in (model_context or {}).items()
-            if key in {"id", "protocol", "base_url"} and value is not None
+            if key in {"id", "protocol", "base_url", "thinking_effort"} and value is not None
         }
         base_event = {"session_id": session_id, "task_id": task_id}
         direct_chat = bool(_DIRECT_CHAT_RE.fullmatch(user_message))
@@ -285,6 +308,7 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": user_message,
             "status": "running",
+            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open"} else "confirm",
             "messages": [*(history or []), {"role": "user", "content": user_message}],
             "round": 0,
             "round_limit": self.max_rounds,
@@ -418,12 +442,12 @@ class LocalAgentRuntime:
         state = self._load_task(task_id)
         base_event = {"session_id": session_id, "task_id": task_id}
         if state is None or state.get("session_id") != session_id:
-            error = f"浠诲姟涓嶅瓨鍦ㄦ垨涓嶅睘浜庡綋鍓嶄細璇? {task_id}"
+            error = f"任务不存在或不属于当前会话: {task_id}"
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
             return
         if state.get("status") != "interrupted" or not state.get("resume_available"):
-            error = f"浠诲姟涓嶅彲鎭㈠: {task_id}"
+            error = f"任务不可恢复: {task_id}"
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
             return
@@ -485,6 +509,9 @@ class LocalAgentRuntime:
 
     async def _drive(self, state: dict, registry: ToolRegistry, workspace_root: str) -> AsyncIterator[dict]:
         base_event = {"session_id": state["session_id"], "task_id": state["task_id"]}
+        task_id = state["task_id"]
+        if task_id not in self._model_bindings:
+            self._model_bindings[task_id] = self._capture_task_binding(state)
         system = self._system_prompt(
             workspace_root,
             state.get("repo_map", ""),
@@ -497,22 +524,68 @@ class LocalAgentRuntime:
             while state["round"] < state.get("round_limit", self.max_rounds):
                 state["round"] += 1
                 self._save_task(state)
-                response = await self._call_model(
-                    state,
-                    "reasoning",
-                    system=system,
-                    messages=self._fit_context(
-                        system,
-                        reconcile_tool_messages(
-                            state["messages"], state.get("tool_call_ledger", {}),
-                        ),
-                        self.max_output_tokens,
+                system_round = self._round_system_prompt(system, state)
+                if self.llm_stream_call is not None:
+                    response = {}
+                    async for chunk in self._stream_reasoning(
                         state,
-                    ),
-                    tools=registry.schemas() if state.get("allow_tools", True) else [],
-                    max_tokens=self.max_output_tokens,
-                    temperature=0.2,
-                )
+                        base_event,
+                        system=system_round,
+                        messages=self._fit_context(
+                            system_round,
+                            reconcile_tool_messages(
+                                state["messages"], state.get("tool_call_ledger", {}),
+                            ),
+                            self.max_output_tokens,
+                            state,
+                        ),
+                        tools=registry.schemas() if state.get("allow_tools", True) else [],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.2,
+                    ):
+                        if chunk.get("type") == "done":
+                            response = chunk.get("response") or {}
+                        else:
+                            yield chunk
+                    if not response:
+                        # 流式异常回退：整块重取一次，避免任务静默中断
+                        response = await self._call_model(
+                            state,
+                            "reasoning",
+                            system=system_round,
+                            messages=self._fit_context(
+                                system_round,
+                                reconcile_tool_messages(
+                                    state["messages"], state.get("tool_call_ledger", {}),
+                                ),
+                                self.max_output_tokens,
+                                state,
+                            ),
+                            tools=registry.schemas() if state.get("allow_tools", True) else [],
+                            max_tokens=self.max_output_tokens,
+                            temperature=0.2,
+                        )
+                else:
+                    response = await self._call_model(
+                        state,
+                        "reasoning",
+                        system=system_round,
+                        messages=self._fit_context(
+                            system_round,
+                            reconcile_tool_messages(
+                                state["messages"], state.get("tool_call_ledger", {}),
+                            ),
+                            self.max_output_tokens,
+                            state,
+                        ),
+                        tools=registry.schemas() if state.get("allow_tools", True) else [],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.2,
+                    )
+                    thinking = response.get("thinking")
+                    if thinking:
+                        yield {**base_event, "type": "thinking", "content": thinking}
+                self._track_token_scale(state, system_round, response)
                 cancelled = self._cancelled_event(state, base_event)
                 if cancelled:
                     yield cancelled
@@ -539,11 +612,11 @@ class LocalAgentRuntime:
                             state,
                             "continuation",
                             system=(
-                                system
+                                system_round
                                 + "\n\n上一段回复意外中断。请仅从中断处继续，把当前回答完整结束；"
                                 "不要重复已经输出的内容，不要调用工具。"
                             ),
-                            messages=self._fit_context(system, reconcile_tool_messages([
+                            messages=self._fit_context(system_round, reconcile_tool_messages([
                                 *state["messages"],
                                 {"role": "assistant", "content": response_text},
                                 {"role": "user", "content": "请从中断处继续并完整结束回答。"},
@@ -553,74 +626,45 @@ class LocalAgentRuntime:
                             temperature=0.2,
                         )
                         response_text = response_text.rstrip() + continuation.get("text", "").lstrip()
-                    missing_criteria = self._missing_acceptance_criteria(
-                        response_text, state.get("acceptance_criteria", []),
+                    events = self._finalize(
+                        state, base_event, response_text, settle_implicit=True,
                     )
-                    if missing_criteria:
-                        response_text = (
-                            response_text.rstrip()
-                            + "\n\n未逐项覆盖验收清单："
-                            + "、".join(str(item) for item in missing_criteria)
+                    if self._needs_acceptance_reformat(state, response_text):
+                        # 结果证据已齐（验证全过+有变更）但最终回复未按验收格式
+                        # 逐条陈述（fusion fx3：模型声称全部通过却判 incomplete）。
+                        # 结果优先：格式可补写，给一次机会而不是让结果证据作废。
+                        reformatted = await self._call_model(
+                            state,
+                            "acceptance_reformat",
+                            system=(
+                                system_round
+                                + "\n\n你的工作成果已验证通过（工具验证全部成功）。"
+                                "但最终回复没有按验收清单编号逐条陈述。"
+                                "请只输出验收陈述：按编号每项一行，完成项写 `[完成]` 并附 `[evidence:check:验证的 kind]`"
+                                "或 `[evidence:file:路径]`；未完成项写 `[未完成]` 并说明原因。"
+                                "不要重复修复过程，不要调用工具。"
+                            ),
+                            messages=self._fit_context(system_round, reconcile_tool_messages([
+                                *state["messages"],
+                                {"role": "assistant", "content": response_text},
+                                {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
+                            ], state.get("tool_call_ledger", {})), 4_000),
+                            tools=[],
+                            max_tokens=4_000,
+                            temperature=0.2,
                         )
-                    evaluation = self.work_product_evaluator.evaluate(
-                        criteria=state.get("acceptance_criteria", []),
-                        response_text=response_text,
-                        summary=state["summary"],
-                    )
-                    acceptance = evaluation["requirement_coverage"]["items"]
-                    if acceptance:
-                        state["summary"]["acceptance"] = acceptance
-                        state["summary"]["work_product_evaluation"] = evaluation
-                        self._settle_session_requirements(state, acceptance)
-                        response_text = re.sub(
-                            r"\s*\[(?:证据|evidence):(?:file|check|process):[^\]]+\]",
-                            "",
-                            response_text,
-                            flags=re.IGNORECASE,
-                        )
-                    empty_model_response = not response_text.strip()
-                    final_text = format_final_response(response_text, state["summary"])
-                    has_failed_verification = any(
-                        not check.get("success", False)
-                        for check in state["summary"].get("verification", [])
-                    )
-                    missing_material_change = (
-                        state.get("requires_material_change", False)
-                        and not state.get("material_tool_seen", False)
-                    )
-                    if missing_material_change:
-                        final_text = (
-                            final_text.rstrip()
-                            + "\n\n未完成：本次任务要求执行修改，但未记录任何文件或项目变更。"
-                        )
-                    status = "incomplete" if (
-                        state.get("unrecovered_failures")
-                        or has_failed_verification
-                        or missing_material_change
-                        or missing_criteria
-                        or empty_model_response
-                        or self._has_explicit_unfinished(response_text)
-                        or (acceptance and not all(
-                            item["status"] == "passed" for item in acceptance
-                        ))
-                    ) else "completed"
-                    state["status"] = status
-                    state["final_text"] = final_text
-                    if status == "completed" and state.get("implicit_requirement_positions"):
-                        self._settle_implicit_session_requirements(state)
-                    self._save_task(state)
-                    if acceptance:
-                        yield {
-                            **base_event,
-                            "type": "acceptance",
-                            "success": all(item["status"] == "passed" for item in acceptance),
-                            "items": acceptance,
-                        }
-                    finalization = self._finalization_event(base_event, status, final_text, state["summary"])
-                    if self._has_finalization_facts(finalization):
-                        yield finalization
-                    yield {**base_event, "type": "token", "content": final_text}
-                    yield {**base_event, "type": "done", "content": final_text, "status": status}
+                        ref_text = reformatted.get("text", "").strip()
+                        if ref_text:
+                            self._record_event({
+                                **base_event,
+                                "type": "acceptance_reformatted",
+                                "original_status": state.get("status"),
+                            })
+                            events = self._finalize(
+                                state, base_event, ref_text, settle_implicit=True,
+                            )
+                    for event in events:
+                        yield event
                     return
 
                 if not state.get("context_emitted"):
@@ -689,6 +733,19 @@ class LocalAgentRuntime:
                 }
                 self._save_task(state)
 
+                # 边说话边干活：把模型本轮的过程文字实时推给前端；
+                # 模型只发工具调用不说话时，由 harness 生成一句“正在做什么”的旁白。
+                if response_text.strip():
+                    yield {**base_event, "type": "token", "content": response_text}
+                else:
+                    for tool_use in tool_uses:
+                        yield {
+                            **base_event,
+                            "type": "narration",
+                            "tool_name": tool_use["name"],
+                            "content": self._tool_narration(tool_use),
+                        }
+
                 events, paused = await self._execute_active_batch(state, registry, base_event)
                 for event in events:
                     yield event
@@ -711,12 +768,12 @@ class LocalAgentRuntime:
                 state,
                 "finalization",
                 system=(
-                    system
+                    system_round
                     + "\n\n工具执行轮次已经结束。请根据已有工具结果给出最终答复，"
                     "总结已验证的事实，并明确说明任何未完成事项或阻塞；不要虚构完成结果。"
                 ),
                 messages=self._fit_context(
-                    system,
+                    system_round,
                     reconcile_tool_messages(
                         state["messages"], state.get("tool_call_ledger", {}),
                     ),
@@ -728,59 +785,67 @@ class LocalAgentRuntime:
                 temperature=0.2,
             )
             response_text = final_response.get("text", "")
-            missing_criteria = self._missing_acceptance_criteria(
-                response_text, state.get("acceptance_criteria", []),
-            )
-            if missing_criteria:
-                response_text = (
-                    response_text.rstrip()
-                    + "\n\n未逐项覆盖验收清单："
-                    + "、".join(str(item) for item in missing_criteria)
+            if not response_text.strip():
+                # 收尾返回空：再给一次机会直接回答用户最初的问题，避免出现
+                # “模型未返回最终说明”这种对用户无信息量的终态。
+                retry = await self._call_model(
+                    state,
+                    "finalization_retry",
+                    system=(
+                        system_round
+                        + "\n\n上一轮收尾没有返回内容。请直接回答用户最初的问题/请求，"
+                        "说明完成了什么、未完成什么及原因，不要调用工具。"
+                    ),
+                    messages=self._fit_context(
+                        system_round,
+                        reconcile_tool_messages([
+                            *state["messages"],
+                            {"role": "user", "content": f"请直接回答最初的问题：{state.get('user_message', '')}"},
+                        ], state.get("tool_call_ledger", {})),
+                        self.max_output_tokens,
+                        state,
+                    ),
+                    tools=[],
+                    max_tokens=self.max_output_tokens,
+                    temperature=0.2,
                 )
-            evaluation = self.work_product_evaluator.evaluate(
-                criteria=state.get("acceptance_criteria", []),
-                response_text=response_text,
-                summary=state["summary"],
-            )
-            acceptance = evaluation["requirement_coverage"]["items"]
-            if acceptance:
-                state["summary"]["acceptance"] = acceptance
-                state["summary"]["work_product_evaluation"] = evaluation
-                self._settle_session_requirements(state, acceptance)
-                response_text = re.sub(
-                    r"\s*\[(?:证据|evidence):(?:file|check|process):[^\]]+\]",
-                    "",
-                    response_text,
-                    flags=re.IGNORECASE,
+                response_text = retry.get("text", "")
+            events = self._finalize(state, base_event, response_text, require_acceptance=True)
+            if self._needs_acceptance_reformat(state, response_text):
+                # 轮次耗尽路径同样需要验收补写（fx7 pdfcpu：修复完成+验证全过，
+                # 37 轮到顶后收尾回复未按格式逐条陈述 → 补写一次）
+                reformatted = await self._call_model(
+                    state,
+                    "acceptance_reformat",
+                    system=(
+                        system_round
+                        + "\n\n你的工作成果已验证通过（工具验证全部成功）。"
+                        "但最终回复没有按验收清单编号逐条陈述。"
+                        "请只输出验收陈述：按编号每项一行，完成项写 `[完成]` 并附 `[evidence:check:验证的 kind]`"
+                        "或 `[evidence:file:路径]`；未完成项写 `[未完成]` 并说明原因。"
+                        "不要重复修复过程，不要调用工具。"
+                    ),
+                    messages=self._fit_context(system_round, reconcile_tool_messages([
+                        *state["messages"],
+                        {"role": "assistant", "content": response_text},
+                        {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
+                    ], state.get("tool_call_ledger", {})), 4_000),
+                    tools=[],
+                    max_tokens=4_000,
+                    temperature=0.2,
                 )
-            final_text = format_final_response(response_text, state["summary"])
-            has_failed_verification = any(
-                not check.get("success", False)
-                for check in state["summary"].get("verification", [])
-            )
-            status = "completed" if (
-                acceptance
-                and not state.get("unrecovered_failures")
-                and not has_failed_verification
-                and not missing_criteria
-                and not self._has_explicit_unfinished(response_text)
-                and all(item["status"] == "passed" for item in acceptance)
-            ) else "incomplete"
-            state["status"] = status
-            state["final_text"] = final_text
-            self._save_task(state)
-            if acceptance:
-                yield {
-                    **base_event,
-                    "type": "acceptance",
-                    "success": all(item["status"] == "passed" for item in acceptance),
-                    "items": acceptance,
-                }
-            finalization = self._finalization_event(base_event, status, final_text, state["summary"])
-            if self._has_finalization_facts(finalization):
-                yield finalization
-            yield {**base_event, "type": "token", "content": final_text}
-            yield {**base_event, "type": "done", "content": final_text, "status": status}
+                ref_text = reformatted.get("text", "").strip()
+                if ref_text:
+                    self._record_event({
+                        **base_event,
+                        "type": "acceptance_reformatted",
+                        "original_status": state.get("status"),
+                    })
+                    events = self._finalize(
+                        state, base_event, ref_text, require_acceptance=True,
+                    )
+            for event in events:
+                yield event
         except Exception as exc:
             error = self._terminal_error(exc, state)
             self._settle_open_tool_calls(state, error)
@@ -790,13 +855,301 @@ class LocalAgentRuntime:
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
 
+    def _finalize(
+        self,
+        state: dict,
+        base_event: dict,
+        response_text: str,
+        *,
+        require_acceptance: bool = False,
+        settle_implicit: bool = False,
+    ) -> list[dict]:
+        """终态仲裁与最终回复：独立于产出模型的单点判定，避免重复实现走样。
+
+        require_acceptance=True 时（轮次耗尽收尾）只有同时满足验收与全部证据才判完成；
+        否则（模型主动结束）按失败恢复、验证、缺失修改等信号判定。
+        """
+        events: list[dict] = []
+        missing_criteria = self._missing_acceptance_criteria(
+            response_text, state.get("acceptance_criteria", []),
+        )
+        if missing_criteria:
+            response_text = (
+                response_text.rstrip()
+                + "\n\n未逐项覆盖验收清单："
+                + "、".join(str(item) for item in missing_criteria)
+            )
+        evaluation = self.work_product_evaluator.evaluate(
+            criteria=state.get("acceptance_criteria", []),
+            response_text=response_text,
+            summary=state["summary"],
+        )
+        acceptance = evaluation["requirement_coverage"]["items"]
+        if acceptance:
+            state["summary"]["acceptance"] = acceptance
+            state["summary"]["work_product_evaluation"] = evaluation
+            self._settle_session_requirements(state, acceptance)
+            response_text = re.sub(
+                r"\s*\[(?:证据|evidence):(?:file|check|process):[^\]]+\]",
+                "",
+                response_text,
+                flags=re.IGNORECASE,
+            )
+        final_text = format_final_response(response_text, state["summary"])
+        # 验证按“同类最后状态”判定：先失败后成功（如 wait_http 超时后
+        # http_request_batch 通过）不应再判未完成。family 归并 http 系检查。
+        latest_by_family: dict[str, dict] = {}
+        for check in state["summary"].get("verification", []):
+            if not isinstance(check, dict):
+                continue
+            kind = str(check.get("kind") or "command").casefold()
+            family = "http" if kind.startswith("http") else kind
+            latest_by_family[family] = check
+        has_failed_verification = any(
+            not check.get("success", False)
+            for check in latest_by_family.values()
+        )
+        # 结果优先：有成功的结果证据（验证通过/验收通过）时，过程失败痕迹
+        # 降级为诊断，不判死。（Terminal-Bench：grading outcomes, not the process）
+        # 注意：无任何验证证据时 result_ok 不为真——"没失败"不等于"成功了"。
+        successful_evidence = (
+            any(
+                isinstance(check, dict) and check.get("success")
+                for check in state["summary"].get("verification", [])
+            )
+            or bool(acceptance and all(item["status"] == "passed" for item in acceptance))
+        )
+        result_ok = successful_evidence and not has_failed_verification
+        critical_failures = {} if result_ok else state.get("unrecovered_failures") or {}
+        if require_acceptance:
+            status = "completed" if (
+                acceptance
+                and not critical_failures
+                and not has_failed_verification
+                and not missing_criteria
+                and not self._has_explicit_unfinished(response_text)
+                and all(item["status"] == "passed" for item in acceptance)
+            ) else "incomplete"
+        else:
+            missing_material_change = (
+                state.get("requires_material_change", False)
+                and not state.get("material_tool_seen", False)
+            )
+            if missing_material_change:
+                final_text = (
+                    final_text.rstrip()
+                    + "\n\n未完成：本次任务要求执行修改，但未记录任何文件或项目变更。"
+                )
+            empty_model_response = not response_text.strip()
+            status = "incomplete" if (
+                critical_failures
+                or has_failed_verification
+                or missing_material_change
+                or missing_criteria
+                or empty_model_response
+                or self._has_explicit_unfinished(response_text)
+                or (acceptance and not all(
+                    item["status"] == "passed" for item in acceptance
+                ))
+            ) else "completed"
+        state["status"] = status
+        state["final_text"] = final_text
+        if settle_implicit and status == "completed" and state.get("implicit_requirement_positions"):
+            self._settle_implicit_session_requirements(state)
+        self._save_task(state)
+        if acceptance:
+            events.append({
+                **base_event,
+                "type": "acceptance",
+                "success": all(item["status"] == "passed" for item in acceptance),
+                "items": acceptance,
+            })
+        finalization = self._finalization_event(base_event, status, final_text, state["summary"])
+        if self._has_finalization_facts(finalization):
+            events.append(finalization)
+        events.append({**base_event, "type": "token", "content": final_text})
+        events.append({**base_event, "type": "done", "content": final_text, "status": status})
+        return events
+
     @staticmethod
     def _estimate_tokens(system: str, messages: list[dict]) -> int:
         return CompactionEngine.estimate_tokens(system, messages)
 
     @staticmethod
+    def _needs_acceptance_reformat(state: dict, response_text: str = "") -> bool:
+        """结果证据齐备但最终回复未按验收格式逐条陈述时，给一次补写机会。
+
+        结果优先仲裁：验证全过 + 有实际变更时，验收格式是可补写的陈述问题，
+        不应让真实完成的工作因格式缺失被判 incomplete。
+        """
+        if state.get("status") != "incomplete":
+            return False
+        if response_text and LocalAgentRuntime._has_explicit_unfinished(response_text):
+            # 模型明确声明了未完成项：这是真实未完成，不是格式问题
+            return False
+        acceptance = state.get("summary", {}).get("acceptance") or []
+        if not acceptance or all(item.get("status") == "passed" for item in acceptance):
+            return False
+        latest_by_family: dict[str, dict] = {}
+        for check in state.get("summary", {}).get("verification", []):
+            if not isinstance(check, dict):
+                continue
+            kind = str(check.get("kind") or "command").casefold()
+            family = "http" if kind.startswith("http") else kind
+            latest_by_family[family] = check
+        if any(not check.get("success", False) for check in latest_by_family.values()):
+            return False
+        if not state.get("summary", {}).get("changed_files"):
+            # 只认真实文件变更：verify_project 等验证工具的成功不应算作材料变更
+            return False
+        return True
+
+    @staticmethod
+    def _is_context_overflow(exc: Exception) -> bool:
+        text = str(exc).casefold()
+        return any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+    @staticmethod
     def _has_explicit_unfinished(response_text: str) -> bool:
         return bool(_EXPLICIT_UNFINISHED_RE.search(response_text))
+
+    async def _stream_reasoning(self, state: dict, base_event: dict, **kwargs) -> AsyncIterator[dict]:
+        """流式模型调用：token/thinking 逐块 yield 给 SSE，结束 yield done 携带完整响应。
+
+        观测事件与 _call_model 对齐（started/completed/failed），供活动页回放。
+        """
+        model_context = state.get("model_context", {})
+        event = {
+            "session_id": state["session_id"],
+            "task_id": state["task_id"],
+            "round": state.get("round", 0),
+            "phase": "reasoning",
+            "model": model_context.get("id", ""),
+            "protocol": model_context.get("protocol", ""),
+            "base_url": model_context.get("base_url", ""),
+        }
+        binding = self._model_bindings.get(state["task_id"])
+        if binding is None:
+            response = await self.llm_call(**kwargs)
+            yield {"type": "done", "response": response}
+            return
+        self._record_event({**event, "type": "model_request_started"})
+        started_at = time.perf_counter()
+        stream_retried = False
+        try:
+            response = {}
+            async for chunk in self.llm_stream_call(**kwargs, binding=binding):
+                ctype = chunk.get("type")
+                if ctype == "token":
+                    yield {**base_event, "type": "token", "content": chunk.get("content", "")}
+                elif ctype == "thinking":
+                    yield {**base_event, "type": "thinking", "content": chunk.get("content", "")}
+                elif ctype == "done":
+                    response = chunk.get("response") or {}
+            if not response:
+                response = await self.llm_call(**kwargs, binding=binding)
+            self._record_event({
+                **event,
+                "type": "model_request_completed",
+                "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                "stop_reason": str(response.get("stop_reason", "")),
+                "usage": response.get("usage_metadata") or {},
+            })
+            yield {"type": "done", "response": response}
+        except Exception as exc:
+            error_type = type(exc).__name__
+            self._record_event({
+                **event,
+                "type": "model_request_failed",
+                "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                "error_type": error_type,
+            })
+            # 流中途断线（如 SSE 连接被对端关闭）：整块重取一次，避免任务被
+            # 连接问题误杀（fx1 中 pdfcpu 修复正确却因 RemoteProtocolError 判 failed）。
+            if not stream_retried:
+                stream_retried = True
+                self._record_event({
+                    **event,
+                    "type": "model_request_retrying",
+                    "attempt": 2,
+                    "error_type": error_type,
+                    "reason": "stream_interrupted_fallback",
+                })
+                try:
+                    response = await self.llm_call(**kwargs, binding=binding)
+                    self._record_event({
+                        **event,
+                        "type": "model_request_completed",
+                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                        "stop_reason": str(response.get("stop_reason", "")),
+                        "usage": response.get("usage_metadata") or {},
+                        "stream_fallback": True,
+                    })
+                    yield {"type": "done", "response": response}
+                    return
+                except Exception as fallback_exc:
+                    self._record_event({
+                        **event,
+                        "type": "model_request_failed",
+                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                        "error_type": type(fallback_exc).__name__,
+                        "stream_fallback": True,
+                    })
+            raise
+
+    def _capture_task_binding(self, state: dict) -> ModelBinding:
+        """冻结任务启动时的模型绑定：身份以任务记录为准，密钥取当前环境。
+
+        这样运行中的任务不会因全局模型切换而被静默改道；
+        API key 只保存在内存中，不写入任务状态或数据库。
+        """
+        captured = capture_model_binding()
+        model_context = state.get("model_context") or {}
+        if not model_context.get("id"):
+            return captured
+        return ModelBinding(
+            model=str(model_context["id"]),
+            protocol=str(model_context.get("protocol") or captured.protocol),
+            base_url=str(model_context.get("base_url") or captured.base_url),
+            api_key=captured.api_key,
+            thinking_effort=str(model_context.get("thinking_effort") or captured.thinking_effort),
+            thinking_budget_tokens=captured.thinking_budget_tokens,
+        )
+
+    @staticmethod
+    def _tool_narration(tool_use: dict) -> str:
+        """模型静默调用工具时，生成一句用户可读的“正在做什么”旁白。"""
+        name = str(tool_use.get("name") or "")
+        args = tool_use.get("input") or {}
+        if name == "read_file":
+            return f"正在读取 {args.get('path', '?')}"
+        if name == "list_directory":
+            return f"正在查看目录 {args.get('path', '?')}"
+        if name == "search_text":
+            return f"正在搜索 {args.get('query', '?')}"
+        if name == "run_command":
+            return f"正在执行 {args.get('command', '?')}"
+        if name == "edit_files":
+            edits = args.get("edits") or []
+            count = len(edits) if isinstance(edits, list) else 0
+            return f"正在修改 {count} 个文件" if count else "正在修改文件"
+        if name == "start_process":
+            return f"正在启动 {args.get('command', '进程')}"
+        if name == "wait_http":
+            return f"正在等待服务就绪 {args.get('url', '?')}"
+        if name == "http_request":
+            return f"正在请求 {args.get('url', '?')}"
+        if name == "check_port":
+            return f"正在检查端口 {args.get('port', '?')}"
+        if name == "create_directory":
+            return f"正在创建目录 {args.get('path', '?')}"
+        if name in {"detect_project", "repo_map", "verify_project"}:
+            return f"正在分析项目（{name}）"
+        if name in {"ensure_venv", "install_dependencies"}:
+            return f"正在准备环境（{name}）"
+        if name in {"get_process", "list_processes", "stop_process"}:
+            return f"正在处理进程（{name}）"
+        return f"正在调用 {name}"
 
     @staticmethod
     def _previous_task_status_response(previous: dict) -> str:
@@ -835,10 +1188,13 @@ class LocalAgentRuntime:
         messages: list[dict],
         output_tokens: int,
         state: dict | None = None,
+        *,
+        budget_ratio: float = 1.0,
     ) -> list[dict]:
         fitted = list(messages)
-        input_budget = max(1, self.max_context_tokens - output_tokens)
-        if self._estimate_tokens(system, fitted) <= input_budget:
+        input_budget = max(1, int((self.max_context_tokens - output_tokens) * budget_ratio))
+        scale = float(state.get("tokens_scale", 1.0)) if state else 1.0
+        if int(self._estimate_tokens(system, fitted) * scale) <= input_budget:
             return fitted
 
         target_budget = max(1, int(input_budget * 0.75))
@@ -851,6 +1207,7 @@ class LocalAgentRuntime:
                 "messages": fitted,
             },
             max_tokens=target_budget,
+            scale=scale,
         )
         if state is not None:
             source_count = len(fitted)
@@ -954,24 +1311,50 @@ class LocalAgentRuntime:
             if is_resumed_tool and approval_decision is False:
                 result = ToolResult.fail("用户拒绝了该操作", error_kind="rejected")
             else:
+                approval_mode = state.get("approval_mode", "confirm")
                 requires_confirmation = (
                     not is_resumed_tool
                     and hasattr(registry, "requires_confirmation")
                     and registry.requires_confirmation(name, args)
                 )
+                # 权限模式：confirm 走人工审批；auto 自动批准高风险操作；open 完全开放
+                if requires_confirmation and approval_mode in {"auto", "open"}:
+                    self._record_event({
+                        **base_event,
+                        "type": "approval_auto",
+                        "tool_name": name,
+                        "args": args,
+                        "mode": approval_mode,
+                    })
+                    requires_confirmation = False
                 if is_resumed_tool or not requires_confirmation:
                     self._transition_tool_call(state, call_id, "running")
+                confirmed = (
+                    (is_resumed_tool and approval_decision is True)
+                    or approval_mode in {"auto", "open"}
+                )
                 with tool_call_context(
                     task_id=state["task_id"],
                     call_id=call_id,
                     batch_id=batch_id,
                 ):
-                    result = await asyncio.to_thread(
-                        registry.execute,
-                        name,
-                        args,
-                        confirmed=is_resumed_tool and approval_decision is True,
-                    )
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                registry.execute,
+                                name,
+                                args,
+                                confirmed=confirmed,
+                            ),
+                            timeout=self.tool_execution_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        # to_thread 无法中断底层线程，但任务流程必须继续：
+                        # 以超时失败进入既有恢复机制，避免整个任务永久卡住。
+                        result = ToolResult.fail(
+                            f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
+                            error_kind="timeout",
+                        )
 
             cancelled = self._cancelled_event(state, base_event)
             if cancelled:
@@ -1019,6 +1402,7 @@ class LocalAgentRuntime:
                 error_kind=error_kind,
             )
             if result.success:
+                state.pop("step_back", None)
                 for failed_call_id, failure in list(
                     state.setdefault("unrecovered_failures", {}).items()
                 ):
@@ -1117,6 +1501,13 @@ class LocalAgentRuntime:
                     events.append({**base_event, "type": "error", "content": error})
                     events.append({**base_event, "type": "done", "content": error, "status": "failed"})
                     return events, True
+                if failure_counts[signature] >= 2:
+                    # 未到硬停阈值：先给下一轮模型注入"退一步"提醒，让它主动换思路
+                    state["step_back"] = {
+                        "tool_name": name,
+                        "count": failure_counts[signature],
+                        "error": result.error or "",
+                    }
 
             approval_decision = None
             self._save_task(state)
@@ -1263,6 +1654,37 @@ class LocalAgentRuntime:
             ]
             summary["verification"] = checks
             events.append({**base_event, "type": "verification", "success": result.success, "checks": checks})
+        elif name == "run_command" and result.success and _VERIFICATION_COMMAND_RE.search(
+            str((result.data or {}).get("original_command") or (result.data or {}).get("executed_command") or "")
+        ):
+            # 模型用 run_command 直接跑构建/测试并成功时，同样记录为验证证据
+            # （fusion fx7：模型跑 pnpm build/go test 成功，但只有 write_readback
+            # 被记录，验收引用的 check:build 匹配不到）。
+            command = str(
+                (result.data or {}).get("original_command")
+                or (result.data or {}).get("executed_command")
+                or ""
+            )
+            lowered = command.casefold()
+            kind = "build" if "build" in lowered else (
+                "unit" if any(t in lowered for t in ("test", "pytest", "vitest", "tsc")) else (
+                    "static" if "compileall" in lowered else "lint"
+                )
+            )
+            check = {
+                "kind": kind,
+                "command": command,
+                "success": True,
+                "cwd": str(result.data.get("cwd") or ""),
+                "python_executable": result.data.get("python_executable"),
+            }
+            summary["verification"] = [*summary.get("verification", []), check]
+            events.append({
+                **base_event,
+                "type": "verification",
+                "success": True,
+                "checks": [check],
+            })
         elif (
             name == "http_request_batch"
             and isinstance(result.data, dict)
@@ -1540,6 +1962,8 @@ class LocalAgentRuntime:
         self._task_cache[state["task_id"]] = json.loads(json.dumps(state, ensure_ascii=False, default=str))
         if self.task_store is not None:
             self.task_store.save_agent_task(state)
+        if state.get("status") in {"completed", "failed", "cancelled", "incomplete", "blocked", "interrupted"}:
+            self._model_bindings.pop(state["task_id"], None)
 
     def _load_task(self, task_id: str) -> dict | None:
         if self.task_store is not None:
@@ -1591,7 +2015,11 @@ class LocalAgentRuntime:
             self._record_event(started_event)
             started_at = time.perf_counter()
             try:
-                response = await self.llm_call(**kwargs)
+                binding = self._model_bindings.get(state["task_id"])
+                if binding is None:
+                    response = await self.llm_call(**kwargs)
+                else:
+                    response = await self.llm_call(**kwargs, binding=binding)
                 break
             except Exception as exc:
                 error_type = type(exc).__name__
@@ -1610,6 +2038,24 @@ class LocalAgentRuntime:
                         "error_type": error_type,
                     })
                     continue
+                if attempt == 1 and self._is_context_overflow(exc):
+                    # 主流做法（Cline/pi/OpenCode）：provider 拒绝超限请求时，
+                    # 收紧预算强制压缩后重试一次，而不是直接让任务失败。
+                    kwargs["messages"] = self._fit_context(
+                        kwargs.get("system", ""),
+                        kwargs.get("messages", []),
+                        int(kwargs.get("max_tokens") or self.max_output_tokens),
+                        state,
+                        budget_ratio=0.5,
+                    )
+                    self._record_event({
+                        **event,
+                        "type": "model_request_retrying",
+                        "attempt": attempt + 1,
+                        "error_type": error_type,
+                        "reason": "context_overflow_compacted",
+                    })
+                    continue
                 raise
         completed_event = {
             **event,
@@ -1624,6 +2070,9 @@ class LocalAgentRuntime:
         return response
 
     def _record_stream_event(self, state: dict, event: dict) -> None:
+        # thinking 事件必须落库：AgentTaskSupervisor.subscribe 从 SQLite 回放事件，
+        # 不落库会导致 SSE 订阅者永远收不到思考过程。落库时由
+        # Memory.record_agent_event 的 _sanitize_event 统一脱敏。
         self._record_event(event)
         if event.get("type") == "done" and event.get("status") == "completed":
             self._record_task_memory(state)
@@ -1877,17 +2326,72 @@ class LocalAgentRuntime:
                 f"完成项 {item.get('position')}：{item.get('text')} -> {item.get('evidence', [])}"
                 for item in recent_completed
             )
+        today = datetime.date.today().isoformat()
+        os_name = platform.system() or "Unknown"
         return f"""你是一个通用本地操作 Agent。当前工作区根目录：{workspace_root}
 
-通过结构化工具完成任务，不要只给出用户需要自己执行的命令。
-规则：
-1. 先判断用户请求是否需要本地操作。问候、闲聊和一般知识问题直接回答，不要调用任何工具、不要读取 Repo Map、不要展示执行计划；需要本地操作时再读取 Repo Map，并读取或搜索必要上下文。
-2. 文件修改使用 edit_files，搜索文本必须唯一；修改后运行 verify_project 或明确的检查命令。
-3. Python 项目只能使用目标项目目录自己的 .venv；缺失时先对该项目调用 ensure_venv。不得复用父目录、兄弟目录、其他任务目录或系统 Python；验证结果必须以工具返回的 python_executable 和 cwd 为准。
-4. 长时间服务使用 start_process，不要用前台命令阻塞。
-5. 端到端验收包含多个 HTTP 请求时，优先使用 http_request_batch 一次提交检查清单；只有需要根据上一步响应动态决定下一步时才拆成多个 http_request。
-6. 工具失败后根据错误改变策略，不要重复完全相同的失败调用；复测 http_request_batch 时沿用返回的 group_id。
-7. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
-8. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
-9. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
-10. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""
+# 环境上下文
+- 平台：{os_name}（{platform.machine()}）
+- 命令执行 Shell：PowerShell（Windows 下 run_command 默认按 PowerShell 语法执行；CMD 语法的旧命令也会被转换）
+- 当前日期：{today}
+
+# 工作流程
+1. 先判断用户请求是否需要本地操作。问候、闲聊和一般知识问题直接回答，不要调用任何工具、不要读取 Repo Map、不要展示执行计划；需要本地操作时先在心里规划再动手：先读取 Repo Map 和必要上下文，再决定工具序列。
+2. 多步任务按"探索 → 分析 → 实施 → 验证"推进；动手前先规划，验证是唯一判定完成的方式。把独立的读、查、验证合并进尽量少的工具调用；只有后一步依赖前一步结果时才拆开执行。
+
+# 执行规则
+3. 文件修改使用 edit_files，搜索文本必须唯一；修改后运行 verify_project 或明确的检查命令。
+4. Python 项目只能使用目标项目目录自己的 .venv；缺失时先对该项目调用 ensure_venv。不得复用父目录、兄弟目录、其他任务目录或系统 Python；验证结果必须以工具返回的 python_executable 和 cwd 为准。
+5. Python 项目只能使用 ensure_venv 创建/复用项目目录内的 .venv；禁止手动删除 .venv、禁止尝试系统 Python 或其他目录的解释器路径。
+6. 长时间服务使用 start_process，不要用前台命令阻塞。
+7. 端到端验收包含多个 HTTP 请求时，优先使用 http_request_batch 一次提交检查清单；只有需要根据上一步响应动态决定下一步时才拆成多个 http_request。
+8. 工具失败后根据错误改变策略，不要重复完全相同的失败调用；连续失败时停下，列出 3-5 种可能的原因并按可能性排序，然后选择与之前不同的方法；复测 http_request_batch 时沿用返回的 group_id。
+9. Windows 环境下命令统一使用 PowerShell 语法：环境变量用 `$env:NAME="值"` 设置，禁止使用 CMD 的 `set NAME=值` 语法；PowerShell 中执行外部命令用 `& "路径"` 或直接命令名。
+10. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
+11. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
+12. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
+13. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""
+
+    def _round_system_prompt(self, system: str, state: dict) -> str:
+        """按当前轮次状态给系统提示词追加动态提醒（预算收敛、循环退一步）。
+
+        借鉴 Goose 的 <turn-budget> 注入与 Gemini 的 loop-detection 恢复提示：
+        在硬性轮数/重复失败终止之前，先给模型一次主动收敛的机会。
+        """
+        parts = [system]
+        round_limit = int(state.get("round_limit", self.max_rounds))
+        current = int(state.get("round", 0))
+        if round_limit > 0 and current >= max(2, round_limit // 2):
+            parts.append(
+                f"\n\n（轮次预算：已用 {current}/{round_limit} 轮，剩余不足一半。"
+                "请减少探索与重复尝试，合并必要的工具调用，优先完成并验证核心目标后收尾。）"
+            )
+        step_back = state.get("step_back")
+        if step_back and int(step_back.get("count", 0)) >= 2:
+            parts.append(
+                f"\n\n（循环提醒：你已连续 {step_back.get('count')} 次调用 "
+                f"{step_back.get('tool_name', '工具')} 得到相同失败："
+                f"{str(step_back.get('error', ''))[:300]}。"
+                "停止重复该调用；列出 3-5 种可能的原因并按可能性排序，选择与之前不同的方法。）"
+            )
+        return "\n".join(parts)
+
+    def _track_token_scale(self, state: dict, system: str, response: dict) -> None:
+        """用上一次响应的真实 input_tokens 校准字符估算，避免过早/过晚压缩。
+
+        pi 直接复用上一次 usage 做精确计数；这里折算成缩放因子
+        （默认 1.0，仅在拿到真实 usage 后生效），供 _fit_context 使用。
+        """
+        usage = response.get("usage_metadata") or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        if input_tokens <= 0:
+            return
+        try:
+            messages = reconcile_tool_messages(
+                state["messages"], state.get("tool_call_ledger", {}),
+            )
+            estimate = self._estimate_tokens(system, messages)
+        except Exception:
+            return
+        if estimate > 0:
+            state["tokens_scale"] = round(min(2.0, max(0.5, estimate / input_tokens)), 3)

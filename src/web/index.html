@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GitHub Explorer</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <script>
+      // 首帧前应用已保存的主题，避免刷新时闪烁
+      (function () {
+        try {
+          if (localStorage.getItem('explorer_theme') === 'light') {
+            document.documentElement.setAttribute('data-theme', 'light')
+          }
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

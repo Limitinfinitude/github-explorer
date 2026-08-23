@@ -185,6 +185,7 @@ npm run build
 允许进入公开仓库的内容：
 
 - `src/`、`desktop/`、启动脚本和依赖声明
+- `src/web_dist/`：随仓库发布的 Vite 构建产物，保证克隆后无需构建即可运行；构建改动随源码一起提交
 - `docs/` 中的公开技术文档与 SVG 图
 - `.env.example` 等不含真实凭据的配置模板
 - README 和产品说明

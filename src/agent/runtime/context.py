@@ -1,4 +1,5 @@
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from .workspace import WorkspaceManager
 
 
 class ContextEngine:
+    # 大仓库（如 6 万文件）全量遍历 + 排序极慢，扫描预算内提前停止
+    _SCAN_BUDGET = 20_000
     _IGNORED_DIRS = {
         ".git", ".venv", "__pycache__", "node_modules", "web_dist",
         "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache",
@@ -53,10 +56,19 @@ class ContextEngine:
         )
 
     def _source_files(self, root: Path):
-        for path in sorted(root.rglob("*")):
-            if any(part in self._IGNORED_DIRS for part in path.relative_to(root).parts):
-                continue
-            if path.is_file() and path.suffix.lower() in self._SOURCE_SUFFIXES:
+        """惰性遍历源文件；扫描条目超过预算即停止（避免大仓库卡死）。"""
+        scanned = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in self._IGNORED_DIRS
+            )
+            for name in sorted(filenames):
+                scanned += 1
+                if scanned > self._SCAN_BUDGET:
+                    return
+                if Path(name).suffix.lower() not in self._SOURCE_SUFFIXES:
+                    continue
+                path = Path(dirpath) / name
                 try:
                     if path.stat().st_size <= 512_000:
                         yield path

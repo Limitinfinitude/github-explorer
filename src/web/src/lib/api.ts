@@ -1,6 +1,6 @@
 import type {
   AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
-  DefaultWorkspaceResponse, EvaluationReport, Model, ObservabilityStatus, ProjectEvidence, ProjectOverview, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
+  DefaultWorkspaceResponse, EvaluationReport, Message, Model, ObservabilityStatus, ProjectEvidence, ProjectImportResult, ProjectMemory, ProjectOverview, ProjectReport, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
@@ -40,11 +40,11 @@ export const api = {
       locale_encoding: string
     }>
   },
-  async startAgentTask(message: string, sessionId: string, workspace?: string) {
+  async startAgentTask(message: string, sessionId: string, workspace?: string, thinkingEffort?: string) {
     const res = await fetch('/api/agent/tasks/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, session_id: sessionId, agent_mode: true, workspace }),
+      body: JSON.stringify({ message, session_id: sessionId, agent_mode: true, workspace, thinking_effort: thinkingEffort }),
     })
     const data = await res.json().catch(() => ({})) as {
       task_id?: string
@@ -116,10 +116,42 @@ export const api = {
     return data.history ?? []
   },
 
+  async saveChatMessage(sessionId: string, msg: Message): Promise<void> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(msg),
+    })
+    if (!res.ok) throw new Error(`保存消息失败：HTTP ${res.status}`)
+  },
+
+  async getChatMessages(sessionId: string): Promise<Message[]> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}`)
+    if (!res.ok) throw new Error(`读取聊天消息失败：HTTP ${res.status}`)
+    const data = await res.json() as { messages?: Message[] }
+    return data.messages ?? []
+  },
+
   async getDefaultWorkspace() {
     const res = await fetch('/api/agent/workspace/default')
     if (!res.ok) throw new Error(`读取默认工作目录失败：HTTP ${res.status}`)
     return res.json() as Promise<DefaultWorkspaceResponse>
+  },
+
+  async getApprovalMode(): Promise<'confirm' | 'auto' | 'open'> {
+    const res = await fetch('/api/settings/approval-mode')
+    if (!res.ok) throw new Error(`读取权限模式失败：HTTP ${res.status}`)
+    const data = await res.json() as { mode?: 'confirm' | 'auto' | 'open' }
+    return data.mode ?? 'confirm'
+  },
+
+  async setApprovalMode(mode: 'confirm' | 'auto' | 'open') {
+    const res = await fetch('/api/settings/approval-mode', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+    if (!res.ok) throw new Error(`保存权限模式失败：HTTP ${res.status}`)
   },
 
   async setDefaultWorkspace(path: string) {
@@ -217,6 +249,39 @@ export const api = {
       workspace: string
       status: string
     }
+  },
+
+  async getProjectMemories(projectId: string, limit = 20): Promise<ProjectMemory[]> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/memories?limit=${Math.max(1, Math.min(limit, 100))}`)
+    if (!res.ok) throw new Error(`读取项目记忆失败：HTTP ${res.status}`)
+    const data = await res.json() as { memories?: ProjectMemory[] }
+    return data.memories ?? []
+  },
+
+  async getProjectReport(projectId: string): Promise<ProjectReport> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/report`)
+    if (!res.ok) throw new Error(`生成项目报告失败：HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async importProject(workspace: string): Promise<ProjectImportResult> {
+    const res = await fetch('/api/projects/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace }),
+    })
+    const data = await res.json().catch(() => ({})) as {
+      project_id?: string
+      session_id?: string
+      task_id?: string
+      workspace?: string
+      status?: string
+      detail?: string
+    }
+    if (!res.ok || !data.project_id || !data.session_id || !data.task_id) {
+      throw new Error(data.detail || `导入项目失败：HTTP ${res.status}`)
+    }
+    return data as ProjectImportResult
   },
 
   async getActiveTask(sessionId: string) {

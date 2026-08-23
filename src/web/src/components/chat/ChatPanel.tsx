@@ -7,7 +7,7 @@ import { AgentStatusPanel } from './AgentStatusPanel'
 import { api } from '../../lib/api'
 import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
-  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile,
+  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile, WorkspaceResponse,
 } from '../../types'
 
 interface Props {
@@ -31,35 +31,54 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
   const [workspaceProfile, setWorkspaceProfile] = useState<WorkspaceProfile | null>(null)
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
+  const [thinkingEffort, setThinkingEffort] = useState<'off' | 'high' | 'max'>(() =>
+    models.find(m => m.id === currentModel)?.thinking_effort ?? 'off',
+  )
+
+  useEffect(() => {
+    // 切换模型时，思考强度继承该模型的配置
+    setThinkingEffort(models.find(m => m.id === currentModel)?.thinking_effort ?? 'off')
+  }, [currentModel, models])
 
   useEffect(() => {
     let active = true
-    setWorkspace('')
-    setWorkspaceDraft('')
+    const seeded = chat.workspace ?? ''
+    setWorkspace(seeded)
+    setWorkspaceDraft(seeded)
     setWorkspaceProfile(null)
     setWorkspaceError('')
     setWorkspaceLoading(true)
-    api.getWorkspace(chat.sessionId)
-      .then(result => {
-        if (!active) return
-        const path = result.workspace ?? ''
-        setWorkspace(path)
-        setWorkspaceDraft(path)
-        setWorkspaceProfile(result.profile)
-        setRecentWorkspaces(result.recent)
-      })
-      .catch(reason => {
-        if (active) setWorkspaceError(reason instanceof Error ? reason.message : '无法读取工作区')
-      })
-      .finally(() => { if (active) setWorkspaceLoading(false) })
+    const apply = (result: WorkspaceResponse) => {
+      if (!active) return
+      const path = result.workspace ?? seeded
+      setWorkspace(path)
+      setWorkspaceDraft(path)
+      setWorkspaceProfile(result.profile)
+      setRecentWorkspaces(result.recent)
+      setWorkspaceError('')
+    }
+    // 项目对话：工作区固定为项目目录（幂等绑定，并修复旧会话的兜底目录残留）
+    if (seeded) {
+      api.bindWorkspace(chat.sessionId, seeded)
+        .then(apply)
+        .catch(err => { if (active) setWorkspaceError(err instanceof Error ? err.message : '无法绑定项目工作区') })
+        .finally(() => { if (active) setWorkspaceLoading(false) })
+    } else {
+      api.getWorkspace(chat.sessionId)
+        .then(apply)
+        .catch(reason => { if (active) setWorkspaceError(reason instanceof Error ? reason.message : '无法读取工作区') })
+        .finally(() => { if (active) setWorkspaceLoading(false) })
+    }
     return () => { active = false }
-  }, [chat.sessionId])
+  }, [chat.sessionId, chat.workspace])
 
   const handleDone = useCallback((
     content: string,
     steps: Step[],
     cmdBlocks: CmdBlockData[],
     agentRun: AgentRunSummary,
+    narrations: string[],
+    thinking: string[],
   ) => {
     onPushMessage({
       id: `msg-${Date.now()}`,
@@ -68,6 +87,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
       time: new Date().toISOString(),
       steps: steps.length ? steps : undefined,
       cmdBlocks: cmdBlocks.length ? cmdBlocks : undefined,
+      thinking: thinking.length ? thinking : undefined,
+      narrations: narrations.length ? narrations : undefined,
       agentRun,
     })
   }, [onPushMessage])
@@ -113,10 +134,10 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     if (workspaceLoading) return
     setStartTime(Date.now())
     onPushMessage({ id: `msg-${Date.now()}`, role: 'user', content: msg, time: new Date().toISOString() })
-    send(msg)
-  }, [send, onPushMessage, workspaceLoading])
+    send(msg, thinkingEffort)
+  }, [send, onPushMessage, workspaceLoading, thinkingEffort])
 
-  const isEmpty = chat.messages.length === 0 && !state.isGenerating
+  const isEmpty = (chat.messages ?? []).length === 0 && !state.isGenerating
 
   return (
     <div className="flex flex-col h-full min-w-0">
@@ -200,6 +221,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           isGenerating={state.isGenerating}
           streamSteps={state.steps}
           streamCmdBlocks={state.cmdBlocks}
+          streamNarration={state.narrations}
+          streamThinking={state.thinking}
           streamContent={state.partialContent}
           startTime={startTime}
         />
@@ -221,6 +244,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
         currentModel={currentModel}
         models={models}
         agentMode={agentMode}
+        thinkingEffort={thinkingEffort}
+        onThinkingEffort={setThinkingEffort}
         onSend={handleSend}
         onStop={stop}
         onSelectModel={onSelectModel}

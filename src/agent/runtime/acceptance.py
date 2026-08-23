@@ -131,11 +131,24 @@ class WorkProductEvaluator:
             self._normalize_file_ref(path, workspace_root)
             for path in summary.get("changed_files", [])
         }
-        successful_checks = {
-            str(check.get("kind", "command")).casefold()
-            for check in summary.get("verification", [])
-            if isinstance(check, dict) and check.get("success", False)
-        }
+        successful_checks = set()
+        for check in summary.get("verification", []):
+            if not (isinstance(check, dict) and check.get("success", False)):
+                continue
+            successful_checks.add(str(check.get("kind", "command")).casefold())
+            # 模型常按常识引用 check:build/test/unit，而 harness 记录的 kind
+            # 可能是默认 command：按命令文本特征词放宽匹配（fusion fx5）。
+            command = str(check.get("command", "")).casefold()
+            for token in ("build", "test", "pytest", "compileall", "lint", "static", "unit"):
+                if token in command:
+                    successful_checks.add(token)
+            # 模型还可能引用带命令前缀的短语（check:go build / check:go test）
+            for combo in (
+                "go build", "go test", "go vet", "npm run build", "npm run test",
+                "pnpm build", "pnpm test", "yarn build", "tsc",
+            ):
+                if combo in command:
+                    successful_checks.add(combo)
         process_ids = {
             str(process.get("process_id", "")).casefold()
             for process in summary.get("processes", [])
@@ -167,7 +180,15 @@ class WorkProductEvaluator:
                 if evidence_type == "file":
                     valid = normalized_ref in changed_files
                 elif evidence_type == "check":
-                    valid = normalized_ref in successful_checks
+                    # 模型常把证据描述写进 ref（如 "pnpm build 成功（含 tsc -b）"），
+                    # 精确匹配会失败：ref 包含集合中的特征 token 即可视为匹配。
+                    valid = (
+                        normalized_ref in successful_checks
+                        or any(
+                            len(token) >= 3 and token in normalized_ref
+                            for token in successful_checks
+                        )
+                    )
                 else:
                     valid = normalized_ref in process_ids
                 sufficient = valid and self._is_sufficient(

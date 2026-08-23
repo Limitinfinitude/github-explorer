@@ -103,6 +103,7 @@ class CompactionEngine:
         state: dict,
         *,
         max_tokens: int | None = None,
+        scale: float = 1.0,
     ) -> tuple[list[dict], ContextHandoff]:
         budget = self.max_tokens if max_tokens is None else max(1, max_tokens)
         handoff = self.deterministic_handoff({**state, "messages": messages})
@@ -116,13 +117,13 @@ class CompactionEngine:
 
         for message in reversed(messages[:latest_user_index]):
             candidate = [handoff_message, dict(message), *fitted[1:]]
-            if self.estimate_tokens(system, candidate) <= budget:
+            if int(self.estimate_tokens(system, candidate) * scale) <= budget:
                 fitted = candidate
             else:
                 break
 
-        if self.estimate_tokens(system, fitted) > budget:
-            fitted = self._shrink_handoff(system, handoff, latest, budget)
+        if int(self.estimate_tokens(system, fitted) * scale) > budget:
+            fitted = self._shrink_handoff(system, handoff, latest, budget, scale)
         return fitted, handoff
 
     def parse_model_handoff(self, payload: str, fallback: ContextHandoff) -> ContextHandoff:
@@ -175,6 +176,7 @@ class CompactionEngine:
         handoff: ContextHandoff,
         latest: list[dict],
         max_tokens: int,
+        scale: float = 1.0,
     ) -> list[dict]:
         compact = ContextHandoff(
             goal=handoff.goal[:1_000],
@@ -188,9 +190,9 @@ class CompactionEngine:
             source_message_count=handoff.source_message_count,
         )
         fitted = [compact.to_context_message(), *latest]
-        while self.estimate_tokens(system, fitted) > max_tokens and compact.failures:
+        while int(self.estimate_tokens(system, fitted) * scale) > max_tokens and compact.failures:
             compact.failures.pop(0)
             fitted[0] = compact.to_context_message()
-        if self.estimate_tokens(system, fitted) > max_tokens:
+        if int(self.estimate_tokens(system, fitted) * scale) > max_tokens:
             fitted = latest
         return fitted

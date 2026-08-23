@@ -12,6 +12,8 @@ export type StreamState = {
   isGenerating: boolean
   steps: Step[]
   cmdBlocks: CmdBlockData[]
+  narrations: string[]
+  thinking: string[]
   partialContent: string
   workspace: string
   taskId: string | null
@@ -30,6 +32,8 @@ type DoneHandler = (
   steps: Step[],
   cmdBlocks: CmdBlockData[],
   agentRun: AgentRunSummary,
+  narrations: string[],
+  thinking: string[],
 ) => void
 
 type StreamConsumer = (
@@ -44,6 +48,8 @@ function initialState(workspace: string): StreamState {
     isGenerating: false,
     steps: [],
     cmdBlocks: [],
+    narrations: [],
+    thinking: [],
     partialContent: '',
     workspace,
     taskId: null,
@@ -196,7 +202,7 @@ export function useChatStream(
         isGenerating: true,
       }))
     } else {
-      commit(current => ({ ...current, isGenerating: true, approval: null, partialContent: '' }))
+      commit(current => ({ ...current, isGenerating: true, approval: null, partialContent: '', narrations: [], thinking: [] }))
     }
 
     try {
@@ -215,10 +221,22 @@ export function useChatStream(
         } else if (e.type === 'step') {
           steps.push({ icon: e.icon || 'activity', text: e.step, done: true })
           commit(current => ({ ...current, steps: [...steps] }))
+        } else if (e.type === 'narration') {
+          commit(current => ({ ...current, narrations: [...current.narrations, e.content] }))
+        } else if (e.type === 'thinking') {
+          commit(current => {
+            const thinking = [...current.thinking]
+            if (thinking.length > 0 && thinking[thinking.length - 1]) {
+              thinking[thinking.length - 1] += e.content
+            } else {
+              thinking.push(e.content)
+            }
+            return { ...current, thinking }
+          })
         } else if (e.type === 'tool_call') {
           steps.push({
             icon: 'tool', text: `${e.name}(...)`, done: false,
-            callId: e.call_id, toolName: e.name, status: 'running',
+            callId: e.call_id, toolName: e.name, args: e.args, status: 'running',
           })
           commit(current => ({ ...current, steps: [...steps] }))
         } else if (e.type === 'tool_result') {
@@ -232,6 +250,8 @@ export function useChatStream(
               ...steps[index], done: true,
               status: e.success ? 'succeeded' : 'failed',
               text: `${e.name}(...) ${e.success ? '完成' : '失败'}`,
+              output: e.success ? (e.output || '').slice(0, 4000) : undefined,
+              error: e.error || (e.success ? undefined : '工具执行失败'),
             }
           }
           commit(current => ({ ...current, steps: [...steps] }))
@@ -328,9 +348,13 @@ export function useChatStream(
               status: 'waiting_approval',
               isGenerating: false,
               partialContent: '',
+              narrations: [],
+              thinking: [],
             }))
             return
           }
+          const lastThinking = stateRef.current.thinking
+          const lastNarrations = stateRef.current.narrations
           fullContent = e.content || fullContent
           const completed = commit(current => ({
             ...current,
@@ -339,8 +363,10 @@ export function useChatStream(
             steps: [...steps],
             cmdBlocks: [...cmdBlocks],
             partialContent: '',
+            narrations: [],
+            thinking: [],
           }))
-          onDone(fullContent, steps, cmdBlocks, summaryOf(completed))
+          onDone(fullContent, steps, cmdBlocks, summaryOf(completed), lastNarrations, lastThinking)
           return
         } else if (e.type === 'error') {
           steps.push({ icon: 'activity', text: e.content, done: true, status: 'failed' })
@@ -363,7 +389,7 @@ export function useChatStream(
   }, [commit, onDone, onError, onToken, workspace])
   consumeRef.current = consume
 
-  const send = useCallback((message: string) => {
+  const send = useCallback((message: string, thinkingEffort?: string) => {
     abortRef.current?.abort()
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -373,7 +399,7 @@ export function useChatStream(
       workspace: current.workspace || workspace,
       isGenerating: true,
     }))
-    void api.startAgentTask(message, sessionId, workspace || undefined)
+    void api.startAgentTask(message, sessionId, workspace || undefined, thinkingEffort)
       .then(started => {
         if (ctrl.signal.aborted) return
         commit(current => ({

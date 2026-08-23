@@ -33,6 +33,7 @@ class AgentTaskSupervisor:
         history: list[dict] | None = None,
         model_context: dict | None = None,
         task_id: str | None = None,
+        approval_mode: str = "confirm",
     ) -> str:
         active = self.task_store.get_latest_nonterminal_agent_task(session_id)
         if active is not None:
@@ -46,6 +47,7 @@ class AgentTaskSupervisor:
             history=history or [],
             task_id=task_id,
             model_context=model_context or {},
+            approval_mode=approval_mode,
         ))
         self._tasks[task_id] = worker
         worker.add_done_callback(lambda _: self._tasks.pop(task_id, None))
@@ -95,7 +97,7 @@ class AgentTaskSupervisor:
             if task is None:
                 raise KeyError(f"任务不存在: {task_id}")
 
-            events = self.task_store.get_agent_events(task_id)
+            events = self.task_store.get_agent_events(task_id, after_sequence=cursor)
             for stored in events:
                 sequence = int(stored["sequence"])
                 if sequence <= cursor:

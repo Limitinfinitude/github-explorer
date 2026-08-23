@@ -21,7 +21,12 @@ class Verifier:
             if has_tests:
                 commands.append(f"{command_executable(python)} -m pytest -q")
             else:
-                commands.append(f"{command_executable(python)} -m compileall -q .")
+                # 排除虚拟环境与第三方目录：compileall 递归会把 .venv 里的
+                # 旧版第三方包（如 Python 2 语法）误判为项目自身验证失败。
+                commands.append(
+                    f"{command_executable(python)} -m compileall -q "
+                    "-x \"/(\\.venv|node_modules|__pycache__|\\.git)/\" ."
+                )
 
         if "node" in project_info.get("languages", []):
             scripts = project_info.get("node_scripts", {})

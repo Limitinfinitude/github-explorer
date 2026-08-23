@@ -112,7 +112,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     }, ["path"], ToolRisk.READ, lambda a: services.files.read_file(
         session_id, a["path"], a.get("start_line", 1), a.get("end_line")
     ))
-    add("search_text", "在工作区文本文件中搜索精确文本", {
+    add("search_text", "在工作区搜索精确文本。path 传目录则递归搜索该目录下所有文件，传文件路径则只搜该文件（默认 . 为整个工作区）", {
         "query": {"type": "string"}, "path": path_property,
     }, ["query"], ToolRisk.READ,
         lambda a: services.files.search_text(session_id, a["query"], a.get("path", ".")))
@@ -141,7 +141,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     add("run_command", "在工作区运行前台 PowerShell/bash 命令并返回真实退出码", {
         "command": {"type": "string"},
         "cwd": path_property,
-        "timeout": {"type": "number", "minimum": 0.1, "maximum": 600},
+        "timeout": {"type": "number", "minimum": 0.1, "maximum": 600, "description": "秒，最大 600"},
     }, ["command"], ToolRisk.PROCESS, lambda a: services.commands.run(
         session_id, a["command"], a.get("cwd", "."), a.get("timeout", 60)
     ), classify_command_risk)
@@ -188,7 +188,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     add("check_port", "检查本机 TCP 端口是否已开放", {
         "host": {"type": "string"},
         "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-        "timeout": {"type": "number", "minimum": 0.1, "maximum": 10},
+        "timeout": {"type": "number", "minimum": 0.1, "maximum": 10, "description": "秒，最大 10"},
     }, ["host", "port"], ToolRisk.READ,
         lambda a: services.network.check_port(a["host"], a["port"], a.get("timeout", 1)))
     def http_request(a):
@@ -211,7 +211,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         "url": {"type": "string"},
         "headers": {"type": "object"},
         "json": {},
-        "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+        "timeout": {"type": "number", "minimum": 0.1, "maximum": 60, "description": "秒，最大 60"},
     }, ["method", "url"], ToolRisk.READ, http_request)
 
     def http_request_batch(a):
@@ -281,7 +281,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
                     "url": {"type": "string"},
                     "headers": {"type": "object"},
                     "json": {},
-                    "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+                    "timeout": {"type": "number", "minimum": 0.1, "maximum": 60, "description": "秒，最大 60"},
                     "expected_status": {"type": "integer", "minimum": 100, "maximum": 599},
                 },
                 "required": ["method", "url"],
@@ -291,7 +291,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     }, ["requests"], ToolRisk.READ, http_request_batch)
     add("wait_http", "等待本地 HTTP 服务开始响应", {
         "url": {"type": "string"},
-        "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+        "timeout": {"type": "number", "minimum": 0.1, "maximum": 60, "description": "秒，最大 60"},
         "expected_text": {"type": "string", "description": "响应正文必须包含的版本标记"},
         "process_id": {"type": "string", "description": "指定受管进程并核验端口归属"},
     }, ["url"], ToolRisk.READ,

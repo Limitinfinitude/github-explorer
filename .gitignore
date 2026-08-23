@@ -38,3 +38,7 @@ node_modules/
 .vscode/
 .idea/
 *.swp
+
+# 本地工作数据
+.zcode/
+gui-test-screenshots/

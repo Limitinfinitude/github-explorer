@@ -86,30 +86,59 @@ class FileTools:
         limit: int = 100,
     ) -> ToolResult:
         root = self.workspaces.resolve(session_id, path)
-        if not root.is_dir():
-            return ToolResult.fail(f"搜索目录不存在: {path}")
+        if root.is_file():
+            # 兼容 grep 习惯：path 传文件路径时只搜该文件
+            targets = [root]
+        elif root.is_dir():
+            targets = None  # 递归搜索整个目录
+        else:
+            return ToolResult.fail(f"搜索路径不存在: {path}")
 
         matches = []
-        for current, dirs, filenames in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRECTORIES)
-            for filename in sorted(filenames):
-                file_path = Path(current) / filename
-                try:
-                    if file_path.stat().st_size > 1_000_000:
-                        continue
-                    lines = file_path.read_text(encoding="utf-8").splitlines()
-                except (OSError, UnicodeDecodeError):
-                    continue
-                for line_number, line in enumerate(lines, 1):
-                    if query in line:
-                        matches.append({
-                            "path": self._relative(session_id, file_path),
-                            "line": line_number,
-                            "text": line[:500],
-                        })
-                        if len(matches) >= limit:
-                            return ToolResult.ok(data={"matches": matches}, output=f"找到 {len(matches)} 处匹配")
+        if targets is None:
+            for current, dirs, filenames in os.walk(root):
+                dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRECTORIES)
+                for filename in sorted(filenames):
+                    self._collect_search_matches(
+                        Path(current) / filename, query, matches, limit, session_id,
+                    )
+                    if len(matches) >= limit:
+                        break
+                if len(matches) >= limit:
+                    break
+        else:
+            for file_path in targets:
+                self._collect_search_matches(
+                    file_path, query, matches, limit, session_id,
+                )
+                if len(matches) >= limit:
+                    break
+
         return ToolResult.ok(data={"matches": matches}, output=f"找到 {len(matches)} 处匹配")
+
+    def _collect_search_matches(
+        self,
+        file_path: Path,
+        query: str,
+        matches: list,
+        limit: int,
+        session_id: str,
+    ) -> None:
+        try:
+            if file_path.stat().st_size > 1_000_000:
+                return
+            lines = file_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return
+        for line_number, line in enumerate(lines, 1):
+            if query in line:
+                matches.append({
+                    "path": self._relative(session_id, file_path),
+                    "line": line_number,
+                    "text": line[:500],
+                })
+                if len(matches) >= limit:
+                    return
 
     def create_directory(self, session_id: str, path: str) -> ToolResult:
         target = self.workspaces.resolve(session_id, path)

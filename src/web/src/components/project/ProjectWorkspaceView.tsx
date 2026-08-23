@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { Activity, BookOpen, Check, ChevronDown, CircleAlert, Copy, Download, FileCode2, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Waypoints } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Activity, BookMarked, BookOpen, Check, ChevronDown, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Upload, Waypoints } from 'lucide-react'
 import { api } from '../../lib/api'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
 import { processIdentityLabel, qualityState, terminalReasonLabel } from '../../lib/projectInsights'
-import type { ProjectEvidence, ProjectEvidenceFilter, ProjectOverview, ProjectSummary } from '../../types'
+import type { ProjectEvidence, ProjectEvidenceFilter, ProjectMemory, ProjectOverview, ProjectSummary } from '../../types'
 
 const STAGES = [
   { id: 'inspect', label: '项目体检', icon: Search },
@@ -15,8 +15,10 @@ const STAGES = [
   { id: 'record', label: '记录', icon: Activity },
 ]
 
+const LIVE_STATUSES = new Set(['running', 'waiting_approval', 'pending'])
+
 function statusLabel(status: string) {
-  return ({ completed: '已完成', incomplete: '未完成', failed: '失败', waiting_approval: '等待确认', running: '进行中', not_started: '未开始' } as Record<string, string>)[status] || status
+  return ({ completed: '已完成', incomplete: '未完成', failed: '失败', waiting_approval: '等待确认', running: '进行中', not_started: '未开始', pending: '排队中' } as Record<string, string>)[status] || status
 }
 
 const EVIDENCE_FILTERS: Array<{ id: ProjectEvidenceFilter; label: string }> = [
@@ -143,10 +145,86 @@ function EvidenceDrawer({ projectId, overview }: { projectId: string; overview: 
   )
 }
 
+function verificationBadge(status: string) {
+  if (status === 'verified') return '已验证'
+  if (status === 'partial') return '部分验证'
+  if (status === 'unverified') return '未验证'
+  return status
+}
+
+function ProjectMemoriesDrawer({ projectId }: { projectId: string }) {
+  const [open, setOpen] = useState(false)
+  const [memories, setMemories] = useState<ProjectMemory[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    setOpen(false); setMemories([]); setError('')
+  }, [projectId])
+
+  async function load() {
+    setLoading(true); setError('')
+    try { setMemories(await api.getProjectMemories(projectId)) }
+    catch (err) { setError(err instanceof Error ? err.message : '读取项目记忆失败') }
+    finally { setLoading(false) }
+  }
+
+  async function toggle() {
+    const next = !open
+    setOpen(next)
+    if (next) await load()
+  }
+
+  return (
+    <section className="project-evidence">
+      <button type="button" className="project-evidence__trigger" onClick={() => void toggle()} aria-expanded={open}>
+        <span><BookMarked size={15} /> 项目记忆</span>
+        <small>{memories.length ? `${memories.length} 条事实` : '任务完成后的沉淀事实'}</small>
+        <ChevronDown size={15} className={open ? 'is-open' : ''} />
+      </button>
+      {open && (loading ? <div className="project-evidence__empty">正在读取项目记忆…</div> : error ? (
+        <div className="project-evidence__error"><CircleAlert size={16} /><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>
+      ) : memories.length === 0 ? <div className="project-evidence__empty">还没有沉淀的项目事实。任务完成后，验证通过的结论会自动写入这里。</div> : (
+        <div className="project-memories__body">
+          <div className="project-memories__actions">
+            <button type="button" onClick={() => void load()} title="刷新项目记忆" aria-label="刷新项目记忆"><RefreshCw size={13} /></button>
+          </div>
+          {memories.map(memory => (
+            <article key={memory.id} className="project-memory">
+              <p>{memory.content}</p>
+              <footer>
+                <span className={`project-memory__badge project-memory__badge--${memory.verification_status}`}>{verificationBadge(memory.verification_status)}</span>
+                <span>置信度 {Math.round(memory.confidence * 100)}%</span>
+                <span>{memory.source_type}{memory.source_ref ? ` · ${memory.source_ref.slice(0, 12)}` : ''}</span>
+                <time>{formatLocalTimestamp(memory.updated_at)}</time>
+              </footer>
+            </article>
+          ))}
+        </div>
+      ))}
+    </section>
+  )
+}
+
+function FailurePatterns({ patterns }: { patterns: ProjectOverview['failure_patterns'] }) {
+  if (!patterns || patterns.length === 0) return null
+  return (
+    <section className="project-failures" aria-label="失败模式">
+      <div className="project-failures__heading"><CircleAlert size={15} /><span>失败模式</span><small>{patterns.length} 类 · 未恢复</small></div>
+      {patterns.slice(0, 5).map(pattern => (
+        <div className="project-failure-item" key={`${pattern.tool_name}-${pattern.error}`}>
+          <b>{pattern.tool_name} × {pattern.count}</b>
+          <code>{pattern.error}</code>
+        </div>
+      ))}
+    </section>
+  )
+}
+
 export function ProjectWorkspaceView({
   onOpenProjectConversation,
 }: {
-  onOpenProjectConversation: (sessionId: string, title: string, userMessage?: string) => void
+  onOpenProjectConversation: (sessionId: string, title: string, userMessage?: string, project?: { projectId: string; workspace: string }) => void
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [projectId, setProjectId] = useState('')
@@ -155,6 +233,12 @@ export function ProjectWorkspaceView({
   const [error, setError] = useState('')
   const [actionPending, setActionPending] = useState('')
   const [actionError, setActionError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [importPath, setImportPath] = useState('')
+  const [importing, setImporting] = useState(false)
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   async function refresh() {
     setLoading(true); setError('')
@@ -164,9 +248,28 @@ export function ProjectWorkspaceView({
       const selected = next.some(project => project.project_id === projectId) ? projectId : (next[0]?.project_id || '')
       setProjectId(selected)
       setOverview(selected ? await api.getProjectOverview(selected) : null)
+      setLastUpdated(Date.now())
     } catch (err) { setError(err instanceof Error ? err.message : '读取项目工作台失败') } finally { setLoading(false) }
   }
   useEffect(() => { void refresh() }, [])
+
+  // 实时轮询：选中项目有非终态任务时每 3 秒刷新一次概览，终态自动停止
+  useEffect(() => {
+    if (!projectId || !overview || !LIVE_STATUSES.has(overview.stage_status)) return
+    const timer = window.setInterval(async () => {
+      setRefreshing(true)
+      try {
+        const next = await api.getProjectOverview(projectId)
+        setOverview(next)
+        setLastUpdated(Date.now())
+      } catch {
+        // 瞬时失败保留上一次快照，下一轮继续尝试
+      } finally {
+        setRefreshing(false)
+      }
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [projectId, overview?.stage_status])
 
   const activeStage = useMemo(() => overview?.stage || 'inspect', [overview])
   const activeProcess = overview?.active_processes.find(process => process.status === 'running') || overview?.active_processes[0]
@@ -179,27 +282,105 @@ export function ProjectWorkspaceView({
     try {
       const started = await api.startProjectAction(overview.project_id, action)
       const label = PROJECT_ACTIONS.find(item => item.id === action)?.label || '项目任务'
-      onOpenProjectConversation(started.session_id, `${projectTitle} 项目`, label)
+      onOpenProjectConversation(started.session_id, `${projectTitle} 项目`, label, {
+        projectId: overview.project_id,
+        workspace: overview.workspace_root,
+      })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '无法启动项目动作')
     } finally {
       setActionPending('')
     }
   }
+
+  async function exportReport() {
+    if (!overview || exporting) return
+    setExporting(true); setActionError('')
+    try {
+      const report = await api.getProjectReport(overview.project_id)
+      const blob = new Blob([report.markdown], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url; anchor.download = `${projectTitle || 'project'}-report.md`; anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '导出项目报告失败')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function importProject(path: string) {
+    const trimmed = path.trim()
+    if (!trimmed || importing) return
+    setImporting(true); setError(''); setActionError('')
+    try {
+      const result = await api.importProject(trimmed)
+      setImportPath('')
+      await refresh()
+      const name = result.workspace.split(/[\\/]/).filter(Boolean).pop() || '项目'
+      onOpenProjectConversation(result.session_id, `${name} 项目`, '项目体检已启动', {
+        projectId: result.project_id,
+        workspace: result.workspace,
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导入项目失败')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  function selectProject(id: string) {
+    setProjectId(id); setLoading(true)
+    api.getProjectOverview(id).then(next => { setOverview(next); setLastUpdated(Date.now()) })
+      .catch(err => setError(err instanceof Error ? err.message : '读取项目失败'))
+      .finally(() => setLoading(false))
+  }
+
   return (
     <div className="project-workspace-view">
       <header className="project-workspace__header">
         <div><div className="project-workspace__eyebrow"><FolderOpen size={13} /> PROJECT WORKBENCH</div><h1>项目工作台</h1><p>从跑通到看懂，再到可追溯的二改实验。</p></div>
-        <button type="button" className="icon-button" onClick={() => void refresh()} title="刷新项目状态" aria-label="刷新项目状态"><RefreshCw size={15} /></button>
+        <div className="project-workspace__header-actions">
+          {overview && (
+            <button type="button" className="icon-button" onClick={() => void exportReport()} disabled={exporting} title="导出项目报告 (Markdown)" aria-label="导出项目报告">
+              <FileText size={15} />{exporting ? '生成中…' : '导出报告'}
+            </button>
+          )}
+          <button type="button" className="icon-button" onClick={() => void refresh()} title="刷新项目状态" aria-label="刷新项目状态"><RefreshCw size={15} className={refreshing ? 'is-spinning' : ''} /></button>
+        </div>
       </header>
-      {loading ? <div className="project-state">正在读取最近项目…</div> : error ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : !overview ? <div className="project-state"><strong>还没有项目任务</strong><span>先在对话中导入或创建一个项目，工作台会在这里保留运行和实验记录。</span></div> : (
+      {lastUpdated && overview && <div className="project-workspace__updated"><Clock size={11} /> 更新于 {new Date(lastUpdated).toLocaleTimeString()}</div>}
+      {loading ? <div className="project-state">正在读取最近项目…</div> : error && !overview ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : !overview ? (
+        <div className="project-import">
+          <div className="project-import__icon"><FolderOpen size={20} /></div>
+          <strong>导入一个本地项目</strong>
+          <p>选择一个本地目录作为实验材料，工作台会立即启动「项目体检」，并在之后保留运行、证据与实验记录。</p>
+          <div className="project-import__form">
+            <input
+              ref={importInputRef}
+              value={importPath}
+              onChange={event => setImportPath(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter') void importProject(importPath) }}
+              placeholder="粘贴目录绝对路径，例如 C:\projects\demo"
+              spellCheck={false}
+              aria-label="项目目录绝对路径"
+            />
+            <button type="button" className="project-import__primary" disabled={!importPath.trim() || importing} onClick={() => void importProject(importPath)}>
+              <Upload size={14} />{importing ? '正在导入并体检…' : '导入并体检'}
+            </button>
+          </div>
+          <small>也可以在设置中配置「默认工作目录」，或先在对话里导入 GitHub 仓库。</small>
+          {error && <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div>}
+        </div>
+      ) : (
         <>
-          {projects.length > 1 && <label className="project-picker"><span>当前项目</span><select value={projectId} onChange={event => { const id = event.target.value; setProjectId(id); setLoading(true); api.getProjectOverview(id).then(setOverview).catch(err => setError(err instanceof Error ? err.message : '读取项目失败')).finally(() => setLoading(false)) }}>{projects.map(project => <option key={project.project_id} value={project.project_id}>{project.workspace_root}</option>)}</select></label>}
+          {projects.length > 1 && <label className="project-picker"><span>当前项目</span><select value={projectId} onChange={event => selectProject(event.target.value)}>{projects.map(project => <option key={project.project_id} value={project.project_id}>{project.workspace_root}</option>)}</select></label>}
           <section className="project-hero">
             <div className="project-hero__icon"><GitBranch size={18} /></div>
             <div className="project-hero__main"><strong>{overview.summary.message}</strong><code>{overview.workspace_root || '工作区尚未绑定'}</code></div>
             <span className={`project-status project-status--${overview.stage_status}`}>{statusLabel(overview.stage_status)}</span>
-            <button type="button" className="project-open-chat" onClick={() => onOpenProjectConversation(overview.project_session_id, `${projectTitle} 项目`)}><MessageSquare size={14} />打开项目对话</button>
+            <button type="button" className="project-open-chat" onClick={() => onOpenProjectConversation(overview.project_session_id, `${projectTitle} 项目`, undefined, { projectId: overview.project_id, workspace: overview.workspace_root })}><MessageSquare size={14} />打开项目对话</button>
           </section>
           <section className="project-actions" aria-label="项目动作">
             {PROJECT_ACTIONS.map(action => { const Icon = action.icon; const pending = actionPending === action.id; return (
@@ -236,7 +417,10 @@ export function ProjectWorkspaceView({
               ))}
             </div>
           </section>
+          <FailurePatterns patterns={overview.failure_patterns} />
           <EvidenceDrawer projectId={projectId} overview={overview} />
+          <div className="project-drawer-gap" />
+          <ProjectMemoriesDrawer projectId={projectId} />
         </>
       )}
     </div>

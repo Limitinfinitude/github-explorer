@@ -3,6 +3,7 @@ import type { Message, Step, CmdBlockData } from '../../types'
 import { MessageItem } from './MessageItem'
 import { WorkChain } from './WorkChain'
 import { CmdBlock } from './CmdBlock'
+import { ReasoningRow } from './ReasoningRow'
 import { displayResponseContent } from '../../lib/responseDisplay'
 
 interface Props {
@@ -10,11 +11,13 @@ interface Props {
   isGenerating: boolean
   streamSteps: Step[]
   streamCmdBlocks: CmdBlockData[]
+  streamNarration: string[]
+  streamThinking: string[]
   streamContent: string
   startTime: number
 }
 
-export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamContent, startTime }: Props) {
+export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamContent, startTime }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const [renderedStreamContent, setRenderedStreamContent] = useState('')
   const elapsed = Math.round((Date.now() - startTime) / 1000)
@@ -22,7 +25,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, streamContent, streamCmdBlocks.length])
+  }, [messages.length, streamContent, streamCmdBlocks.length, streamNarration.length, streamThinking])
 
   useEffect(() => {
     if (!displayStreamContent) {
@@ -50,9 +53,16 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
         <div className="stream-message">
           <div className="flex items-center gap-2 mb-1.5">
             <div className="w-[22px] h-[22px] rounded-md bg-success flex items-center justify-center text-[10px] font-bold text-white">E</div>
-            <span className="text-[13px] font-semibold text-zinc-200">Explorer</span>
-            <span className="text-[11px] text-zinc-500">刚刚</span>
+            <span className="text-[13px] font-semibold text-fg">Explorer</span>
+            <span className="text-[11px] text-muted">刚刚</span>
           </div>
+          {streamThinking.length > 0 && (
+            <div className="message-process">
+              {streamThinking.map((block, index) => (
+                <ReasoningRow key={index} text={block} running />
+              ))}
+            </div>
+          )}
           {streamContent ? (
             <div className="assistant-response">
               <div
@@ -65,12 +75,19 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
             </div>
           ) : streamSteps.length === 0 && (
             <div className="assistant-response flex gap-1 py-2">
-              <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
           )}
-          {streamSteps.length > 0 && <WorkChain steps={streamSteps} elapsed={elapsed} />}
+          {streamSteps.length > 0 && <WorkChain steps={streamSteps} elapsed={elapsed} showSummary />}
+          {streamNarration.length > 0 && (
+            <div className="stream-narration">
+              {streamNarration.map((line, index) => (
+                <div key={index} className="stream-narration__line">{line}</div>
+              ))}
+            </div>
+          )}
           {streamCmdBlocks.map(b => <CmdBlock key={b.id} block={b} />)}
         </div>
       )}

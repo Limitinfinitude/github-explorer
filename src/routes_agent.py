@@ -6,10 +6,9 @@ Agent 相关路由 — /api/agent/chat/stream (SSE), /api/agent/setup,
 import asyncio
 import json
 import os
-import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
@@ -26,6 +25,8 @@ class LocalChatRequest(BaseModel):
     repo: Optional[str] = None
     workspace: Optional[str] = None
     agent_mode: bool = False
+    thinking_effort: Optional[str] = None
+    approval_mode: Optional[str] = None
 
 
 def _input_encoding_issue(message: str) -> dict[str, object] | None:
@@ -33,18 +34,6 @@ def _input_encoding_issue(message: str) -> dict[str, object] | None:
 
     result = inspect_text_encoding(message)
     return result if result.get("status") == "corrupted" else None
-
-
-class ExecuteRequest(BaseModel):
-    command: str
-    cwd: Optional[str] = None
-    session_id: str = "default"
-    repo: Optional[str] = None
-
-
-class CommandRequest(BaseModel):
-    command: str
-    cwd: Optional[str] = None
 
 
 class WorkspaceRequest(BaseModel):
@@ -70,8 +59,14 @@ class ResumeTaskRequest(BaseModel):
     session_id: str
 
 
-# 全局工作目录（命令执行 API 使用）
-_work_dir = str(Path.cwd())
+class ProjectImportRequest(BaseModel):
+    workspace: str
+
+
+class ProjectMemoriesClearRequest(BaseModel):
+    workspace: str
+
+
 _fallback_workspace = Path(__file__).resolve().parent.parent / "cloned_repos"
 
 _local_agent_services = None
@@ -90,17 +85,24 @@ def get_local_agent_services():
 def get_local_agent_runtime():
     global _local_agent_runtime
     if _local_agent_runtime is None:
-        from agent.llm import call_llm_with_tools
+        from agent.llm import call_llm_with_tools, stream_llm_with_tools
         from agent.runtime.runtime import LocalAgentRuntime
         from agent.runtime.tooling import build_tool_registry
         from agent.memory import memory
 
         services = get_local_agent_services()
         memory.reconcile_interrupted_runtime()
+        try:
+            memory.prune_agent_events(30)
+        except Exception:
+            # 归档清理失败不应阻止服务启动
+            pass
         _local_agent_runtime = LocalAgentRuntime(
             services.workspaces,
             lambda session_id: build_tool_registry(session_id, services),
             call_llm_with_tools,
+            llm_stream_call=stream_llm_with_tools,
+            max_rounds=32,
             task_store=memory,
             context_engine=services.context,
         )
@@ -553,6 +555,9 @@ async def start_agent_task(request: LocalChatRequest):
     try:
         workspace, _ = require_agent_workspace(request.session_id, request.workspace)
         history = memory.get_agent_chat_history(request.session_id, limit=10)
+        approval_mode = request.approval_mode or memory.get_preference("approval_mode") or "confirm"
+        if approval_mode not in {"confirm", "auto", "open"}:
+            approval_mode = "confirm"
         task_id = get_agent_task_supervisor().start(
             request.session_id,
             request.message,
@@ -561,7 +566,9 @@ async def start_agent_task(request: LocalChatRequest):
                 "id": get_model(),
                 "protocol": get_protocol(),
                 "base_url": os.environ.get("LLM_BASE_URL", ""),
+                "thinking_effort": request.thinking_effort or os.environ.get("LLM_THINKING_EFFORT", "off"),
             },
+            approval_mode=approval_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -583,6 +590,28 @@ async def get_encoding_health():
         content=json.dumps(encoding_health(), ensure_ascii=False),
         media_type="application/json; charset=utf-8",
     )
+
+
+class ApprovalModeUpdate(BaseModel):
+    mode: Literal["confirm", "auto", "open"]
+
+
+@router_agent.get("/api/settings/approval-mode")
+async def get_approval_mode():
+    from agent.memory import memory
+
+    mode = memory.get_preference("approval_mode") or "confirm"
+    if mode not in {"confirm", "auto", "open"}:
+        mode = "confirm"
+    return {"mode": mode}
+
+
+@router_agent.put("/api/settings/approval-mode")
+async def set_approval_mode(request: ApprovalModeUpdate):
+    from agent.memory import memory
+
+    memory.set_preference("approval_mode", request.mode)
+    return {"mode": request.mode}
 
 
 @router_agent.get("/api/agent/tasks/{task_id}/events")
@@ -657,11 +686,44 @@ async def agent_confirm(request: LocalChatRequest):
 
 
 # 执行命令 - 直接调用工具
+# 旧裸命令执行端点缺少工作区、会话与审批绑定，无法安全映射，统一停用
 @router_agent.post("/api/agent/execute")
-async def agent_execute(request: ExecuteRequest):
-    from agent.tools import run_command
-    result = run_command(request.command, cwd=request.cwd)
-    return result
+async def agent_execute(request: dict):
+    raise HTTPException(
+        status_code=410,
+        detail="旧执行端点已停用。请通过 /api/agent/tasks/start 发起 Agent 任务，"
+        "由 LocalAgentRuntime 统一执行带边界校验的工具调用。",
+    )
+
+
+# ========== 聊天消息持久化（含思考/工具过程） ==========
+
+class ChatMessagePayload(BaseModel):
+    role: str = "assistant"
+    content: str
+    time: Optional[str] = None
+    thinking: Optional[list] = None
+    narrations: Optional[list] = None
+    steps: Optional[list] = None
+    cmdBlocks: Optional[list] = None
+    agentRun: Optional[dict] = None
+
+
+@router_agent.post("/api/chats/{session_id}/messages")
+async def save_chat_message(session_id: str, payload: ChatMessagePayload):
+    from agent.memory import memory
+
+    if len(payload.content) > 200_000:
+        raise HTTPException(status_code=413, detail="消息内容过大")
+    memory.save_chat_message(session_id, payload.model_dump(exclude_none=True))
+    return {"ok": True}
+
+
+@router_agent.get("/api/chats/{session_id}")
+async def get_chat_messages(session_id: str):
+    from agent.memory import memory
+
+    return {"session_id": session_id, "messages": memory.get_chat_messages(session_id)}
 
 
 # 获取项目状态
@@ -904,6 +966,134 @@ async def start_project_action(project_id: str, action: str):
     }
 
 
+@router_agent.get("/api/projects/{project_id}/memories")
+async def get_project_memories(project_id: str, limit: int = 20, verified_only: bool = False):
+    """Read-only project facts; no Agent work is started."""
+    from agent.memory import memory
+
+    task = _resolve_project_task(memory, project_id)
+    workspace_root = str((task or {}).get("workspace_root") or "")
+    if not workspace_root:
+        return {"project_id": project_id, "workspace_root": "", "memories": []}
+    return {
+        "project_id": project_id,
+        "workspace_root": workspace_root,
+        "memories": memory.list_project_memories(
+            workspace_root,
+            limit=max(1, min(limit, 100)),
+            verified_only=verified_only,
+        ),
+    }
+
+
+@router_agent.get("/api/projects/{project_id}/report")
+async def get_project_report(project_id: str):
+    """Combined Markdown report backed by persisted project facts."""
+    from agent.memory import memory
+    from agent.runtime.project_projection import (
+        build_project_evidence,
+        build_project_overview,
+        build_project_report_markdown,
+    )
+
+    task = _resolve_project_task(memory, project_id)
+    task_id = task.get("task_id") if task else None
+    activity = memory.get_agent_task_activity(task_id) if task_id else {}
+    workspace = memory.get_workspace_state(task.get("session_id", "")) if task else None
+    traces = memory.list_agent_traces(500)
+    overview = build_project_overview(
+        project_id=project_id,
+        workspace=workspace,
+        task=task,
+        activity=activity,
+        traces=traces,
+    )
+    evidence = build_project_evidence(
+        project_id=project_id,
+        workspace=workspace,
+        task=task,
+        activity=activity,
+        history=_project_history(memory, project_id),
+    )
+    memories = memory.list_project_memories(overview["workspace_root"]) if overview["workspace_root"] else []
+    import datetime
+
+    return {
+        "project_id": project_id,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "markdown": build_project_report_markdown(
+            overview=overview,
+            evidence=evidence,
+            memories=memories,
+        ),
+    }
+
+
+@router_agent.post("/api/projects/import", status_code=202)
+async def import_project(request: ProjectImportRequest):
+    """Bind a local directory as a project workspace and start project inspection."""
+    from agent.llm import get_model, get_protocol
+    from agent.memory import memory
+    from agent.runtime.project_projection import (
+        project_action_prompt,
+        project_id_for_workspace,
+        project_session_id_for_workspace,
+    )
+
+    raw = str(request.workspace or "").strip().strip("\"'")
+    if not raw:
+        raise HTTPException(status_code=400, detail="请提供要导入的项目目录")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail="项目目录必须是绝对路径")
+    try:
+        path = path.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"项目目录无效: {exc}") from exc
+    if not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"项目目录不存在: {path}")
+
+    session_id = project_session_id_for_workspace(str(path))
+    workspace, _ = resolve_agent_workspace(session_id, str(path))
+    project_id = project_id_for_workspace(str(workspace.root))
+    try:
+        task_id = get_agent_task_supervisor().start(
+            session_id,
+            project_action_prompt("inspect"),
+            model_context={
+                "id": get_model(),
+                "protocol": get_protocol(),
+                "base_url": os.environ.get("LLM_BASE_URL", ""),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "session_id": session_id,
+        "task_id": task_id,
+        "workspace": str(workspace.root),
+        "status": "pending",
+    }
+
+
+@router_agent.post("/api/projects/memories/clear")
+async def clear_project_memories(request: ProjectMemoriesClearRequest):
+    """清除一个项目工作区的全部记忆（评测隔离 / 用户清理）。"""
+    from agent.memory import memory
+
+    raw = str(request.workspace or "").strip().strip("\"'")
+    if not raw:
+        raise HTTPException(status_code=400, detail="请提供项目工作区路径")
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"项目目录无效: {exc}") from exc
+    deleted = memory.delete_project_memories(str(path))
+    return {"ok": True, "workspace": str(path), "deleted": deleted}
+
+
 @router_agent.get("/api/agent/memory/search")
 async def search_agent_memory(
     workspace: str,
@@ -1075,63 +1265,20 @@ async def mcp_call(request: dict):
     return await mcp_tool_call(tool_name, arguments)
 
 
-# ========== 命令执行 API ==========
+# ========== 命令执行 API（已停用） ==========
 
 @router_agent.post("/api/local/run")
-async def run_command_endpoint(request: CommandRequest):
-    """执行系统命令"""
-    global _work_dir
-    try:
-        if request.cwd:
-            _work_dir = request.cwd
-        elif not Path(_work_dir).exists():
-            _work_dir = str(Path.cwd())
-
-        cmd = request.command.strip()
-        if cmd.lower().startswith('cd '):
-            new_dir = cmd[3:].strip().strip('"').strip("'")
-            if new_dir == '..':
-                _work_dir = str(Path(_work_dir).parent)
-            elif Path(new_dir).is_absolute():
-                _work_dir = new_dir
-            else:
-                _work_dir = str(Path(_work_dir) / new_dir)
-            return {"success": True, "output": f"已切换到: {_work_dir}", "cwd": _work_dir}
-
-        if os.name == 'nt':
-            shell_cmd = ["cmd", "/c", cmd]
-        else:
-            shell_cmd = ["bash", "-c", cmd]
-
-        result = subprocess.run(
-            shell_cmd,
-            cwd=_work_dir,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            encoding='utf-8',
-            errors='replace'
-        )
-
-        output = result.stdout
-        if result.stderr:
-            output += "\n" + result.stderr
-
-        return {
-            "success": result.returncode == 0,
-            "output": output.strip(),
-            "returncode": result.returncode,
-            "cwd": _work_dir
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "output": "命令执行超时", "cwd": _work_dir}
-    except Exception as e:
-        return {"success": False, "output": str(e), "cwd": _work_dir}
+async def run_command_endpoint(request: dict):
+    raise HTTPException(
+        status_code=410,
+        detail="本地裸命令端点已停用，且不参与工作区与权限校验。"
+        "请使用 Agent 工具 run_command/start_process 或 /api/agent/tasks/start。",
+    )
 
 
 @router_agent.post("/api/local/reset-cwd")
 async def reset_cwd():
-    """重置工作目录"""
-    global _work_dir
-    _work_dir = str(Path.cwd())
-    return {"cwd": _work_dir}
+    raise HTTPException(
+        status_code=410,
+        detail="本地裸命令端点已停用，工作目录由会话工作区统一管理。",
+    )

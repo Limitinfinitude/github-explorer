@@ -116,6 +116,10 @@ class ProjectTools:
             python = self.runner.project_python(session_id, str(root))
             if (root / "requirements.txt").exists():
                 commands.append(f"{command_executable(python)} -m pip install -r requirements.txt")
+            elif (root / "uv.lock").exists():
+                # uv 管理的项目（flatnotes 等）：这类应用常无 packages/build-system 配置，
+                # pip/uv 的 `-e .` 会因包发现失败；uv sync 按 lock 安装依赖即可运行。
+                commands.append("uv sync --no-install-project")
             elif (root / "pyproject.toml").exists():
                 commands.append(f"{command_executable(python)} -m pip install -e .")
 
