@@ -27,18 +27,22 @@ function projectName(project: ProjectSummary) {
 }
 
 function SectionTitle({
-  label, collapsed, onToggle, trailing,
+  label, collapsed, onToggle, trailing, count,
 }: {
   label: string
   collapsed: boolean
   onToggle: () => void
   trailing?: React.ReactNode
+  count?: number
 }) {
   return (
     <div className="sidebar-section-title">
       <button type="button" className={`sidebar-section-title__btn ${collapsed ? 'is-collapsed' : ''}`} onClick={onToggle} aria-expanded={!collapsed}>
         <ChevronDown size={12} />
         <span>{label}</span>
+        {typeof count === 'number' && count > 0 && (
+          <em className="sidebar-section-count">{count}</em>
+        )}
       </button>
       {trailing}
     </div>
@@ -145,6 +149,7 @@ export function Sidebar({
           label="项目栏"
           collapsed={collapsed.projects}
           onToggle={() => setCollapsed(prev => ({ ...prev, projects: !prev.projects }))}
+          count={projects.length}
           trailing={!collapsed.projects && (
             <button
               type="button"
@@ -237,6 +242,7 @@ export function Sidebar({
           label="任务栏"
           collapsed={collapsed.tasks}
           onToggle={() => setCollapsed(prev => ({ ...prev, tasks: !prev.tasks }))}
+          count={looseChats.length}
         />
         {!collapsed.tasks && (
           <>

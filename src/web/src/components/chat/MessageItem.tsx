@@ -45,6 +45,7 @@ export function MessageItem({ msg }: { msg: Message }) {
 
   return (
     <div className={`mb-5 px-7 ${isUser ? 'flex flex-col items-end' : ''}`}>
+      <div className={`w-full max-w-[860px] ${isUser ? 'flex flex-col items-end' : ''}`}>
       <div className={`flex items-center gap-2 mb-1.5 ${isUser ? 'flex-row-reverse' : ''}`}>
         <div
           className={`w-[22px] h-[22px] rounded-md flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0 ${
@@ -102,6 +103,7 @@ export function MessageItem({ msg }: { msg: Message }) {
           )}
         </>
       )}
+      </div>
     </div>
   )
 }

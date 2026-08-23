@@ -186,6 +186,20 @@ button { cursor: pointer; }
 .sidebar-section-title__btn:hover { color: var(--text); background: var(--hover); }
 .sidebar-section-title__btn svg { transition: transform .15s ease; }
 .sidebar-section-title__btn.is-collapsed svg { transform: rotate(-90deg); }
+.sidebar-section-count {
+  min-width: 17px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  font: 600 9px/1 Consolas, monospace;
+  font-style: normal;
+}
 .sidebar-section-add { width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted-2); background: transparent; border: 0; border-radius: 4px; }
 .sidebar-section-add:hover { color: var(--blue); background: var(--accent-soft); }
 .sidebar-section-add.is-active { color: var(--blue); background: var(--accent-soft); }
@@ -199,7 +213,7 @@ button { cursor: pointer; }
 .sidebar-project-add span { color: var(--success); font-size: 9px; line-height: 14px; overflow-wrap: anywhere; }
 .sidebar-project-add span.is-error { color: var(--error); }
 
-.sidebar-chats { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px; }
+.sidebar-chats { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px; scrollbar-width: thin; }
 .sidebar-chats > p { padding: 18px 8px; text-align: center; color: var(--muted-2); font-size: 11px; }
 .sidebar-chat {
   height: 36px;
@@ -366,8 +380,8 @@ button { cursor: pointer; }
 .empty-workbench h2 { margin: 0; color: var(--text); font: 500 18px/24px Bahnschrift, Aptos, sans-serif; }
 .empty-workbench__actions { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .task-template {
-  min-height: 74px;
-  padding: 12px;
+  min-height: 88px;
+  padding: 13px;
   color: var(--text-2);
   background: transparent;
   border: 0;
@@ -375,14 +389,19 @@ button { cursor: pointer; }
   text-align: left;
   font-size: 12px;
   line-height: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .task-template:last-child { border-right: 0; }
 .task-template:hover { color: #fff; background: var(--surface-2); }
+.task-template__icon { width: 28px; height: 28px; display: grid; place-items: center; color: var(--blue); background: var(--accent-soft); border-radius: 6px; }
+.task-template__text { font-weight: 600; }
+.task-template__hint { color: var(--muted-2); font-size: 10px; line-height: 15px; }
+.task-template:hover .task-template__icon { color: #fff; background: var(--accent); }
 
 .message-list { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 0; }
-.stream-message { padding: 0 28px; margin-bottom: 20px; }
-
-.stream-narration { width: min(100%, 720px); margin: 6px 0 2px 30px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.stream-message { padding: 0 28px; margin-bottom: 20px; }.stream-narration { width: min(100%, 720px); margin: 6px 0 2px 30px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .stream-narration__line { color: var(--muted); line-height: 18px; }
 .stream-narration__line::before { content: "⚙ "; color: var(--muted-2); }
 
@@ -535,9 +554,9 @@ button { cursor: pointer; }
 .composer__textarea { width: 100%; min-height: 42px; max-height: 140px; padding: 12px 13px 5px; resize: none; color: var(--text); background: transparent; border: 0; outline: 0; font-size: 13px; line-height: 20px; }
 .composer__textarea::placeholder { color: var(--muted-2); }
 .composer__toolbar { min-height: 40px; padding: 5px 7px; display: flex; align-items: center; justify-content: space-between; }
-.composer__controls { min-width: 0; display: flex; align-items: center; gap: 4px; }
-.agent-mode-toggle, .model-selector { height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 6px; color: var(--muted); background: transparent; border: 0; border-radius: 5px; font-size: 11px; }
-.think-selector { height: 28px; padding: 0 7px; display: flex; align-items: center; gap: 5px; color: var(--muted); background: transparent; border: 0; border-radius: 5px; font-size: 11px; }
+.composer__controls { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.agent-mode-toggle, .model-selector { height: 28px; padding: 0 9px; display: flex; align-items: center; gap: 6px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 5px; font-size: 11px; }
+.think-selector { height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 5px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 5px; font-size: 11px; }
 .think-selector svg { color: var(--muted-2); }
 .think-selector.is-active { color: var(--warning); background: rgba(215,185,107,.08); }
 .think-selector.is-active svg { color: var(--warning); }
@@ -1025,8 +1044,8 @@ button { cursor: pointer; }
 }
 
 /* Assistant response typography */
-.assistant-response { width: min(100%, 720px); padding: 2px 0 0 30px; }
-.assistant-markdown { color: var(--text); font-size: 14px; line-height: 1.68; overflow-wrap: anywhere; }
+.assistant-response { width: min(100%, 760px); padding: 2px 0 0 30px; }
+.assistant-markdown { color: var(--text); font-size: 14px; line-height: 1.72; overflow-wrap: anywhere; }
 .assistant-markdown > :first-child { margin-top: 0; }
 .assistant-markdown > :last-child { margin-bottom: 0; }
 .assistant-markdown p { margin: 0 0 11px; }
@@ -1037,8 +1056,8 @@ button { cursor: pointer; }
 .assistant-markdown ul, .assistant-markdown ol { margin: 7px 0 12px; padding-left: 1.4rem; }
 .assistant-markdown ul { list-style: disc; }
 .assistant-markdown ol { list-style: decimal; }
-.assistant-markdown li { margin: 3px 0; padding-left: 2px; }
-.assistant-markdown li::marker { color: var(--muted-2); }
+.assistant-markdown li { margin: 4px 0; padding-left: 3px; }
+.assistant-markdown li::marker { color: var(--text-2); }
 .assistant-markdown strong { color: var(--text); font-weight: 650; }
 .assistant-markdown a { color: var(--blue); text-decoration: underline; text-decoration-color: rgba(88,166,255,.45); text-underline-offset: 3px; }
 .assistant-markdown blockquote { margin: 12px 0; padding: 1px 0 1px 12px; color: var(--text-2); border-left: 2px solid var(--border-2); }

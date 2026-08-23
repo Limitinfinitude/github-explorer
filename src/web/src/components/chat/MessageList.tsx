@@ -51,6 +51,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
 
       {isGenerating && (
         <div className="stream-message">
+          <div className="w-full max-w-[860px]">
           <div className="flex items-center gap-2 mb-1.5">
             <div className="w-[22px] h-[22px] rounded-md bg-success flex items-center justify-center text-[10px] font-bold text-white">E</div>
             <span className="text-[13px] font-semibold text-fg">Explorer</span>
@@ -89,6 +90,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
             </div>
           )}
           {streamCmdBlocks.map(b => <CmdBlock key={b.id} block={b} />)}
+          </div>
         </div>
       )}
       <div ref={bottomRef} />

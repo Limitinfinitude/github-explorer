@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, FolderGit2, GitBranch, Link2, Menu, TerminalSquare } from 'lucide-react'
+import { Bug, ChevronDown, FolderGit2, GitBranch, Link2, Menu, Play, Scan, TerminalSquare } from 'lucide-react'
 import { MessageList } from './MessageList'
 import { InputArea } from './InputArea'
 import { useChatStream } from '../../hooks/useChatStream'
@@ -20,7 +20,11 @@ interface Props {
   onOpenMenu: () => void
 }
 
-const HINTS = ['扫描当前项目并给出改进建议', '运行测试并修复失败项', '启动本地开发服务']
+const HINTS = [
+  { icon: 'Scan', text: '扫描当前项目并给出改进建议', hint: '体检代码库，定位技术栈与可运行性风险' },
+  { icon: 'Bug', text: '运行测试并修复失败项', hint: '跑测试套件，自动修复失败用例' },
+  { icon: 'Play', text: '启动本地开发服务', hint: '启动服务并用 HTTP 检查验收' },
+]
 const noop = () => {}
 
 export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage, onSelectModel, onOpenMenu }: Props) {
@@ -207,12 +211,17 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           <div className="empty-workbench__mark"><TerminalSquare size={22} /></div>
           <h2>准备执行本地任务</h2>
           <div className="empty-workbench__actions">
-            {HINTS.map(h => (
-              <button key={h} onClick={() => handleSend(h)}
-                className="task-template">
-                {h}
-              </button>
-            ))}
+            {HINTS.map(h => {
+              const Icon = h.icon === 'Scan' ? Scan : h.icon === 'Bug' ? Bug : Play
+              return (
+                <button key={h.text} onClick={() => handleSend(h.text)}
+                  className="task-template">
+                  <span className="task-template__icon"><Icon size={16} /></span>
+                  <span className="task-template__text">{h.text}</span>
+                  <span className="task-template__hint">{h.hint}</span>
+                </button>
+              )
+            })}
           </div>
         </div>
       ) : (
