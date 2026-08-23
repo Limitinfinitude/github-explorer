@@ -1302,7 +1302,11 @@ class Memory:
                 or usage.get("completion_tokens")
                 or 0
             )
-            cached = int(usage.get("cache_hit_tokens") or 0)
+            try:
+                cached = int(usage.get("cache_hit_tokens") or 0)
+            except (TypeError, ValueError):
+                # 历史脏数据：修复脱敏前存的 "[REDACTED]"
+                cached = 0
             return inp, out, cached
 
         by_day: Dict[str, Dict] = {}
@@ -1329,9 +1333,10 @@ class Memory:
             total_in += inp
             total_out += out
             total_cached += cached
-            by_day.setdefault(day, {"input": 0, "output": 0, "calls": 0})
+            by_day.setdefault(day, {"input": 0, "output": 0, "calls": 0, "cache_hit_tokens": 0})
             by_day[day]["input"] += inp
             by_day[day]["output"] += out
+            by_day[day]["cache_hit_tokens"] += cached
             by_day[day]["calls"] += 1
             task_key = str(task_id or "unknown")
             by_task.setdefault(task_key, {"input": 0, "output": 0, "calls": 0})
@@ -1371,6 +1376,8 @@ class Memory:
                     "date": day,
                     **stats,
                     "total_tokens": stats["input"] + stats["output"],
+                    "cache_hit_rate": round(stats["cache_hit_tokens"] / stats["input"], 4)
+                    if stats["input"] else None,
                 }
                 for day, stats in sorted(by_day.items())
             ],
