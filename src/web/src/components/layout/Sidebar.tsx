@@ -68,7 +68,7 @@ export function Sidebar({
     const chat = chats.find(item => item.id === activeChatId)
     return chat?.projectId ? new Set([chat.projectId]) : new Set()
   })
-  const [collapsed, setCollapsed] = useState({ projects: false, tasks: false })
+  const [collapsed, setCollapsed] = useState({ projects: true, tasks: false })
   const [addingProject, setAddingProject] = useState(false)
   const [importPath, setImportPath] = useState('')
   const [importing, setImporting] = useState(false)
@@ -162,32 +162,31 @@ export function Sidebar({
             </button>
           )}
         />
-        {!collapsed.projects && (
-          <>
-            {addingProject && (
-              <div className="sidebar-project-add">
-                <input
-                  value={importPath}
-                  onChange={event => setImportPath(event.target.value)}
-                  onKeyDown={event => { if (event.key === 'Enter') void doImport() }}
-                  placeholder="项目目录绝对路径，如 C:\projects\demo"
-                  spellCheck={false}
-                  aria-label="项目目录绝对路径"
-                />
-                <button type="button" disabled={!importPath.trim() || importing} onClick={() => void doImport()}>
-                  <Upload size={12} />{importing ? '正在导入并体检…' : '导入并体检'}
-                </button>
-                {importError && <span className="is-error">{importError}</span>}
-                {imported && <span>{imported}</span>}
-              </div>
-            )}
-            <nav className="sidebar-projects" aria-label="项目栏">
+        {!collapsed.projects && addingProject && (
+          <div className="sidebar-project-add">
+            <input
+              value={importPath}
+              onChange={event => setImportPath(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter') void doImport() }}
+              placeholder="项目目录绝对路径，如 C:\projects\demo"
+              spellCheck={false}
+              aria-label="项目目录绝对路径"
+            />
+            <button type="button" disabled={!importPath.trim() || importing} onClick={() => void doImport()}>
+              <Upload size={12} />{importing ? '正在导入并体检…' : '导入并体检'}
+            </button>
+            {importError && <span className="is-error">{importError}</span>}
+            {imported && <span>{imported}</span>}
+          </div>
+        )}
+        <nav className={`sidebar-projects ${collapsed.projects ? 'is-collapsed-view' : ''}`} aria-label="项目栏">
               {projects.length === 0 && (
                 <button type="button" className="sidebar-projects__empty" onClick={() => { onOpenProjectView(); onClose() }}>
                   还没有项目，去工作台导入
                 </button>
               )}
-              {projects.map(project => {
+              {/* 折叠时只显示最近 8 个项目（降低初始堆叠），展开显示全部 */}
+              {(collapsed.projects ? projects.slice(0, 8) : projects).map(project => {
                 const id = project.project_id
                 const conversations = chats.filter(chat => chat.projectId === id)
                 const isOpen = expanded.has(id)
@@ -235,8 +234,6 @@ export function Sidebar({
                 )
               })}
             </nav>
-          </>
-        )}
 
         <SectionTitle
           label="任务栏"
