@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import time
 import hashlib
 import socket
 import subprocess
@@ -114,8 +115,46 @@ class ProcessManager:
         with self._lock:
             self._processes[process_id] = managed
         threading.Thread(target=self._capture_output, args=(managed,), daemon=True).start()
+        # 早期健康检查：服务类命令最常见的失败是"启动即退"（解释器路径
+        # 错、缺环境变量、端口占用后崩溃）。等 2 秒把早期输出收进结果，
+        # 让模型第一轮就看到进程死活与报错，而不是 wait_http 干等超时。
+        import time as _time
+        time.sleep(2.0)
+        exited = managed.process.poll()
+        early_logs = list(managed.logs)
+        early_output = "\n".join(early_logs[-30:])
+        if exited is not None:
+            with self._lock:
+                managed.status = "exited"
+            return ToolResult.fail(
+                f"进程启动后立即退出（退出码 {exited}）。早期输出：\n{early_output or '(无输出)'}",
+                error_kind="process_exited",
+                process_id=process_id,
+                data={
+                    "pid": process.pid,
+                    "returncode": exited,
+                    "cwd": str(work_dir),
+                    "status": "exited",
+                    "early_output": early_output,
+                    "shell": plan.shell,
+                    "original_command": plan.original_command,
+                    "executed_command": plan.command,
+                    "declared_host": host,
+                    "declared_port": port,
+                },
+            )
+        warning = ""
+        lowered = early_output.lower()
+        if "traceback" in lowered or "no module named" in lowered or "error" in lowered:
+            warning = (
+                "\n注意：进程仍在运行，但早期输出包含错误信息，"
+                "建议先检查上面的输出再继续验收。"
+            )
         return ToolResult.ok(
-            output=f"后台进程已启动: {process_id}",
+            output=(
+                f"后台进程已启动: {process_id}（已确认 2 秒后仍在运行）"
+                f"\n早期输出：\n{early_output or '(暂无输出)'}{warning}"
+            ),
             process_id=process_id,
             data={
                 "pid": process.pid,
@@ -123,6 +162,7 @@ class ProcessManager:
                 "process_tree_pids": self._process_tree_pids(process.pid),
                 "cwd": str(work_dir),
                 "status": "running",
+                "early_output": early_output,
                 "python_executable": command_python_executable(plan.command, work_dir),
                 "shell": plan.shell,
                 "original_command": plan.original_command,

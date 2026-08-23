@@ -26,7 +26,6 @@ AGENTS.override.md
 cloned_repos/
 
 # 本地测试与项目推进记录（不上传）
-tests/
 项目推进记录/
 pytest_cache/
 *.log

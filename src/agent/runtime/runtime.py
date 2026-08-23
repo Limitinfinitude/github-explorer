@@ -94,7 +94,7 @@ class LocalAgentRuntime:
         max_identical_failures: int = 3,
         max_context_tokens: int = 128_000,
         max_output_tokens: int = 12_000,
-        diagnostic_tool_budget: int = 16,
+        diagnostic_tool_budget: int = 28,
         replan_extra_rounds: int = 4,
         tool_result_preview_chars: int = 12_000,
         tool_execution_timeout: float = 300,
@@ -689,6 +689,9 @@ class LocalAgentRuntime:
                     and int(state.get("diagnostic_unique_count", 0)) >= self.diagnostic_tool_budget
                     and tool_uses
                     and all(tool_use["name"] in _DIAGNOSTIC_TOOLS for tool_use in tool_uses)
+                    # 重规划后宽限一轮：修复型任务常需最后一两次确认读取，
+                    # 立即判死太急（fx11-13 fusion 连续三轮卡在这里）
+                    and int(state.get("round", 0)) > int(state.get("replan_round", 0)) + 1
                 )
                 if repeated_diagnostics:
                     message = (
@@ -1539,6 +1542,7 @@ class LocalAgentRuntime:
         message = f"诊断操作已达到 {count} 次，已停止继续扩散读取并重新规划。"
         replan_step = "基于现有证据重新规划，并优先执行最小改动与验证"
         state["replanned"] = True
+        state["replan_round"] = int(state.get("round", 0))
         state["round_limit"] = self.max_rounds + self.replan_extra_rounds
         if replan_step not in state["plan"]:
             state["plan"].append(replan_step)
