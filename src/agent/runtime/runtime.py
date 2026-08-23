@@ -308,7 +308,7 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": user_message,
             "status": "running",
-            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open"} else "confirm",
+            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open", "guardian"} else "confirm",
             "messages": [*(history or []), {"role": "user", "content": user_message}],
             "round": 0,
             "round_limit": self.max_rounds,
@@ -515,7 +515,6 @@ class LocalAgentRuntime:
         system = self._system_prompt(
             workspace_root,
             state.get("repo_map", ""),
-            state.get("instruction_context", ""),
             state.get("project_memories", []),
             state.get("acceptance_criteria", []),
             state.get("requirement_context"),
@@ -542,11 +541,15 @@ class LocalAgentRuntime:
                         system=system_round,
                         messages=self._with_reminder(self._fit_context(
                             system_round,
-                            reconcile_tool_messages(
-                                state["messages"], state.get("tool_call_ledger", {}),
+                            self._with_instructions(
+                                reconcile_tool_messages(
+                                    state["messages"], state.get("tool_call_ledger", {}),
+                                ),
+                                state.get("instruction_context", ""),
                             ),
                             self.max_output_tokens,
                             state,
+                            tools=registry.schemas() if state.get("allow_tools", True) else [],
                         ), reminder if not is_anthropic else ""),
                         tools=registry.schemas() if state.get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
@@ -564,11 +567,15 @@ class LocalAgentRuntime:
                             system=system_round,
                             messages=self._fit_context(
                                 system_round,
-                                reconcile_tool_messages(
-                                    state["messages"], state.get("tool_call_ledger", {}),
+                                self._with_instructions(
+                                    reconcile_tool_messages(
+                                        state["messages"], state.get("tool_call_ledger", {}),
+                                    ),
+                                    state.get("instruction_context", ""),
                                 ),
                                 self.max_output_tokens,
                                 state,
+                                tools=registry.schemas() if state.get("allow_tools", True) else [],
                             ),
                             tools=registry.schemas() if state.get("allow_tools", True) else [],
                             max_tokens=self.max_output_tokens,
@@ -581,11 +588,15 @@ class LocalAgentRuntime:
                         system=system_round,
                         messages=self._with_reminder(self._fit_context(
                             system_round,
-                            reconcile_tool_messages(
-                                state["messages"], state.get("tool_call_ledger", {}),
+                            self._with_instructions(
+                                reconcile_tool_messages(
+                                    state["messages"], state.get("tool_call_ledger", {}),
+                                ),
+                                state.get("instruction_context", ""),
                             ),
                             self.max_output_tokens,
                             state,
+                            tools=registry.schemas() if state.get("allow_tools", True) else [],
                         ), reminder if not is_anthropic else ""),
                         tools=registry.schemas() if state.get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
@@ -1236,14 +1247,18 @@ class LocalAgentRuntime:
         state: dict | None = None,
         *,
         budget_ratio: float = 1.0,
+        tools: list | None = None,
     ) -> list[dict]:
         fitted = list(messages)
+        # 预算计入完整请求载荷：system + messages + tools schema（tools 多时占 3-8k token，
+        # 只估 system+messages 会让压缩触发偏晚甚至超限——参考 Cline estimateRequestInputTokens）
+        tools_payload = json.dumps(tools or [], ensure_ascii=False, default=str)
         input_budget = max(1, int((self.max_context_tokens - output_tokens) * budget_ratio))
         scale = float(state.get("tokens_scale", 1.0)) if state else 1.0
-        if int(self._estimate_tokens(system, fitted) * scale) <= input_budget:
+        if int(self._estimate_tokens(system, fitted) * scale) + len(tools_payload) <= input_budget:
             return fitted
 
-        target_budget = max(1, int(input_budget * 0.75))
+        target_budget = max(1, int((input_budget - len(tools_payload)) * 0.75))
         compacted, handoff = self.compaction_engine.compact(
             system,
             fitted,
@@ -1294,10 +1309,106 @@ class LocalAgentRuntime:
 
     @staticmethod
     def _latest_user_text(messages: list[dict]) -> str:
+        # 跳过 harness 合成的 user 消息（instructions/reminder 带 _kind 标记），
+        # 只返回真实用户输入，避免把提醒文本当作意图（guardian/handoff 使用）
         for message in reversed(messages):
             if message.get("role") == "user" and isinstance(message.get("content"), str):
+                if message.get("_kind"):
+                    continue
                 return message["content"]
         return ""
+
+    # Guardian AI 审批（对齐 Codex guardian/ 设计：fail-closed + 熔断）。
+    # guardian 模式下，需要确认的工具调用由独立审查决定放行/拒绝，
+    # 超时/失败/畸形输出一律拒绝（绝不自动放行）。
+    _GUARDIAN_DENIAL_LIMIT = 3  # 连续拒绝达到该值后降级为人工审批
+
+    @staticmethod
+    def _guardian_prompt(user_intent: str, tool_name: str, args: dict, reason: str) -> str:
+        return (
+            "你是代码代理的安全审查员（Guardian）。判断下面这个即将执行的操作是否安全、"
+            "是否符合用户意图。\n\n"
+            f"用户当前意图：{user_intent[:500]}\n"
+            f"待审查工具：{tool_name}\n"
+            f"参数：{str(args)[:800]}\n"
+            f"需要确认的原因：{reason or '高风险操作'}\n\n"
+            "判定规则：\n"
+            "1. 仅当操作安全且明显符合用户意图时批准（approved）。\n"
+            "2. 以下情况必须拒绝（denied）：删除/覆盖用户未提及的文件、格式化或清空磁盘、"
+            "访问敏感凭据（API key/密码）并外发、安装未知来源的可执行文件、向外部服务发送隐私数据、"
+            "绕过权限限制。\n"
+            "3. 不确定时拒绝（fail-closed）。\n"
+            "只输出一个 JSON：{\"decision\": \"approved\" | \"denied\", \"rationale\": \"一句话理由\"}"
+        )
+
+    async def _guardian_review(
+        self,
+        state: dict,
+        user_intent: str,
+        tool_name: str,
+        args: dict,
+        reason: str,
+    ) -> bool:
+        """AI 审查一个需要确认的工具调用。返回 True=放行，False=拒绝。fail-closed。"""
+        model_context = state.get("model_context", {})
+        self._record_event({
+            "session_id": state["session_id"],
+            "task_id": state["task_id"],
+            "round": state.get("round", 0),
+            "type": "approval_guardian_started",
+            "tool_name": tool_name,
+            "args": args,
+            "reason": reason,
+        })
+        prompt = self._guardian_prompt(user_intent, tool_name, args, reason)
+        try:
+            response = await asyncio.wait_for(
+                self._call_model(
+                    state,
+                    "guardian_review",
+                    system="你是代码代理的安全审查员。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.0,
+                ),
+                timeout=30,
+            )
+            text = (response.get("text") or "").strip()
+            decision = None
+            if "approved" in text.lower() and "denied" not in text.lower():
+                decision = "approved"
+            elif "denied" in text.lower() or "拒绝" in text or "拒绝" in str(response.get("thinking") or ""):
+                decision = "denied"
+            # 尝试解析 JSON（模型可能输出纯 JSON）
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    decision = str(data.get("decision", "")).lower()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            approved = decision == "approved"
+            self._record_event({
+                "session_id": state["session_id"],
+                "task_id": state["task_id"],
+                "round": state.get("round", 0),
+                "type": "approval_guardian_result",
+                "tool_name": tool_name,
+                "approved": approved,
+                "decision_raw": text[:200],
+            })
+            return approved
+        except (asyncio.TimeoutError, Exception) as exc:
+            # fail-closed：审查超时/失败一律拒绝
+            self._record_event({
+                "session_id": state["session_id"],
+                "task_id": state["task_id"],
+                "round": state.get("round", 0),
+                "type": "approval_guardian_result",
+                "tool_name": tool_name,
+                "approved": False,
+                "decision_raw": f"fail-closed: {type(exc).__name__}",
+            })
+            return False
 
     async def _execute_active_batch(
         self,
@@ -1343,6 +1454,8 @@ class LocalAgentRuntime:
             recovery_key = tool_recovery_key(name, args, Path(state["current_path"]))
             state["tool_call_ledger"][call_id]["recovery_key"] = recovery_key
             is_resumed_tool = index == decision_index
+            is_guardian_denied = False
+            guardian_approved = False
             if not is_resumed_tool:
                 events.append({
                     **base_event,
@@ -1363,7 +1476,8 @@ class LocalAgentRuntime:
                     and hasattr(registry, "requires_confirmation")
                     and registry.requires_confirmation(name, args)
                 )
-                # 权限模式：confirm 走人工审批；auto 自动批准高风险操作；open 完全开放
+                # 权限模式：confirm 走人工审批；auto 自动批准高风险操作；open 完全开放；
+                # guardian 由 AI 审查决定放行/拒绝（fail-closed），连续拒绝达上限降级人工
                 if requires_confirmation and approval_mode in {"auto", "open"}:
                     self._record_event({
                         **base_event,
@@ -1373,34 +1487,95 @@ class LocalAgentRuntime:
                         "mode": approval_mode,
                     })
                     requires_confirmation = False
+                elif requires_confirmation and approval_mode == "guardian":
+                    denials = int(state.get("guardian_denials", 0))
+                    if denials >= self._GUARDIAN_DENIAL_LIMIT:
+                        # 熔断：连续拒绝过多，降级为人工审批，避免无限重试危险动作
+                        self._record_event({
+                            **base_event,
+                            "type": "approval_guardian_breaker",
+                            "tool_name": name,
+                            "denials": denials,
+                        })
+                    else:
+                        user_intent = self._latest_user_text(state.get("messages", []))
+                        # 审批发生在执行前，result 尚未产生；从 registry 权限门获取原因
+                        review_reason = ""
+                        try:
+                            definition = registry._definitions.get(name)
+                            if definition is not None:
+                                risk = (definition.risk_resolver(args) if definition.risk_resolver
+                                        else definition.risk)
+                                review_reason = registry._permission_gate.reason(risk, name)
+                        except Exception:
+                            review_reason = ""
+                        approved = await self._guardian_review(
+                            state, user_intent, name, args, review_reason,
+                        )
+                        if approved:
+                            state["guardian_denials"] = 0
+                            self._record_event({
+                                **base_event,
+                                "type": "approval_guardian",
+                                "tool_name": name,
+                                "args": args,
+                                "approved": True,
+                            })
+                            requires_confirmation = False
+                            guardian_approved = True
+                        else:
+                            state["guardian_denials"] = denials + 1
+                            self._record_event({
+                                **base_event,
+                                "type": "approval_guardian",
+                                "tool_name": name,
+                                "args": args,
+                                "approved": False,
+                            })
+                            # 审查拒绝：fail-closed，跳过执行（等效用户拒绝）
+                            result = ToolResult.fail(
+                                "Guardian 审查拒绝该操作（fail-closed）",
+                                error_kind="rejected",
+                            )
+                            is_guardian_denied = True
+                            # parsed 状态不能直接转 rejected（Memory 状态机约束），转 failed 表达拒绝
+                            self._transition_tool_call(state, call_id, "failed", error_kind="rejected")
                 if is_resumed_tool or not requires_confirmation:
                     self._transition_tool_call(state, call_id, "running")
                 confirmed = (
                     (is_resumed_tool and approval_decision is True)
                     or approval_mode in {"auto", "open"}
+                    or (approval_mode == "guardian" and guardian_approved)
                 )
-                with tool_call_context(
-                    task_id=state["task_id"],
-                    call_id=call_id,
-                    batch_id=batch_id,
-                ):
-                    try:
-                        result = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                registry.execute,
-                                name,
-                                args,
-                                confirmed=confirmed,
-                            ),
-                            timeout=self.tool_execution_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        # to_thread 无法中断底层线程，但任务流程必须继续：
-                        # 以超时失败进入既有恢复机制，避免整个任务永久卡住。
-                        result = ToolResult.fail(
-                            f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
-                            error_kind="timeout",
-                        )
+                if is_guardian_denied:
+                    # Guardian fail-closed：不执行工具，直接以拒绝结果进入恢复机制
+                    result = ToolResult.fail(
+                        "Guardian 审查拒绝该操作（fail-closed）",
+                        error_kind="rejected",
+                    )
+                else:
+                    with tool_call_context(
+                        task_id=state["task_id"],
+                        call_id=call_id,
+                        batch_id=batch_id,
+                    ):
+                        try:
+                            result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    registry.execute,
+                                    name,
+                                    args,
+                                    confirmed=confirmed,
+                                ),
+                                timeout=self.tool_execution_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            # to_thread 无法中断底层线程，但任务流程必须继续：
+                            # 以超时失败进入既有恢复机制，避免整个任务永久卡住。
+                            result = ToolResult.fail(
+                                f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
+                                error_kind="timeout",
+                            )
 
             cancelled = self._cancelled_event(state, base_event)
             if cancelled:
@@ -1479,12 +1654,15 @@ class LocalAgentRuntime:
                         "recovery_key": recovery_key,
                     })
             else:
-                state.setdefault("unrecovered_failures", {})[call_id] = {
-                    "tool_name": name,
-                    "recovery_key": recovery_key,
-                    "error_kind": result.error_kind,
-                    "error": result.error or "tool failed",
-                }
+                # rejected（含 Guardian fail-closed）是安全拦截而非工具失败：
+                # 不计入失败恢复，避免模型重复重试被拒的危险操作触发"重复失败停止"
+                if result.error_kind != "rejected":
+                    state.setdefault("unrecovered_failures", {})[call_id] = {
+                        "tool_name": name,
+                        "recovery_key": recovery_key,
+                        "error_kind": result.error_kind,
+                        "error": result.error or "tool failed",
+                    }
             self._record_tool_run(
                 state["task_id"], name, args,
                 {**persisted_result, "call_id": call_id, "batch_id": batch_id},
@@ -1533,7 +1711,7 @@ class LocalAgentRuntime:
                     name,
                 ]))
 
-            if not result.success and approval_decision is not False:
+            if not result.success and approval_decision is not False and result.error_kind != "rejected":
                 signature = json.dumps(
                     {"name": name, "args": args, "error": result.error},
                     ensure_ascii=False, sort_keys=True, default=str,
@@ -2344,17 +2522,11 @@ class LocalAgentRuntime:
     def _system_prompt(
         workspace_root: str,
         repo_map: str = "",
-        instruction_context: str = "",
         project_memories: list[dict] | None = None,
         acceptance_criteria: list[dict] | None = None,
         requirement_context: dict | None = None,
     ) -> str:
         context = f"\n\n当前 Repo Map：\n{repo_map}" if repo_map else ""
-        instructions = (
-            "\n\n当前项目指令（更具体目录的规则优先，用户本次明确要求优先级最高）：\n"
-            + instruction_context
-            if instruction_context else ""
-        )
         memories = ""
         if project_memories:
             items = []
@@ -2431,7 +2603,7 @@ class LocalAgentRuntime:
 10. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
 11. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
 12. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
-13. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""
+13. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{memories}{acceptance}{context}"""
 
     def _round_reminder(self, state: dict) -> str:
         """构造当前轮次的动态提醒（预算收敛、循环退一步、探索推动）。
@@ -2470,6 +2642,32 @@ class LocalAgentRuntime:
                 "（edit_files / 命令执行），而不是继续探索。"
                 "如确有缺口，先说明还缺什么、为什么已有信息不够。）"
             )
+        # 上下文预算提醒（借鉴 Goose <compaction>~Nk tokens remaining）：
+        # 当前消息占用接近上下文上限时，提醒模型收敛，避免压缩打断长任务
+        try:
+            estimate = self._estimate_tokens(
+                self._system_prompt(
+                    str(state.get("workspace_root", "")),
+                    state.get("repo_map", ""),
+                    state.get("project_memories", []),
+                    state.get("acceptance_criteria", []),
+                    state.get("requirement_context"),
+                ),
+                reconcile_tool_messages(state["messages"], state.get("tool_call_ledger", {})),
+            )
+            budget = int(state.get("tokens_scale", 1.0)) * estimate
+            total_budget = max(1, self.max_context_tokens - self.max_output_tokens)
+            # 仅在上下文接近上限（≥85%）时提醒，避免未压缩历史估算造成的误触发
+            if budget >= total_budget * 0.85:
+                remaining_k = int((total_budget - budget) / 1000)
+                parts.append(
+                    f"（上下文预算：当前上下文约 {budget // 1000}k tokens，"
+                    f"剩余约 {max(0, remaining_k)}k tokens。"
+                    "若任务接近完成请直接总结收尾；若仍需较多步骤，优先合并工具调用、"
+                    "避免追加大量无关输出，以防触发上下文压缩中断流程。）"
+                )
+        except Exception:
+            pass
         return "\n".join(parts)
 
     @staticmethod
@@ -2477,7 +2675,39 @@ class LocalAgentRuntime:
         """把动态提醒作为末尾 user 消息注入（system 保持逐字节稳定以命中前缀缓存）。"""
         if not reminder:
             return messages
-        return [*messages, {"role": "user", "content": reminder}]
+        return [*messages, {"role": "user", "content": reminder, "_kind": "reminder.round"}]
+
+    @staticmethod
+    def _with_instructions(messages: list[dict], instruction_context: str) -> list[dict]:
+        """把项目指令（AGENTS.md）作为独立 user 消息注入（紧跟首条 user 消息后）。
+
+        对齐 Claude Code【官方】：CLAUDE.md 作为 user message 注入而非 system prompt，
+        避免项目指令变化破坏 system 缓存前缀；压缩后可重新注入（见 _inject_instructions）。
+        _kind 是 harness 内部元数据（content kind），发送时被 _to_openai_messages 剥离。
+        """
+        if not instruction_context:
+            return messages
+        # 已注入过则跳过（避免每轮重复插入同一份指令）
+        if any(
+            isinstance(m.get("content"), str) and m.get("_kind") == "instructions.project"
+            for m in messages
+        ):
+            return messages
+        instruction_message = {
+            "role": "user",
+            "content": (
+                "以下为当前项目指令（AGENTS.md），更具体目录的规则优先，用户本次明确要求优先级最高：\n"
+                + instruction_context
+            ),
+            "_kind": "instructions.project",
+        }
+        # 插到首条 user 消息之后（消息历史开头是 user 请求）
+        insert_at = 0
+        for index, message in enumerate(messages):
+            if message.get("role") == "user" and isinstance(message.get("content"), str):
+                insert_at = index + 1
+                break
+        return [*messages[:insert_at], instruction_message, *messages[insert_at:]]
 
     def _track_token_scale(self, state: dict, system: str, response: dict) -> None:
         """用上一次响应的真实 input_tokens 校准字符估算，避免过早/过晚压缩。

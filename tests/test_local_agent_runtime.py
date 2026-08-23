@@ -793,11 +793,15 @@ def test_runtime_defaults_to_128k_context_and_trims_old_history(tmp_path: Path):
 
     assert runtime.max_context_tokens == 128_000
     assert runtime.tool_result_preview_chars == 12_000
-    assert captured["messages"][-1]["content"] == "latest request"
+    # 真实用户消息存在（末尾可能是 harness 注入的 reminder/instructions，跳过 _kind 合成消息）
+    assert any(
+        m.get("content") == "latest request" and not m.get("_kind")
+        for m in captured["messages"]
+    )
     assert runtime._estimate_tokens(captured["system"], captured["messages"]) <= 116_000
 
 
-def test_runtime_loads_workspace_agents_md_into_system_prompt(tmp_path: Path):
+def test_runtime_loads_workspace_agents_md_into_messages(tmp_path: Path):
     captured = {}
     root = tmp_path / "project"
     root.mkdir()
@@ -813,7 +817,10 @@ def test_runtime_loads_workspace_agents_md_into_system_prompt(tmp_path: Path):
 
     collect(runtime.run("session", "检查项目"))
 
-    assert "Always run the focused test first." in captured["system"]
+    # AGENTS.md 作为带 content kind 的 user 消息注入（对齐 Claude Code），不进 system 缓存前缀
+    assert "Always run the focused test first." not in captured["system"]
+    injected = [m for m in captured["messages"] if m.get("_kind") == "instructions.project"]
+    assert injected and "Always run the focused test first." in injected[0]["content"]
     state = next(iter(runtime._task_cache.values()))
     assert state["instruction_sources"][0]["scope"] == "project"
 
@@ -854,7 +861,8 @@ def test_runtime_compacts_model_input_but_preserves_full_task_messages(tmp_path:
     assert stored["compaction_count"] == 1
     assert stored["compacted_message_count"] == 3
     assert any("ContextHandoff" in str(message["content"]) for message in captured["messages"])
-    assert len(captured["messages"]) < len(stored["messages"])
+    # captured 是 fit 后 + harness 注入（reminder），不包含完整原始历史；对比原始历史长度
+    assert len(captured["messages"]) <= len(stored["messages"])
     compacted = next(
         event for event in store.get_agent_events("compact-task")
         if event["type"] == "context_compacted"

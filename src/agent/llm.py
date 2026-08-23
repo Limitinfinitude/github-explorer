@@ -193,6 +193,20 @@ def _openai_endpoint(base_url: str) -> str:
     return f"{base}/chat/completions"
 
 
+def _strip_kinds(messages: list[dict]) -> list[dict]:
+    """剥离 harness 内部元数据字段（content kinds，如 _kind）。
+
+    openai 路径经 _to_openai_messages 重建消息会自动丢弃；anthropic 路径
+    直接把 messages 传给 SDK，必须显式剥离，否则 SDK schema 校验会失败。
+    """
+    cleaned: list[dict] = []
+    for message in messages:
+        item = dict(message)
+        item.pop("_kind", None)
+        cleaned.append(item)
+    return cleaned
+
+
 def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
     converted: list[dict] = [{"role": "system", "content": system}]
     for message in messages:
@@ -352,7 +366,7 @@ async def call_llm(
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
-            messages=messages,
+            messages=_strip_kinds(messages),
         )
         result = ""
         for block in response.content:
@@ -388,7 +402,7 @@ async def call_llm_stream(
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
-            messages=messages,
+            messages=_strip_kinds(messages),
         ) as stream:
             async for text in stream.text_stream:
                 yield text
@@ -423,7 +437,7 @@ async def call_llm_with_tools(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "system": system,
-            "messages": messages,
+            "messages": _strip_kinds(messages),
             "tools": tools,
         }
         if resolved.thinking_effort != "off":
@@ -633,7 +647,7 @@ async def _stream_anthropic_with_tools(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "system": system,
-            "messages": messages,
+            "messages": _strip_kinds(messages),
             "tools": tools,
         }
         if resolved.thinking_effort != "off":
