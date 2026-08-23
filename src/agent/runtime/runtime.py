@@ -908,6 +908,18 @@ class LocalAgentRuntime:
             kind = str(check.get("kind") or "command").casefold()
             family = "http" if kind.startswith("http") else kind
             latest_by_family[family] = check
+        # 起服前的 port 检查失败是过程性观察（服务还没起必然不通）；
+        # 若之后有成功的 HTTP 验证，port 失败已被结果超越，不作为判死依据
+        # （r11a buku：HTTP 验收最终通过，起服前的 check_port 失败仍判死）。
+        if any(
+            family == "http" and check.get("success")
+            for family, check in latest_by_family.items()
+        ):
+            latest_by_family = {
+                family: check
+                for family, check in latest_by_family.items()
+                if not (family == "port" and not check.get("success"))
+            }
         has_failed_verification = any(
             not check.get("success", False)
             for check in latest_by_family.values()
@@ -2012,7 +2024,7 @@ class LocalAgentRuntime:
             "protocol": model_context.get("protocol", ""),
             "base_url": model_context.get("base_url", ""),
         }
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):
             started_event = {**event, "type": "model_request_started"}
             if attempt > 1:
                 started_event["attempt"] = attempt
@@ -2034,6 +2046,25 @@ class LocalAgentRuntime:
                     "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
                     "error_type": error_type,
                 })
+                retryable_rate_limit = (
+                    "429" in str(exc)
+                    or "too many requests" in str(exc).casefold()
+                    or "rate limit" in str(exc).casefold()
+                )
+                if attempt < 3 and retryable_rate_limit:
+                    # 限流退避：连续评测很容易触顶（r11b 全军覆没于 429）。
+                    # 指数退避 20s/40s，重试期间事件账本可观测。
+                    backoff = 20 * attempt
+                    self._record_event({
+                        **event,
+                        "type": "model_request_retrying",
+                        "attempt": attempt + 1,
+                        "error_type": error_type,
+                        "reason": "rate_limited_backoff",
+                        "backoff_seconds": backoff,
+                    })
+                    await asyncio.sleep(backoff)
+                    continue
                 if attempt == 1 and error_type in {"ReadTimeout", "ConnectTimeout"}:
                     self._record_event({
                         **event,
