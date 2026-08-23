@@ -524,21 +524,30 @@ class LocalAgentRuntime:
             while state["round"] < state.get("round_limit", self.max_rounds):
                 state["round"] += 1
                 self._save_task(state)
-                system_round = self._round_system_prompt(system, state)
+                # 动态提醒不进 system（会破坏 provider 前缀缓存，miss input
+                # 占成本约 90%）：openai 协议注入消息尾部，anthropic 回退追加
+                reminder = self._round_reminder(state)
+                binding = self._model_bindings.get(task_id)
+                is_anthropic = binding is not None and binding.protocol == "anthropic"
+                system_round = (
+                    system + f"\n\n{reminder}"
+                    if (reminder and is_anthropic)
+                    else system
+                )
                 if self.llm_stream_call is not None:
                     response = {}
                     async for chunk in self._stream_reasoning(
                         state,
                         base_event,
                         system=system_round,
-                        messages=self._fit_context(
+                        messages=self._with_reminder(self._fit_context(
                             system_round,
                             reconcile_tool_messages(
                                 state["messages"], state.get("tool_call_ledger", {}),
                             ),
                             self.max_output_tokens,
                             state,
-                        ),
+                        ), reminder if not is_anthropic else ""),
                         tools=registry.schemas() if state.get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
                         temperature=0.2,
@@ -570,14 +579,14 @@ class LocalAgentRuntime:
                         state,
                         "reasoning",
                         system=system_round,
-                        messages=self._fit_context(
+                        messages=self._with_reminder(self._fit_context(
                             system_round,
                             reconcile_tool_messages(
                                 state["messages"], state.get("tool_call_ledger", {}),
                             ),
                             self.max_output_tokens,
                             state,
-                        ),
+                        ), reminder if not is_anthropic else ""),
                         tools=registry.schemas() if state.get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
                         temperature=0.2,
@@ -2410,24 +2419,26 @@ class LocalAgentRuntime:
 12. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
 13. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{instructions}{memories}{acceptance}{context}"""
 
-    def _round_system_prompt(self, system: str, state: dict) -> str:
-        """按当前轮次状态给系统提示词追加动态提醒（预算收敛、循环退一步）。
+    def _round_reminder(self, state: dict) -> str:
+        """构造当前轮次的动态提醒（预算收敛、循环退一步、探索推动）。
 
         借鉴 Goose 的 <turn-budget> 注入与 Gemini 的 loop-detection 恢复提示：
         在硬性轮数/重复失败终止之前，先给模型一次主动收敛的机会。
+        注意：动态内容不进 system prompt（会破坏 provider 前缀缓存），
+        由调用方注入消息尾部（anthropic 协议回退 system 追加）。
         """
-        parts = [system]
+        parts = []
         round_limit = int(state.get("round_limit", self.max_rounds))
         current = int(state.get("round", 0))
         if round_limit > 0 and current >= max(2, round_limit // 2):
             parts.append(
-                f"\n\n（轮次预算：已用 {current}/{round_limit} 轮，剩余不足一半。"
+                f"（轮次预算：已用 {current}/{round_limit} 轮，剩余不足一半。"
                 "请减少探索与重复尝试，合并必要的工具调用，优先完成并验证核心目标后收尾。）"
             )
         step_back = state.get("step_back")
         if step_back and int(step_back.get("count", 0)) >= 2:
             parts.append(
-                f"\n\n（循环提醒：你已连续 {step_back.get('count')} 次调用 "
+                f"（循环提醒：你已连续 {step_back.get('count')} 次调用 "
                 f"{step_back.get('tool_name', '工具')} 得到相同失败："
                 f"{str(step_back.get('error', ''))[:300]}。"
                 "停止重复该调用；列出 3-5 种可能的原因并按可能性排序，选择与之前不同的方法。）"
@@ -2440,12 +2451,19 @@ class LocalAgentRuntime:
             and int(state.get("round", 0)) >= 4
         ):
             parts.append(
-                f"\n\n（进度提醒：你已执行 {diagnostic_count} 次读取/搜索类调用。"
+                f"（进度提醒：你已执行 {diagnostic_count} 次读取/搜索类调用。"
                 "通常这已足够定位问题；请基于已收集的信息直接实施修改"
                 "（edit_files / 命令执行），而不是继续探索。"
                 "如确有缺口，先说明还缺什么、为什么已有信息不够。）"
             )
         return "\n".join(parts)
+
+    @staticmethod
+    def _with_reminder(messages: list[dict], reminder: str) -> list[dict]:
+        """把动态提醒作为末尾 user 消息注入（system 保持逐字节稳定以命中前缀缓存）。"""
+        if not reminder:
+            return messages
+        return [*messages, {"role": "user", "content": reminder}]
 
     def _track_token_scale(self, state: dict, system: str, response: dict) -> None:
         """用上一次响应的真实 input_tokens 校准字符估算，避免过早/过晚压缩。
