@@ -6,8 +6,8 @@ import { formatLocalTimestamp } from '../../lib/time'
 import type { AgentEvent, AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
 
 type TokenUsage = {
-  total: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }
-  last_5h: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }
+  total: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number; cache_hit_tokens?: number; cache_hit_rate?: number | null }
+  last_5h: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number; cache_hit_tokens?: number; cache_hit_rate?: number | null }
   by_day: Array<{ date: string; input: number; output: number; calls: number; total_tokens: number }>
 }
 
@@ -38,6 +38,9 @@ function TokenUsageStrip() {
         <span>近 5 小时 <strong>{formatTokens(usage.last_5h.total_tokens)}</strong>（{usage.last_5h.calls} 次调用）</span>
         <span>7 日累计 <strong>{formatTokens(usage.total.total_tokens)}</strong></span>
         <span className="token-usage-strip__hint">输入 {formatTokens(usage.total.input_tokens)} / 输出 {formatTokens(usage.total.output_tokens)}</span>
+        {usage.total.cache_hit_rate != null && (
+          <span className="token-usage-strip__hint">缓存命中 {(usage.total.cache_hit_rate * 100).toFixed(1)}%</span>
+        )}
       </div>
       <div className="token-usage-strip__bars">
         {days.map(day => (

@@ -155,16 +155,35 @@ def get_protocol() -> str:
     return os.environ.get("LLM_PROTOCOL", "anthropic").lower()
 
 
-def _usage_metadata(input_tokens, output_tokens, total_tokens=None) -> dict | None:
+def _extract_cache_tokens(usage) -> int | None:
+    """提取 prompt 缓存命中 token 数（DeepSeek/OpenAI/Anthropic 各有字段）。"""
+    if not isinstance(usage, dict):
+        return None
+    for key in ("prompt_cache_hit_tokens",):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens")
+        if isinstance(cached, int):
+            return cached
+    return None
+
+
+def _usage_metadata(input_tokens, output_tokens, total_tokens=None, cache_hit=None) -> dict | None:
     if input_tokens is None and output_tokens is None:
         return None
     input_count = int(input_tokens or 0)
     output_count = int(output_tokens or 0)
-    return {
+    metadata = {
         "input_tokens": input_count,
         "output_tokens": output_count,
         "total_tokens": int(total_tokens if total_tokens is not None else input_count + output_count),
     }
+    if cache_hit is not None:
+        metadata["cache_hit_tokens"] = int(cache_hit)
+    return metadata
 
 
 def _openai_endpoint(base_url: str) -> str:
@@ -298,6 +317,7 @@ async def _call_openai_with_tools(
         usage.get("prompt_tokens") or usage.get("input_tokens"),
         usage.get("completion_tokens") or usage.get("output_tokens"),
         usage.get("total_tokens"),
+        cache_hit=_extract_cache_tokens(usage),
     )
     if metadata:
         result["usage_metadata"] = metadata
@@ -443,6 +463,7 @@ async def call_llm_with_tools(
         metadata = _usage_metadata(
             getattr(usage, "input_tokens", None),
             getattr(usage, "output_tokens", None),
+            cache_hit=getattr(usage, "cache_read_input_tokens", None),
         )
         if metadata:
             result["usage_metadata"] = metadata
@@ -589,6 +610,7 @@ async def _stream_openai_with_tools(
             usage.get("prompt_tokens") or usage.get("input_tokens"),
             usage.get("completion_tokens") or usage.get("output_tokens"),
             usage.get("total_tokens"),
+            cache_hit=_extract_cache_tokens(usage),
         )
         if metadata:
             result["usage_metadata"] = metadata
@@ -658,6 +680,7 @@ async def _stream_anthropic_with_tools(
     metadata = _usage_metadata(
         getattr(usage, "input_tokens", None),
         getattr(usage, "output_tokens", None),
+        cache_hit=getattr(usage, "cache_read_input_tokens", None),
     )
     if metadata:
         result["usage_metadata"] = metadata

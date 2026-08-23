@@ -1291,28 +1291,31 @@ class Memory:
             (cutoff,),
         ).fetchall()
 
-        def _usage_of(payload: str) -> tuple[int, int]:
+        def _usage_of(payload: str) -> tuple[int, int, int]:
             try:
                 usage = (json.loads(payload) or {}).get("usage") or {}
             except json.JSONDecodeError:
-                return 0, 0
+                return 0, 0, 0
             inp = int(usage.get("input_tokens") or 0)
             out = int(
                 usage.get("output_tokens")
                 or usage.get("completion_tokens")
                 or 0
             )
-            return inp, out
+            cached = int(usage.get("cache_hit_tokens") or 0)
+            return inp, out, cached
 
         by_day: Dict[str, Dict] = {}
         by_task: Dict[str, Dict] = {}
         total_in = total_out = calls = 0
+        total_cached = 0
         five_hour_in = five_hour_out = five_hour_calls = 0
+        five_hour_cached = 0
         window_start = datetime.utcnow() - timedelta(hours=5)
         window_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
         for task_id, payload, created in rows:
-            inp, out = _usage_of(payload)
+            inp, out, cached = _usage_of(payload)
             # created_at 是 UTC；按天聚合换算本地时区，与用户控制台视角一致
             try:
                 local_day = (
@@ -1325,6 +1328,7 @@ class Memory:
             calls += 1
             total_in += inp
             total_out += out
+            total_cached += cached
             by_day.setdefault(day, {"input": 0, "output": 0, "calls": 0})
             by_day[day]["input"] += inp
             by_day[day]["output"] += out
@@ -1338,6 +1342,7 @@ class Memory:
                 five_hour_calls += 1
                 five_hour_in += inp
                 five_hour_out += out
+                five_hour_cached += cached
 
         top_tasks = sorted(
             by_task.items(),
@@ -1350,12 +1355,16 @@ class Memory:
                 "input_tokens": total_in,
                 "output_tokens": total_out,
                 "total_tokens": total_in + total_out,
+                "cache_hit_tokens": total_cached,
+                "cache_hit_rate": round(total_cached / total_in, 4) if total_in else None,
             },
             "last_5h": {
                 "calls": five_hour_calls,
                 "input_tokens": five_hour_in,
                 "output_tokens": five_hour_out,
                 "total_tokens": five_hour_in + five_hour_out,
+                "cache_hit_tokens": five_hour_cached,
+                "cache_hit_rate": round(five_hour_cached / five_hour_in, 4) if five_hour_in else None,
             },
             "by_day": [
                 {
