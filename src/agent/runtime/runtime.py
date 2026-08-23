@@ -2328,11 +2328,26 @@ class LocalAgentRuntime:
             )
         today = datetime.date.today().isoformat()
         os_name = platform.system() or "Unknown"
+        if os_name == "Windows":
+            shell_line = (
+                "- 命令执行 Shell：PowerShell（Windows 下 run_command 默认按 PowerShell "
+                "语法执行；CMD 语法的旧命令也会被转换）"
+            )
+            shell_rule = (
+                "9. Windows 环境下命令统一使用 PowerShell 语法：环境变量用 `$env:NAME=\"值\"` 设置，"
+                "禁止使用 CMD 的 `set NAME=值` 语法；PowerShell 中执行外部命令用 `& \"路径\"` 或直接命令名。"
+            )
+        else:
+            shell_line = "- 命令执行 Shell：bash（run_command 按 POSIX shell 语法执行）"
+            shell_rule = (
+                "9. 命令统一使用 POSIX shell 语法：环境变量用 `NAME=\"值\"` 设置并以 `$NAME` 引用，"
+                "多条命令用 `&&` 连接；路径使用正斜杠。"
+            )
         return f"""你是一个通用本地操作 Agent。当前工作区根目录：{workspace_root}
 
 # 环境上下文
 - 平台：{os_name}（{platform.machine()}）
-- 命令执行 Shell：PowerShell（Windows 下 run_command 默认按 PowerShell 语法执行；CMD 语法的旧命令也会被转换）
+{shell_line}
 - 当前日期：{today}
 
 # 工作流程
@@ -2346,7 +2361,7 @@ class LocalAgentRuntime:
 6. 长时间服务使用 start_process，不要用前台命令阻塞。
 7. 端到端验收包含多个 HTTP 请求时，优先使用 http_request_batch 一次提交检查清单；只有需要根据上一步响应动态决定下一步时才拆成多个 http_request。
 8. 工具失败后根据错误改变策略，不要重复完全相同的失败调用；连续失败时停下，列出 3-5 种可能的原因并按可能性排序，然后选择与之前不同的方法；复测 http_request_batch 时沿用返回的 group_id。
-9. Windows 环境下命令统一使用 PowerShell 语法：环境变量用 `$env:NAME="值"` 设置，禁止使用 CMD 的 `set NAME=值` 语法；PowerShell 中执行外部命令用 `& "路径"` 或直接命令名。
+{shell_rule}
 10. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
 11. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
 12. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
