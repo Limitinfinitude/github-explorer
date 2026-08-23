@@ -12,7 +12,7 @@ from typing import Optional, List, Dict
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "memory.db"
 
 _EVENT_SECRET_KEY_MARKERS = ("key", "token", "secret", "password", "authorization")
-_EVENT_USAGE_KEYS = {"input_tokens", "output_tokens", "total_tokens"}
+_EVENT_USAGE_KEYS = {"input_tokens", "output_tokens", "total_tokens", "cache_hit_tokens"}
 _EVENT_SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"(?i)authorization\s*:\s*bearer\s+[^\s,;]+"),
