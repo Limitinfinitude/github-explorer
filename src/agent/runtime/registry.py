@@ -33,13 +33,19 @@ class ToolRegistry:
         self._definitions[definition.name] = definition
 
     def schemas(self) -> list[dict]:
+        # 工具按名字典序输出（DSH orderTools 同款）：工具 schema 是请求前缀的
+        # 一部分，顺序一旦因注册时序漂移，整个前缀缓存失效，直接推高成本。
+        definitions = sorted(
+            self._definitions.values(),
+            key=lambda definition: definition.name,
+        )
         return [
             {
                 "name": definition.name,
                 "description": definition.description,
                 "input_schema": definition.input_schema,
             }
-            for definition in self._definitions.values()
+            for definition in definitions
         ]
 
     def requires_confirmation(self, name: str, args: dict) -> bool:
