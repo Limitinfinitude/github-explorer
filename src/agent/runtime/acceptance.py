@@ -218,8 +218,22 @@ class WorkProductEvaluator:
                 status = "unverified"
                 reason = "缺少明确的完成状态"
             elif not any(item["valid"] for item in evidence):
-                status = "unverified"
-                reason = "完成声明缺少有效执行证据"
+                # 流程型验收项（体检/评测/运行验收等，无行为功能语义）兜底：
+                # 有成功验证 + 模型标 [完成] 即视为证据充分（r11b buku：
+                # 3 项 unit 验证全过、逐条 [完成]，却被"缺少有效执行证据"误判）。
+                # 行为/功能型验收项仍要求语义证据，防止 false completion。
+                if successful_checks and not self._is_behavior_criterion(criterion_text):
+                    status = "passed"
+                    reason = ""
+                    evidence = [{
+                        "type": "check",
+                        "ref": sorted(successful_checks)[0],
+                        "valid": True,
+                        "auto": True,
+                    }]
+                else:
+                    status = "unverified"
+                    reason = "完成声明缺少有效执行证据"
             elif not any(item.get("sufficient", True) for item in evidence if item["valid"]):
                 status = "unverified"
                 reason = "执行证据存在，但不足以证明该需求的功能语义"
@@ -257,7 +271,16 @@ class WorkProductEvaluator:
         if changed_files:
             return [{"type": "file", "ref": sorted(changed_files)[0], "valid": True, "auto": True}]
         if successful_checks:
-            return [{"type": "check", "ref": sorted(successful_checks)[0], "valid": True, "auto": True}]
+            ref = sorted(successful_checks)[0]
+            # 行为型验收项的兜底证据必须语义匹配（unit/browser 等）：
+            # http 存活之类与"搜索/登录"无关的验证不能作为完成证据
+            sufficient = not any(
+                term in criterion for term in _BEHAVIOR_TERMS
+            ) or ref in _BEHAVIOR_CHECKS
+            return [{
+                "type": "check", "ref": ref, "valid": True, "auto": True,
+                "sufficient": sufficient,
+            }]
         return []
 
     @staticmethod
@@ -271,6 +294,16 @@ class WorkProductEvaluator:
             except ValueError:
                 pass
         return normalized.replace("\\", "/").casefold()
+
+    @staticmethod
+    def _is_behavior_criterion(criterion_text: str) -> bool:
+        criterion = criterion_text.casefold()
+        if any(term in criterion for term in _BEHAVIOR_TERMS):
+            return True
+        return any(
+            any(alias in criterion for alias in aliases)
+            for aliases in _ACTION_ALIASES
+        )
 
     @staticmethod
     def _is_sufficient(criterion_text: str, evidence_type: str, evidence_ref: str) -> bool:
