@@ -109,6 +109,26 @@ export const api = {
     return res.json() as Promise<WorkspaceResponse>
   },
 
+  async listFs(sessionId: string, path: string) {
+    const res = await fetch('/api/agent/fs/list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, path }),
+    })
+    if (!res.ok) throw new Error(`读取目录失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ root: string; path: string; entries: Array<{ name: string; path: string; type: 'directory' | 'file'; size?: number | null }> }>
+  },
+
+  async createFolder(sessionId: string, path: string) {
+    const res = await fetch('/api/agent/workspace/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, path }),
+    })
+    if (!res.ok) throw new Error(`创建目录失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ session_id: string; created: string[]; workspace: string }>
+  },
+
   async getHistory(sessionId: string): Promise<CanonicalHistoryRow[]> {
     const res = await fetch(`/api/agent/history/${encodeURIComponent(sessionId)}`)
     if (!res.ok) throw new Error(`读取会话历史失败：HTTP ${res.status}`)

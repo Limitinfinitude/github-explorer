@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Bug, ChevronDown, FolderGit2, GitBranch, Link2, Menu, Play, Scan, TerminalSquare } from 'lucide-react'
+import { Bug, ChevronDown, FolderGit2, FolderTree, GitBranch, Link2, Menu, Play, Scan, TerminalSquare } from 'lucide-react'
 import { MessageList } from './MessageList'
 import { InputArea } from './InputArea'
 import { useChatStream } from '../../hooks/useChatStream'
 import { AgentStatusPanel } from './AgentStatusPanel'
+import { DirTree } from '../layout/DirTree'
 import { api } from '../../lib/api'
 import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
@@ -32,6 +33,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
   const [workspace, setWorkspace] = useState('')
   const [workspaceDraft, setWorkspaceDraft] = useState('')
   const [workspaceError, setWorkspaceError] = useState('')
+  const [showTree, setShowTree] = useState(false)
   const [workspaceProfile, setWorkspaceProfile] = useState<WorkspaceProfile | null>(null)
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
@@ -201,6 +203,24 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
                 </button>
               </div>
               {workspaceError && <span className="workspace-error">{workspaceError}</span>}
+              <div className="workspace-tree">
+                <button
+                  type="button"
+                  className="workspace-tree__toggle"
+                  onClick={() => setShowTree(v => !v)}
+                  aria-expanded={showTree}
+                >
+                  <FolderTree size={13} />
+                  <span>{showTree ? '收起目录树' : '浏览目录树'}</span>
+                </button>
+                {showTree && (
+                  <DirTree
+                    sessionId={chat.sessionId}
+                    value={workspace}
+                    onSelect={path => { void bindWorkspace(path) }}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </details>

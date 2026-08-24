@@ -41,6 +41,16 @@ class WorkspaceRequest(BaseModel):
     path: str
 
 
+class FsListRequest(BaseModel):
+    session_id: str = "default"
+    path: str = "."
+
+
+class FolderCreateRequest(BaseModel):
+    session_id: str = "default"
+    path: str
+
+
 class DefaultWorkspaceRequest(BaseModel):
     path: str
 
@@ -766,6 +776,43 @@ async def bind_agent_workspace(request: WorkspaceRequest):
     }
 
 
+@router_agent.post("/api/agent/fs/list")
+async def list_agent_fs(request: FsListRequest):
+    """列出工作区内目录内容（走 workspaces.resolve 边界校验，仅工作区内）。
+
+    供前端目录树浏览器使用；返回条目与当前根路径。
+    """
+    services = get_local_agent_services()
+    root = services.workspaces.get(request.session_id).root
+    result = services.files.list_directory(request.session_id, request.path, limit=300)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error or "目录不存在")
+    entries = (result.data or {}).get("entries", [])
+    return {
+        "root": str(root),
+        "path": str(services.workspaces.resolve(request.session_id, request.path)),
+        "entries": entries,
+    }
+
+
+@router_agent.post("/api/agent/workspace/folders")
+async def create_agent_folder(request: FolderCreateRequest):
+    """在工作区内新建文件夹（复用 create_directory，mkdir parents=True）。
+
+    仅允许工作区内路径（resolve 边界校验）；已存在则幂等返回。
+    """
+    services = get_local_agent_services()
+    result = services.files.create_directory(request.session_id, request.path)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error or "创建目录失败")
+    created = (result.data or {}).get("path_kinds", {})
+    return {
+        "session_id": request.session_id,
+        "created": list(created.keys()),
+        "workspace": str(services.workspaces.get(request.session_id).root),
+    }
+
+
 @router_agent.get("/api/agent/workspace/default")
 async def get_default_agent_workspace():
     from agent.memory import memory
@@ -1050,8 +1097,12 @@ async def import_project(request: ProjectImportRequest):
         path = path.resolve()
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"项目目录无效: {exc}") from exc
-    if not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"项目目录不存在: {path}")
+    # 允许导入不存在的路径：若父目录存在则自动创建项目目录（支持「新建文件夹」）
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法创建项目目录: {exc}") from exc
 
     session_id = project_session_id_for_workspace(str(path))
     workspace, _ = resolve_agent_workspace(session_id, str(path))
