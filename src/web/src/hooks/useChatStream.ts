@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import type {
   Step, CmdBlockData, SSEEvent, AgentFileChange, AgentRunSummary,
   AgentVerification, AgentProcess, AgentApproval,
-  AgentAcceptanceItem,
+  AgentAcceptanceItem, ThinkingSegment,
 } from '../types'
 import { normalizeProcessStatus, reconcileProcesses } from '../lib/processState'
 import { isRecoverableTaskStatus } from '../lib/taskRecovery'

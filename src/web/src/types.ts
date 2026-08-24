@@ -1,3 +1,8 @@
+export interface ThinkingSegment {
+  content: string
+  round: number
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -6,7 +11,7 @@ export interface Message {
   toolCalls?: ToolCall[]
   steps?: Step[]
   cmdBlocks?: CmdBlockData[]
-  thinking?: string[]
+  thinking?: ThinkingSegment[]
   narrations?: string[]
   agentRun?: AgentRunSummary
 }
@@ -438,7 +443,7 @@ export type SSEEvent =
   | { type: 'repo_map'; content: string; files_scanned: number; session_id: string; task_id: string }
   | { type: 'step'; step: string; icon: string }
   | { type: 'narration'; tool_name: string; content: string }
-  | { type: 'thinking'; content: string }
+  | { type: 'thinking'; content: string; round?: number }
   | { type: 'tool_call'; name: string; tool_name?: string; args: Record<string, unknown>; call_id: string; batch_id: string }
   | { type: 'tool_result'; name: string; tool_name?: string; success: boolean; output: string; error?: string; error_kind?: string; data?: Record<string, unknown>; artifact?: AgentArtifact | null; call_id: string; batch_id: string }
   | { type: 'tool_recovered'; name: string; failed_call_id: string; recovered_by_call_id: string; recovery_key: string }
