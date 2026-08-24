@@ -151,6 +151,7 @@ export function Sidebar({
           </button>
         </header>
 
+        <div className="sidebar-scroll">
         <div className="sidebar-new">
           <button onClick={() => { onOpenProjectView(); onClose() }}>
             <FolderKanban size={15} />
@@ -285,6 +286,7 @@ export function Sidebar({
             </nav>
           </>
         )}
+        </div>
 
         <nav className="sidebar-nav" aria-label="主导航">
           <button className={activeView === 'project' ? 'is-active' : ''} onClick={() => selectView('project')}>

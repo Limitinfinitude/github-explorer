@@ -116,9 +116,20 @@ button { cursor: pointer; }
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--sidebar);
   border-right: 1px solid var(--border);
   z-index: 40;
+}
+
+/* 侧边栏中部滚动区：项目/任务列表再多也不把底部导航挤出视口 */
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
 }
 
 .sidebar-brand {
@@ -241,7 +252,7 @@ button { cursor: pointer; }
 }
 .sidebar-chat:hover button { opacity: 1; }
 .sidebar-chat button:hover { color: var(--error); background: var(--error-soft); }
-.sidebar-projects { flex: 0 0 auto; max-height: 34vh; min-height: 0; overflow-y: auto; padding: 0 8px; }
+.sidebar-projects { flex: 0 0 auto; min-height: 0; padding: 0 8px; }
 /* 折叠态：更紧凑，降低初始堆叠噪音 */
 .sidebar-projects.is-collapsed-view .sidebar-project__head { min-height: 30px; color: var(--muted); }
 .sidebar-projects.is-collapsed-view .sidebar-project__head small { display: none; }
@@ -263,7 +274,15 @@ button { cursor: pointer; }
 .sidebar-sub-new button { width: 100%; height: 30px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--text-2); background: var(--surface-2); border: 1px dashed var(--border-2); border-radius: 5px; font-size: 11px; }
 .sidebar-sub-new button:hover { color: var(--text); border-color: var(--border-strong); }
 
-.sidebar-nav { padding: 8px; border-top: 1px solid var(--border); }
+/* 底部导航：固定在侧边栏底部，不随中部滚动 */
+.sidebar-nav {
+  flex: 0 0 auto;
+  padding: 8px;
+  background: var(--sidebar);
+  border-top: 1px solid var(--border);
+  position: relative;
+  z-index: 1;
+}
 .sidebar-nav button {
   width: 100%;
   height: 34px;
@@ -1102,6 +1121,10 @@ button { cursor: pointer; }
   .activity-event-row time { display: none; }
   .activity-tool-row { grid-template-columns: minmax(0, 1fr) 42px; }
   .activity-tool-row time { display: none; }
+  .approval-mode__selector { grid-template-columns: 1fr; }
+  .hooks-editor__add { grid-template-columns: 1fr; }
+  .hooks-editor__list li { flex-wrap: wrap; }
+  .hooks-editor__command { flex: 1 1 100%; }
 }
 
 /* Scrollbar */

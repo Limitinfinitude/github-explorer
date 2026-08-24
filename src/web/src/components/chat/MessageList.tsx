@@ -19,13 +19,25 @@ interface Props {
 
 export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamContent, startTime }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   const [renderedStreamContent, setRenderedStreamContent] = useState('')
+  const [stickToBottom, setStickToBottom] = useState(true)
   const elapsed = Math.round((Date.now() - startTime) / 1000)
   const displayStreamContent = displayResponseContent(streamContent, false)
 
+  // 用户向上翻阅历史时暂停自动滚动，回到底部附近恢复跟随
+  const handleScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    setStickToBottom(distance < 120)
+  }
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, streamContent, streamCmdBlocks.length, streamNarration.length, streamThinking])
+    if (stickToBottom) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages.length, streamContent, streamCmdBlocks.length, streamNarration.length, streamThinking, stickToBottom])
 
   useEffect(() => {
     if (!displayStreamContent) {
@@ -44,7 +56,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
   }, [displayStreamContent])
 
   return (
-    <div className="message-list">
+    <div className="message-list" ref={listRef} onScroll={handleScroll}>
       {messages.map(msg => (
         <MessageItem key={msg.id} msg={msg} />
       ))}
