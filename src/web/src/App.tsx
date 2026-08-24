@@ -122,6 +122,8 @@ export default function App() {
         projects={projects}
         activeChatId={activeChatId}
         activeView={activeView}
+        theme={theme}
+        onThemeChange={setTheme}
         onSelectChat={setActiveChatId}
         onNewChat={handleNewChat}
         onNewProjectChat={handleNewProjectChat}
@@ -159,8 +161,6 @@ export default function App() {
           <SettingsView
             models={models}
             currentModel={currentModel}
-            theme={theme}
-            onThemeChange={setTheme}
             onSelectModel={handleSelectModel}
             onModelCreated={handleModelCreated}
           />

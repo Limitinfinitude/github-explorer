@@ -31,6 +31,12 @@ const CATEGORY_LABELS = {
   events: '事件', tools: '工具', files: '文件', verification: '验证', processes: '进程', observability: 'Trace',
 } as const
 
+// 内部噪音事件（模型输出增量/思考/请求生命周期），对人类无可读性，不在证据层展示
+const NOISE_EVENT_TYPES = new Set([
+  'thinking', 'token', 'model_request_started', 'model_request_completed',
+  'model_request_retrying', 'model_request_failed',
+])
+
 const BUDGET_LABELS: Record<string, string> = {
   inspect: '体检', implement: '实现', test: '测试', run: '运行验收',
 }
@@ -78,7 +84,11 @@ function EvidenceDrawer({ projectId, overview }: { projectId: string; overview: 
   }
 
   const visibleEntries = useMemo(
-    () => evidence ? filterEvidenceEntries(evidence.entries, filter).slice(0, 200) : [],
+    () => evidence
+      ? filterEvidenceEntries(evidence.entries, filter)
+          .filter(entry => !NOISE_EVENT_TYPES.has(entry.title))  // 内部噪音事件（token/thinking 等）不展示
+          .slice(0, 200)
+      : [],
     [evidence, filter],
   )
 
@@ -152,8 +162,7 @@ function verificationBadge(status: string) {
   return status
 }
 
-function ProjectMemoriesDrawer({ projectId }: { projectId: string }) {
-  const [open, setOpen] = useState(false)
+function ProjectMemoriesDrawer({ projectId }: { projectId: string }) {  const [open, setOpen] = useState(false)
   const [memories, setMemories] = useState<ProjectMemory[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')

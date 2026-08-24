@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Moon, Palette, Pencil, PlugZap, Plus, Save, ShieldCheck, Sun, X } from 'lucide-react'
+import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Pencil, PlugZap, Plus, Save, ShieldCheck, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { modelProbeReadiness, probeStatusText } from '../../lib/modelProbe'
 import type { ModelDiscoveryResult, ProbeResult } from '../../lib/modelProbe'
@@ -8,19 +8,21 @@ import type { CustomModelInput, Model } from '../../types'
 interface Props {
   models: Model[]
   currentModel: string
-  theme: 'dark' | 'light'
-  onThemeChange: (theme: 'dark' | 'light') => void
   onSelectModel: (id: string) => void
   onModelCreated: (id: string) => Promise<void>
 }
 
-type ApprovalMode = 'confirm' | 'auto' | 'open'
+type ApprovalMode = 'confirm' | 'auto' | 'open' | 'full'
 
 const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string }[] = [
   { value: 'confirm', label: '需要审批', description: '高风险操作等待人工确认' },
   { value: 'auto', label: '自动审批', description: '高风险操作自动放行并记录' },
   { value: 'open', label: '完全开放', description: '不检查权限，直接执行' },
+  { value: 'full', label: '完全访问', description: '放开工作区外文件与全局写入（含判分脚本等受限路径），选择需确认' },
 ]
+
+const FULL_ACCESS_WARNING =
+  '完全访问模式将放开工作区外文件访问（包括判分脚本、评测结果等受限路径）与全局工具链写入（setx、npm install -g、go install 等），且跳过边界拦截。仅在你完全信任当前任务且需要这些能力时使用。确定切换？'
 
 const EMPTY_FORM: CustomModelInput = {
   name: '',
@@ -31,7 +33,7 @@ const EMPTY_FORM: CustomModelInput = {
   thinking_effort: 'off',
 }
 
-export function SettingsView({ models, currentModel, theme, onThemeChange, onSelectModel, onModelCreated }: Props) {
+export function SettingsView({ models, currentModel, onSelectModel, onModelCreated }: Props) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [showKey, setShowKey] = useState(false)
@@ -247,7 +249,12 @@ export function SettingsView({ models, currentModel, theme, onThemeChange, onSel
               key={mode.value}
               type="button"
               className={approvalMode === mode.value ? 'is-active' : ''}
-              onClick={() => void saveApprovalMode(mode.value)}
+              onClick={() => {
+                if (mode.value === 'full' && approvalMode !== 'full') {
+                  if (!window.confirm(FULL_ACCESS_WARNING)) return
+                }
+                void saveApprovalMode(mode.value)
+              }}
               disabled={approvalSaving}
               title={mode.description}
             >
@@ -255,24 +262,6 @@ export function SettingsView({ models, currentModel, theme, onThemeChange, onSel
               <small>{mode.description}</small>
             </button>
           ))}
-        </div>
-      </section>
-
-      <section className="workspace-settings" aria-labelledby="appearance-title">
-        <div className="workspace-settings__heading">
-          <span className="workspace-settings__icon"><Palette size={16} /></span>
-          <div>
-            <h2 id="appearance-title">外观主题</h2>
-            <p>切换界面深色 / 浅色主题，选择会保存在本机并立即生效。</p>
-          </div>
-        </div>
-        <div className="theme-switch" role="radiogroup" aria-label="界面主题">
-          <button type="button" className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')} aria-pressed={theme === 'dark'}>
-            <Moon size={13} />深色
-          </button>
-          <button type="button" className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')} aria-pressed={theme === 'light'}>
-            <Sun size={13} />浅色
-          </button>
         </div>
       </section>
 

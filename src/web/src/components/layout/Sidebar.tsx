@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Activity, ChevronDown, Compass, FolderKanban, MessageSquare, PanelLeftClose, Plus, Settings, TerminalSquare, Trash2, Upload,
+  Activity, ChevronDown, Compass, FolderKanban, MessageSquare, Moon, PanelLeftClose, Plus, Settings, Sun, TerminalSquare, Trash2, Upload,
 } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { Chat, ProjectSummary, View } from '../../types'
@@ -11,6 +11,8 @@ interface Props {
   projects: ProjectSummary[]
   activeChatId: number | null
   activeView: View
+  theme: 'dark' | 'light'
+  onThemeChange: (theme: 'dark' | 'light') => void
   onSelectChat: (id: number) => void
   onNewChat: () => void
   onNewProjectChat: (project: ProjectSummary) => void
@@ -55,6 +57,8 @@ export function Sidebar({
   projects,
   activeChatId,
   activeView,
+  theme,
+  onThemeChange,
   onSelectChat,
   onNewChat,
   onNewProjectChat,
@@ -133,6 +137,15 @@ export function Sidebar({
             <strong>Explorer</strong>
             <span>Local Agent</span>
           </div>
+          <button
+            type="button"
+            className="sidebar-theme-icon"
+            onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')}
+            title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+            aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
           <button type="button" className="mobile-close-button" onClick={onClose} title="关闭导航" aria-label="关闭导航">
             <PanelLeftClose size={17} />
           </button>

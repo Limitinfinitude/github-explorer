@@ -158,14 +158,14 @@ export const api = {
     return res.json() as Promise<DefaultWorkspaceResponse>
   },
 
-  async getApprovalMode(): Promise<'confirm' | 'auto' | 'open'> {
+  async getApprovalMode(): Promise<'confirm' | 'auto' | 'open' | 'full'> {
     const res = await fetch('/api/settings/approval-mode')
     if (!res.ok) throw new Error(`读取权限模式失败：HTTP ${res.status}`)
-    const data = await res.json() as { mode?: 'confirm' | 'auto' | 'open' }
+    const data = await res.json() as { mode?: 'confirm' | 'auto' | 'open' | 'full' }
     return data.mode ?? 'confirm'
   },
 
-  async setApprovalMode(mode: 'confirm' | 'auto' | 'open') {
+  async setApprovalMode(mode: 'confirm' | 'auto' | 'open' | 'full') {
     const res = await fetch('/api/settings/approval-mode', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

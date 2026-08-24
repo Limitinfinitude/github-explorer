@@ -278,6 +278,18 @@ button { cursor: pointer; }
   font-size: 12px;
 }
 .sidebar-nav button:hover, .sidebar-nav button.is-active { color: var(--text); background: var(--hover); }
+.sidebar-theme-icon {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+}
+.sidebar-theme-icon:hover { color: var(--text); background: var(--hover); }
 .sidebar-backdrop { display: none; }
 
 .workspace-bar {
