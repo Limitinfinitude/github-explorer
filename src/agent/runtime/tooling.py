@@ -66,9 +66,35 @@ _EXTERNAL_COMMANDS = re.compile(
     re.IGNORECASE,
 )
 
+# 边界拦截（ToolRisk.BOUNDARY）：评测完整性 + 全局环境污染。
+# - 受限路径引用：判分脚本目录（checks/）与评测结果文件（results-*.jsonl）。
+#   语义对齐 SWE-bench「测试对 agent 物理隐藏」——agent 在非完全访问档下不可触碰；
+# - 全局工具链/系统级写入：setx（注册表持久化环境变量）、reg add、npm/pnpm/yarn -g、
+#   go install（写全局 GOBIN）。这些会跨任务污染本机环境。
+_BOUNDARY_REFERENCE_RE = re.compile(
+    r"(?:^|[\\/])(?:checks[\\/]|results-[A-Za-z0-9_.-]*\.jsonl)",
+    re.IGNORECASE,
+)
+_GLOBAL_WRITE_RE = re.compile(
+    r"\bsetx\b|\breg\s+add\b|\b(?:npm|pnpm)\s+(?:install|i|add)\s+(?:-g\b|--global\b)|"
+    r"\byarn\s+global\s+add\b|\bgo\s+install\b",
+    re.IGNORECASE,
+)
+
+
+def boundary_violation(command: str) -> str | None:
+    """检测命令是否引用工作区外受限路径或做全局工具链写入。返回违规原因或 None。"""
+    if _BOUNDARY_REFERENCE_RE.search(command):
+        return "命令引用受限路径（判分脚本/评测结果目录）"
+    if _GLOBAL_WRITE_RE.search(command):
+        return "命令执行全局工具链/系统级写入（如 setx、npm install -g、go install）"
+    return None
+
 
 def classify_command_risk(args: dict) -> ToolRisk:
     command = str(args.get("command", ""))
+    if boundary_violation(command):
+        return ToolRisk.BOUNDARY
     if _DESTRUCTIVE_COMMANDS.search(command):
         return ToolRisk.DESTRUCTIVE
     if _PRIVILEGED_COMMANDS.search(command):
@@ -145,13 +171,13 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     }, ["command"], ToolRisk.PROCESS, lambda a: services.commands.run(
         session_id, a["command"], a.get("cwd", "."), a.get("timeout", 60)
     ), classify_command_risk)
-    add("clone_repository", "克隆远程 Git 仓库到工作区内目录", {
+    add("clone_repository", "克隆远程 Git 仓库到工作区内目录。仅当用户明确要求克隆/下载该仓库时使用；了解/介绍仓库请用 web_fetch", {
         "url": {"type": "string"}, "destination": path_property,
     }, ["url", "destination"], ToolRisk.WRITE_SAFE,
         lambda a: services.projects.clone_repository(session_id, a["url"], a["destination"]))
     add("detect_project", "检测 Python/Node 项目、包管理器和可用脚本", {"path": path_property}, [], ToolRisk.READ,
         lambda a: services.projects.detect(session_id, a.get("path", ".")))
-    add("ensure_venv", "为 Python 项目创建或复用工作区 .venv", {"path": path_property}, [], ToolRisk.PROCESS,
+    add("ensure_venv", "为 Python 项目创建或复用工作区 .venv。Python 项目只能使用此工具创建/复用的项目内 .venv，禁止系统 Python 或其他目录的解释器", {"path": path_property}, [], ToolRisk.PROCESS,
         lambda a: services.projects.ensure_venv(session_id, a.get("path", ".")))
 
     def install(a):
@@ -206,13 +232,39 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
             error_kind=None if 200 <= status < 400 else "http_status",
         )
 
-    add("http_request", "向本机 HTTP 服务发送结构化请求", {
+    add("http_request", "向本机 HTTP 服务发送结构化请求（仅限 127.0.0.1/::1 回环地址，用于验收本机启动的服务）；访问外网/第三方 API 请用 web_fetch", {
         "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
         "url": {"type": "string"},
         "headers": {"type": "object"},
         "json": {},
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60, "description": "秒，最大 60"},
     }, ["method", "url"], ToolRisk.READ, http_request)
+
+    add("web_fetch", "只读抓取外网页面/API 文本（GET），用于获取仓库信息、文档等；不能访问本机/内网地址", {
+        "url": {"type": "string"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 30, "description": "秒"},
+    }, ["url"], ToolRisk.READ,
+        lambda a: services.network.web_fetch(a["url"], a.get("timeout", 20)))
+
+    def use_skill(a):
+        from .skills import load_skills
+        name = str(a.get("name", "")).strip()
+        skills = load_skills(services.workspaces.get(session_id).root)
+        skill = skills.get(name)
+        if skill is None:
+            available = "、".join(sorted(skills)) or "（无）"
+            return ToolResult.fail(
+                f"技能不存在: {name}（可用技能：{available}）",
+                error_kind="invalid_input",
+            )
+        return ToolResult.ok(
+            data={"skill": name, "source": skill.source},
+            output=f"[技能 {name} 已加载]\n{skill.body}",
+        )
+
+    add("use_skill", "加载一个技能到上下文（技能正文按需加载，名称见系统提示词技能索引）", {
+        "name": {"type": "string"},
+    }, ["name"], ToolRisk.READ, use_skill)
 
     def http_request_batch(a):
         group_id = str(a.get("group_id") or f"batch-{uuid.uuid4().hex[:12]}")

@@ -636,14 +636,21 @@ def test_capability_question_skips_repo_map_and_tool_schemas(tmp_path: Path):
 def test_runtime_prompt_allows_plain_chat_without_tools():
     prompt = LocalAgentRuntime._system_prompt("C:/workspace")
 
-    assert "问候" in prompt
-    assert "不要调用任何工具" in prompt
+    # 意图判断交给模型（大厂做法：不枚举触发词/意图分类表），提示词只给原则
+    assert "动手前先判断" in prompt
+    assert "知识截止" in prompt
     assert "不要使用 Emoji 作为标题或列表装饰" in prompt
     assert "普通问答不要生成执行报告" in prompt
     assert "代码围栏必须独占一行且不缩进" in prompt
     assert "列举能力或步骤时使用 Markdown 列表" in prompt
-    assert "不得复用父目录、兄弟目录、其他任务目录或系统 Python" in prompt
-    assert "python_executable 和 cwd" in prompt
+    # harness 机制已保证的规则不再重复进提示词（大厂「harness 限制而非提示词」；
+    # venv 约束已移入 ensure_venv 工具描述 + 任务描述兜底）
+    assert "Python 项目只能使用" not in prompt
+    assert "不得构造越过工作区的路径" not in prompt
+    assert "edit_files，搜索文本必须唯一" not in prompt
+    # 不枚举意图分类表/触发词（避免把答案喂给模型）
+    assert "信息咨询" not in prompt
+    assert "最新/外部信息" not in prompt
 
 
 def test_runtime_reserves_enough_tokens_for_file_edit_tool_arguments(tmp_path: Path):
@@ -843,7 +850,7 @@ def test_runtime_compacts_model_input_but_preserves_full_task_messages(tmp_path:
         workspaces,
         lambda _: ToolRegistry(),
         fake_llm,
-        max_context_tokens=2_000,
+        max_context_tokens=4_000,
         max_output_tokens=200,
         task_store=store,
     )
@@ -2324,3 +2331,50 @@ def test_runtime_merges_http_ownership_into_managed_process_snapshot(tmp_path: P
     process = finalization["facts"]["processes"][0]
     assert process["owned"] is True
     assert process["listener_pids"] == [84]
+
+
+def test_boundary_command_hard_blocked_in_auto_and_allowed_in_full(tmp_path: Path):
+    """边界拦截：判分脚本路径/全局写入命令在非 full 档被硬拦（不进入审批），full 档放行。"""
+    from agent.runtime.tooling import classify_command_risk
+
+    executed: list[str] = []
+
+    def handler(args):
+        executed.append(str(args.get("command", "")))
+        return ToolResult.ok(output="ok")
+
+    definition = ToolDefinition(
+        name="run_command",
+        description="Run a command",
+        input_schema={"type": "object", "properties": {"command": {"type": "string"}}},
+        risk=ToolRisk.PROCESS,
+        risk_resolver=classify_command_risk,
+        handler=handler,
+    )
+
+    def build_responses():
+        return [
+            {"text": "", "tool_uses": [{"id": "t1", "name": "run_command",
+                                        "input": {"command": r"type D:\GE-eval-projects\checks\pdfcpu\check.py"}}],
+             "stop_reason": "tool_use"},
+            {"text": "完成", "tool_uses": [], "stop_reason": "end_turn"},
+        ]
+
+    # auto 档：边界命令被硬拦，处理器从未执行
+    runtime, _ = make_runtime(tmp_path, build_responses(), definition)
+    events = collect(runtime.run("session", "跑命令", approval_mode="auto"))
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(results) == 1
+    assert results[0].get("success") is False
+    assert results[0].get("error_kind") == "boundary"
+    assert executed == []
+
+    # full 档：同一命令放行执行
+    executed.clear()
+    full_dir = tmp_path / "full"
+    full_dir.mkdir(parents=True, exist_ok=True)
+    runtime2, _ = make_runtime(full_dir, build_responses(), definition)
+    events2 = collect(runtime2.run("session", "跑命令", approval_mode="full"))
+    results2 = [e for e in events2 if e["type"] == "tool_result"]
+    assert results2[0].get("success") is True
+    assert executed, "full 档应放行边界命令"

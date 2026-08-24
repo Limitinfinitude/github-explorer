@@ -19,12 +19,14 @@ from .instructions import InstructionLoader
 from .models import ToolResult
 from .registry import ToolRegistry
 from .response_format import format_final_response
+from .skills import skill_index
 from .tool_calls import (
     TERMINAL_TOOL_CALL_STATUSES,
     normalize_tool_calls,
     reconcile_tool_messages,
     tool_recovery_key,
 )
+from .tooling import boundary_violation
 from ..llm import ModelBinding, capture_model_binding
 from .tracing import tool_call_context
 from .workspace import WorkspaceManager
@@ -308,7 +310,7 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": user_message,
             "status": "running",
-            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open", "guardian"} else "confirm",
+            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open", "guardian", "full"} else "confirm",
             "messages": [*(history or []), {"role": "user", "content": user_message}],
             "round": 0,
             "round_limit": self.max_rounds,
@@ -1455,6 +1457,7 @@ class LocalAgentRuntime:
             state["tool_call_ledger"][call_id]["recovery_key"] = recovery_key
             is_resumed_tool = index == decision_index
             is_guardian_denied = False
+            is_boundary_denied = False
             guardian_approved = False
             if not is_resumed_tool:
                 events.append({
@@ -1477,9 +1480,30 @@ class LocalAgentRuntime:
                     and hasattr(registry, "requires_confirmation")
                     and registry.requires_confirmation(name, args)
                 )
+                # 边界硬拦截：引用判分脚本/评测结果目录或做全局工具链写入的命令，
+                # 除「完全访问(full)」档外一律拒绝——不进入审批（auto 自动放行、
+                # guardian 审查都不适用）。对齐 SWE-bench「测试对 agent 物理隐藏」
+                # 的闭卷语义：这些路径 agent 在非完全访问档下不可触碰。
+                boundary_reason = ""
+                if name in {"run_command", "start_process"} and not is_resumed_tool:
+                    boundary_reason = boundary_violation(str(args.get("command", ""))) or ""
+                if boundary_reason and approval_mode != "full":
+                    self._record_event({
+                        **base_event,
+                        "type": "tool_blocked_boundary",
+                        "tool_name": name,
+                        "args": args,
+                        "reason": boundary_reason,
+                    })
+                    result = ToolResult.fail(
+                        f"已拦截：{boundary_reason}。如需该操作，请切换到「完全访问」权限模式。",
+                        error_kind="boundary",
+                    )
+                    self._transition_tool_call(state, call_id, "failed", error_kind="boundary")
+                    is_boundary_denied = True
                 # 权限模式：confirm 走人工审批；auto 自动批准高风险操作；open 完全开放；
                 # guardian 由 AI 审查决定放行/拒绝（fail-closed），连续拒绝达上限降级人工
-                if requires_confirmation and approval_mode in {"auto", "open"}:
+                if requires_confirmation and approval_mode in {"auto", "open", "full"}:
                     self._record_event({
                         **base_event,
                         "type": "approval_auto",
@@ -1545,7 +1569,7 @@ class LocalAgentRuntime:
                     self._transition_tool_call(state, call_id, "running")
                 confirmed = (
                     (is_resumed_tool and approval_decision is True)
-                    or approval_mode in {"auto", "open"}
+                    or approval_mode in {"auto", "open", "full"}
                     or (approval_mode == "guardian" and guardian_approved)
                 )
                 if is_guardian_denied:
@@ -1554,6 +1578,9 @@ class LocalAgentRuntime:
                         "Guardian 审查拒绝该操作（fail-closed）",
                         error_kind="rejected",
                     )
+                elif is_boundary_denied:
+                    # 边界拦截：result 已在拦截点设置，跳过执行
+                    pass
                 else:
                     with tool_call_context(
                         task_id=state["task_id"],
@@ -1577,6 +1604,11 @@ class LocalAgentRuntime:
                                 f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
                                 error_kind="timeout",
                             )
+
+            # 搜索抓取计数（web_fetch）：供 _round_reminder 注入收敛提醒，防止
+            # 模型无限抓取挖数据（harness 层限制，不依赖提示词自觉）
+            if name == "web_fetch":
+                state["search_fetch_count"] = int(state.get("search_fetch_count", 0)) + 1
 
             cancelled = self._cancelled_event(state, base_event)
             if cancelled:
@@ -2570,42 +2602,33 @@ class LocalAgentRuntime:
         os_name = platform.system() or "Unknown"
         if os_name == "Windows":
             shell_line = (
-                "- 命令执行 Shell：PowerShell（Windows 下 run_command 默认按 PowerShell "
-                "语法执行；CMD 语法的旧命令也会被转换）"
-            )
-            shell_rule = (
-                "9. Windows 环境下命令统一使用 PowerShell 语法：环境变量用 `$env:NAME=\"值\"` 设置，"
-                "禁止使用 CMD 的 `set NAME=值` 语法；PowerShell 中执行外部命令用 `& \"路径\"` 或直接命令名。"
+                "- 命令执行 Shell：PowerShell（run_command 默认按 PowerShell 语法；"
+                "环境变量用 `$env:NAME=\"值\"` 设置，不用 CMD 的 `set`）"
             )
         else:
-            shell_line = "- 命令执行 Shell：bash（run_command 按 POSIX shell 语法执行）"
-            shell_rule = (
-                "9. 命令统一使用 POSIX shell 语法：环境变量用 `NAME=\"值\"` 设置并以 `$NAME` 引用，"
-                "多条命令用 `&&` 连接；路径使用正斜杠。"
-            )
+            shell_line = "- 命令执行 Shell：bash（POSIX 语法，环境变量用 `NAME=\"值\"` 设置并以 `$NAME` 引用）"
+        skills_text = skill_index(workspace_root)
+        skills_section = (
+            f"\n\n# 可用技能\n以下技能正文按需加载，需要时调用 use_skill(\"<name>\") 获取完整步骤：\n{skills_text}"
+            if skills_text else ""
+        )
         return f"""你是一个通用本地操作 Agent。当前工作区根目录：{workspace_root}
 
 # 环境上下文
 - 平台：{os_name}（{platform.machine()}）
 {shell_line}
 - 当前日期：{today}
+- 知识截止：你的训练知识有截止时间，涉及可能过时的事实时应先搜索确认，不凭记忆报数。
 
 # 工作流程
-1. 先判断用户请求是否需要本地操作。问候、闲聊和一般知识问题直接回答，不要调用任何工具、不要读取 Repo Map、不要展示执行计划；需要本地操作时先在心里规划再动手：先读取 Repo Map 和必要上下文，再决定工具序列。
-2. 多步任务按"探索 → 分析 → 实施 → 验证"推进；动手前先规划，验证是唯一判定完成的方式。把独立的读、查、验证合并进尽量少的工具调用；只有后一步依赖前一步结果时才拆开执行。
+1. 动手前先判断这个请求需要什么（工具？搜索？技能？直接回答？），再行动；拿不准需要外部/最新信息时先搜索（成本低）。
+2. 多步任务按"探索 → 分析 → 实施 → 验证"推进；验证是唯一判定完成的方式。独立的读、查、验证合并进尽量少的工具调用；只有后一步依赖前一步结果时才拆开执行。
 
-# 执行规则
-3. 文件修改使用 edit_files，搜索文本必须唯一；修改后运行 verify_project 或明确的检查命令。
-4. Python 项目只能使用目标项目目录自己的 .venv；缺失时先对该项目调用 ensure_venv。不得复用父目录、兄弟目录、其他任务目录或系统 Python；验证结果必须以工具返回的 python_executable 和 cwd 为准。
-5. Python 项目只能使用 ensure_venv 创建/复用项目目录内的 .venv；禁止手动删除 .venv、禁止尝试系统 Python 或其他目录的解释器路径。
-6. 长时间服务使用 start_process，不要用前台命令阻塞。
-7. 端到端验收包含多个 HTTP 请求时，优先使用 http_request_batch 一次提交检查清单；只有需要根据上一步响应动态决定下一步时才拆成多个 http_request。
-8. 工具失败后根据错误改变策略，不要重复完全相同的失败调用；连续失败时停下，列出 3-5 种可能的原因并按可能性排序，然后选择与之前不同的方法；复测 http_request_batch 时沿用返回的 group_id。
-{shell_rule}
-10. 不得构造越过工作区的路径。需要确认的操作由系统暂停。
-11. 最终只给出一次面向用户的结果，不要输出思考过程、用户意图复述、计划旁白或工具参数，不要使用 Emoji 作为标题或列表装饰。普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。
-12. Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
-13. 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。{memories}{acceptance}{context}"""
+# 输出
+- 最终回复只面向用户：不包含内部思考过程、计划旁白或工具参数；不要使用 Emoji 作为标题或列表装饰。
+- Markdown 代码围栏必须独占一行且不缩进，开始与结束围栏都从行首写起。
+- 列举能力或步骤时使用 Markdown 列表，每项先写简短名称，再写一句说明。
+- 普通问答不要生成执行报告；运行时只在存在真实执行事实时汇总文件、验证和进程。{skills_section}{memories}{acceptance}{context}"""
 
     def _round_reminder(self, state: dict) -> str:
         """构造当前轮次的动态提醒（预算收敛、循环退一步、探索推动）。
@@ -2643,6 +2666,14 @@ class LocalAgentRuntime:
                 "通常这已足够定位问题；请基于已收集的信息直接实施修改"
                 "（edit_files / 命令执行），而不是继续探索。"
                 "如确有缺口，先说明还缺什么、为什么已有信息不够。）"
+            )
+        # 搜索收敛提醒（web_fetch 抓取次数预算）：搜索类任务中模型可能无限抓取挖数据，
+        # harness 层计数注入收敛指令（大厂「harness 限制而非提示词」）
+        fetch_count = int(state.get("search_fetch_count", 0))
+        if fetch_count >= 8:
+            parts.append(
+                f"（搜索收敛：你已抓取 {fetch_count} 次网页。停止继续抓取，基于已有搜索结果回答；"
+                "如确需细节，只抓搜索结果里已出现的 1 个具体链接，不要再搜索新关键词。）"
             )
         # 上下文预算提醒（借鉴 Goose <compaction>~Nk tokens remaining）：
         # 当前消息占用接近上下文上限时，提醒模型收敛，避免压缩打断长任务

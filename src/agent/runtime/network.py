@@ -35,7 +35,10 @@ class NetworkTools:
     ) -> tuple[int, str, dict[str, str]]:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in _LOOPBACK_HOSTS:
-            raise ValueError("HTTP 请求只允许本机回环地址")
+            raise ValueError(
+                "HTTP 请求只允许本机回环地址（http_request 用于验收本机启动的服务）；"
+                "访问外网/第三方 API 请改用 web_fetch 工具"
+            )
         body = None if json_body is None else json.dumps(json_body, ensure_ascii=False).encode("utf-8")
         request_headers = dict(headers or {})
         if body is not None:
@@ -59,6 +62,40 @@ class NetworkTools:
                 exc.read(1_000_000).decode("utf-8", errors="replace"),
                 dict(exc.headers.items()),
             )
+
+    def web_fetch(self, url: str, timeout: float = 20) -> ToolResult:
+        """只读抓取外网页面/API（GET），用于获取仓库信息、文档等。
+
+        与 request() 的区别：request 限本机回环（评测验收用），web_fetch 允许外网
+        但只读 GET、限响应大小，不携带本机凭据、不访问内网地址。
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ToolResult.fail(f"web_fetch 只支持 http/https URL: {url}")
+        hostname = parsed.hostname.casefold()
+        if hostname in _LOOPBACK_HOSTS or hostname.endswith(".local"):
+            return ToolResult.fail(f"web_fetch 不允许本机/内网地址: {url}")
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "github-explorer-agent/1.0"}, method="GET")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read(500_000).decode("utf-8", errors="replace")
+                return ToolResult.ok(
+                    data={
+                        "url": url,
+                        "status": response.status,
+                        "content_type": response.headers.get("Content-Type", ""),
+                        "bytes": len(body.encode("utf-8")),
+                    },
+                    output=body[:200_000],
+                )
+        except urllib.error.HTTPError as exc:
+            body = exc.read(100_000).decode("utf-8", errors="replace")
+            return ToolResult.fail(
+                f"HTTP {exc.code}: {exc.reason}",
+                data={"url": url, "status": exc.code, "body": body[:20_000]},
+            )
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"网络请求失败: {exc}", data={"url": url})
 
     def wait_http(
         self,
