@@ -138,10 +138,11 @@ function aggregateStages(events: AgentEvent[]): Array<{ stage: string; toolCount
   const stages = new Map<string, { toolCount: number; failed: number }>()
   for (const event of events) {
     if (event.type !== 'tool_call' && event.type !== 'tool_result') continue
-    const stage = typeof event.payload.stage === 'string' ? event.payload.stage : 'implement'
+    const payload = event.payload as Record<string, unknown> | null | undefined
+    const stage = payload && typeof payload.stage === 'string' ? payload.stage : 'implement'
     const current = stages.get(stage) || { toolCount: 0, failed: 0 }
     if (event.type === 'tool_call') current.toolCount += 1
-    if (event.type === 'tool_result' && event.payload.success === false) current.failed += 1
+    if (event.type === 'tool_result' && payload?.success === false) current.failed += 1
     stages.set(stage, current)
   }
   return Array.from(stages.entries()).map(([stage, stats]) => ({ stage, ...stats }))
