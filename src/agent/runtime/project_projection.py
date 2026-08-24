@@ -12,6 +12,13 @@ from .metrics import calculate_task_metrics
 
 
 _TERMINAL_FAILURES = {"failed", "blocked", "cancelled", "interrupted", "incomplete"}
+
+# 事件时间线中的内部噪音事件（模型输出增量/思考/请求生命周期），
+# 对开发者证据无信息量，不在项目证据层展示
+_NOISE_EVENT_TYPES = {
+    "thinking", "token", "model_request_started", "model_request_completed",
+    "model_request_retrying", "model_request_failed",
+}
 _PROJECT_ACTION_PROMPTS = {
     "inspect": (
         "对当前项目执行项目体检：识别技术栈、入口、依赖、环境要求和可运行性风险；"
@@ -298,6 +305,9 @@ def build_project_evidence(*, project_id: str, workspace: Mapping[str, Any] | No
             })
         for index, event in enumerate(record_activity.get("events") or []):
             event_type = str(event.get("type") or "event")
+            # 内部噪音事件（模型输出增量/思考/请求生命周期）对开发者证据无信息量，过滤
+            if event_type in _NOISE_EVENT_TYPES:
+                continue
             entries.append({
                 "id": f"{task_id}-event-{event.get('sequence', index)}", "task_id": task_id,
                 "category": "events", "status": "failed" if "fail" in event_type or event_type == "error" else "info",
