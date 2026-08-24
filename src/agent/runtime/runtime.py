@@ -604,7 +604,7 @@ class LocalAgentRuntime:
                     )
                     thinking = response.get("thinking")
                     if thinking:
-                        yield {**base_event, "type": "thinking", "content": thinking}
+                        yield {**base_event, "type": "thinking", "content": thinking, "round": state.get("round", 0)}
                 self._track_token_scale(state, system_round, response)
                 cancelled = self._cancelled_event(state, base_event)
                 if cancelled:
@@ -1092,7 +1092,7 @@ class LocalAgentRuntime:
                 if ctype == "token":
                     yield {**base_event, "type": "token", "content": chunk.get("content", "")}
                 elif ctype == "thinking":
-                    yield {**base_event, "type": "thinking", "content": chunk.get("content", "")}
+                    yield {**base_event, "type": "thinking", "content": chunk.get("content", ""), "round": state.get("round", 0)}
                 elif ctype == "done":
                     response = chunk.get("response") or {}
             if not response:

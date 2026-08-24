@@ -20,8 +20,16 @@ function load(): Chat[] {
         // 旧版本数据字段缺失/类型不同，深度规范化避免渲染崩溃
         c.messages = Array.isArray(c.messages) ? c.messages : []
         c.messages.forEach(m => {
-          if (typeof m.thinking === 'string') m.thinking = [m.thinking]
-          if (!Array.isArray(m.thinking)) m.thinking = undefined
+          // 兼容历史 thinking 数据：string → ThinkingSegment[]；旧数组元素是 string 也转换
+          if (typeof m.thinking === 'string') m.thinking = [{ content: m.thinking, round: 0 }]
+          if (Array.isArray(m.thinking)) {
+            m.thinking = m.thinking.map(seg =>
+              typeof seg === 'string' ? { content: seg, round: 0 } : seg,
+            ).filter(seg => seg && typeof seg.content === 'string')
+            if (m.thinking.length === 0) m.thinking = undefined
+          } else if (!Array.isArray(m.thinking)) {
+            m.thinking = undefined
+          }
           if (!Array.isArray(m.narrations)) m.narrations = undefined
           if (!Array.isArray(m.steps)) m.steps = undefined
           if (!Array.isArray(m.cmdBlocks)) m.cmdBlocks = undefined

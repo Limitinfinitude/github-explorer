@@ -8,7 +8,7 @@ import { DirTree } from '../layout/DirTree'
 import { api } from '../../lib/api'
 import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
-  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile, WorkspaceResponse,
+  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile, WorkspaceResponse, ThinkingSegment,
 } from '../../types'
 
 interface Props {
@@ -84,7 +84,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     cmdBlocks: CmdBlockData[],
     agentRun: AgentRunSummary,
     narrations: string[],
-    thinking: string[],
+    thinking: ThinkingSegment[],
   ) => {
     onPushMessage({
       id: `msg-${Date.now()}`,

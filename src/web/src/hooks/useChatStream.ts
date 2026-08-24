@@ -13,7 +13,7 @@ export type StreamState = {
   steps: Step[]
   cmdBlocks: CmdBlockData[]
   narrations: string[]
-  thinking: string[]
+  thinking: ThinkingSegment[]
   partialContent: string
   workspace: string
   taskId: string | null
@@ -33,7 +33,7 @@ type DoneHandler = (
   cmdBlocks: CmdBlockData[],
   agentRun: AgentRunSummary,
   narrations: string[],
-  thinking: string[],
+  thinking: ThinkingSegment[],
 ) => void
 
 type StreamConsumer = (
@@ -226,10 +226,13 @@ export function useChatStream(
         } else if (e.type === 'thinking') {
           commit(current => {
             const thinking = [...current.thinking]
-            if (thinking.length > 0 && thinking[thinking.length - 1]) {
-              thinking[thinking.length - 1] += e.content
+            const round = e.round ?? 0
+            const last = thinking[thinking.length - 1]
+            // 同一轮次的连续增量追加到当前段，新轮次/新段则开一段
+            if (last && last.round === round) {
+              thinking[thinking.length - 1] = { content: last.content + e.content, round }
             } else {
-              thinking.push(e.content)
+              thinking.push({ content: e.content, round })
             }
             return { ...current, thinking }
           })

@@ -424,6 +424,10 @@ button { cursor: pointer; }
 .think-row__toggle > svg:last-child { color: var(--muted-2); flex-shrink: 0; transition: transform .15s ease; }
 .think-row__toggle > svg:last-child.is-open { transform: rotate(180deg); }
 .think-row__body { margin-top: 2px; padding: 9px 11px; color: var(--muted); line-height: 19px; white-space: pre-wrap; background: var(--sidebar); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.think-row__body--timeline { display: flex; flex-direction: column; gap: 10px; }
+.think-segment { display: flex; flex-direction: column; gap: 3px; border-left: 2px solid var(--border-2); padding-left: 10px; }
+.think-segment__marker { color: var(--muted-2); font: 600 9px/14px Consolas, monospace; }
+.think-segment__content { color: var(--muted); white-space: pre-wrap; line-height: 19px; }
 @keyframes thinking-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 
 .work-chain { width: min(100%, 640px); margin: 9px 0 2px 30px; font-size: 11px; }

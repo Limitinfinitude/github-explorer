@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { Message, Step, CmdBlockData } from '../../types'
+import type { Message, Step, CmdBlockData, ThinkingSegment } from '../../types'
 import { MessageItem } from './MessageItem'
 import { WorkChain } from './WorkChain'
 import { CmdBlock } from './CmdBlock'
@@ -12,7 +12,7 @@ interface Props {
   streamSteps: Step[]
   streamCmdBlocks: CmdBlockData[]
   streamNarration: string[]
-  streamThinking: string[]
+  streamThinking: ThinkingSegment[]
   streamContent: string
   startTime: number
 }
@@ -59,9 +59,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
           </div>
           {streamThinking.length > 0 && (
             <div className="message-process">
-              {streamThinking.map((block, index) => (
-                <ReasoningRow key={index} text={block} running />
-              ))}
+              <ReasoningRow segments={streamThinking} running />
             </div>
           )}
           {streamContent ? (

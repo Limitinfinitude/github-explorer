@@ -66,9 +66,7 @@ export function MessageItem({ msg }: { msg: Message }) {
         <>
           {Array.isArray(msg.thinking) && msg.thinking.length > 0 && (
             <div className="message-process">
-              {msg.thinking.map((block, index) => (
-                <ReasoningRow key={index} text={block} running={false} />
-              ))}
+              <ReasoningRow segments={msg.thinking} running={false} />
             </div>
           )}
           <div className="assistant-response">

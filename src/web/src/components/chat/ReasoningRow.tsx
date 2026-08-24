@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Brain, ChevronDown } from 'lucide-react'
+import type { ThinkingSegment } from '../../types'
 
 function firstLine(text: string): string {
   const newline = text.indexOf('\n')
@@ -12,10 +13,12 @@ function latestLine(text: string): string {
   return newline === -1 ? visible : visible.slice(newline + 1)
 }
 
-/** 紧凑的 Think 折叠行：折叠时显示第一行/运行中最新行摘要，点击展开正文。 */
-export function ReasoningRow({ text, running }: { text: string; running: boolean }) {
+/** 连续时间线形式的思维链：按 round 分组连缀展示，点击段可展开。 */
+export function ReasoningRow({ segments, running }: { segments: ThinkingSegment[]; running: boolean }) {
   const [expanded, setExpanded] = useState(false)
-  const summary = running ? latestLine(text) : firstLine(text)
+
+  if (segments.length === 0) return null
+
   return (
     <div className={`think-row ${running ? 'is-running' : ''}`}>
       <button
@@ -26,10 +29,21 @@ export function ReasoningRow({ text, running }: { text: string; running: boolean
       >
         <Brain size={13} />
         <span className="think-row__title">Think</span>
-        <span className="think-row__summary">{summary || (running ? '思考中…' : '')}</span>
+        <span className="think-row__summary">
+          {running ? latestLine(segments[segments.length - 1].content) : firstLine(segments[0].content)}
+        </span>
         <ChevronDown size={12} className={expanded ? 'is-open' : ''} />
       </button>
-      {expanded && <div className="think-row__body">{text}</div>}
+      {expanded && (
+        <div className="think-row__body think-row__body--timeline">
+          {segments.map((segment, index) => (
+            <div key={index} className="think-segment">
+              <span className="think-segment__marker">第 {segment.round + 1} 轮</span>
+              <div className="think-segment__content">{segment.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
