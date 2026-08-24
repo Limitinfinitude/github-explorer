@@ -322,6 +322,14 @@ export interface ProjectSummary {
   updated_at?: string
 }
 
+export interface HookConfig {
+  event: string
+  command: string
+  matcher: string
+  enabled: boolean
+  timeout: number
+}
+
 /** 项目矩阵行：所有项目的轻量状态（工作台矩阵视图） */
 export interface ProjectMatrixRow {
   project_id: string

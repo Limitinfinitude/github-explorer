@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react'
-import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Pencil, PlugZap, Plus, Save, ShieldCheck, X } from 'lucide-react'
+import { AlertCircle, Check, CircleCheck, Eye, EyeOff, FolderGit2, Gauge, KeyRound, ListFilter, LoaderCircle, Link2, Pencil, PlugZap, Plus, RefreshCw, Save, ShieldCheck, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { modelProbeReadiness, probeStatusText } from '../../lib/modelProbe'
 import type { ModelDiscoveryResult, ProbeResult } from '../../lib/modelProbe'
-import type { CustomModelInput, Model } from '../../types'
+import type { CustomModelInput, HookConfig, Model } from '../../types'
 
 interface Props {
   models: Model[]
@@ -52,6 +52,59 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
   const [approvalSaving, setApprovalSaving] = useState(false)
   const [approvalStatus, setApprovalStatus] = useState<{ ok: boolean; text: string } | null>(null)
   const [workspaceStatus, setWorkspaceStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  const [hooks, setHooks] = useState<HookConfig[]>([])
+  const [hookEvents, setHookEvents] = useState<string[]>([])
+  const [hookDraft, setHookDraft] = useState({ event: 'session_end', command: '', matcher: '' })
+  const [hooksSaving, setHooksSaving] = useState(false)
+  const [hooksStatus, setHooksStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  const [mcpStatus, setMcpStatus] = useState<{ connected: boolean; servers: string[]; tools: Array<{ name: string; server?: string }> } | null>(null)
+  const [mcpLoading, setMcpLoading] = useState(false)
+
+  useEffect(() => {
+    api.getHooks().then(result => {
+      setHookEvents(result.events)
+      setHooks(result.hooks)
+    }).catch(() => {})
+    void refreshMcp()
+  }, [])
+
+  const refreshMcp = async () => {
+    setMcpLoading(true)
+    try {
+      setMcpStatus(await api.getMcpStatus())
+    } catch {
+      setMcpStatus(null)
+    } finally {
+      setMcpLoading(false)
+    }
+  }
+
+  const saveHooksConfig = async () => {
+    setHooksSaving(true)
+    setHooksStatus(null)
+    try {
+      const cleaned = hooks.filter(hook => hook.command.trim())
+      await api.saveHooks(cleaned)
+      setHooks(cleaned)
+      setHooksStatus({ ok: true, text: '已保存' })
+    } catch (reason) {
+      setHooksStatus({ ok: false, text: reason instanceof Error ? reason.message : '保存失败' })
+    } finally {
+      setHooksSaving(false)
+    }
+  }
+
+  const addHook = () => {
+    if (!hookDraft.command.trim()) return
+    setHooks(previous => [...previous, {
+      event: hookDraft.event,
+      command: hookDraft.command.trim(),
+      matcher: hookDraft.matcher.trim(),
+      enabled: true,
+      timeout: 20,
+    }])
+    setHookDraft(draft => ({ ...draft, command: '', matcher: '' }))
+  }
 
   useEffect(() => {
     api.getDefaultWorkspace().then(result => {
@@ -262,6 +315,96 @@ export function SettingsView({ models, currentModel, onSelectModel, onModelCreat
               <small>{mode.description}</small>
             </button>
           ))}
+        </div>
+      </section>
+
+      <section className="workspace-settings" aria-labelledby="hooks-title">
+        <div className="workspace-settings__heading">
+          <span className="workspace-settings__icon"><PlugZap size={16} /></span>
+          <div>
+            <h2 id="hooks-title">扩展机制</h2>
+            <p>钩子在 Agent 生命周期事件点执行自定义命令，事件载荷经 stdin 以 JSON 传入；pre_tool 钩子退出码 2 会阻断该工具调用（stderr 作为失败原因）。</p>
+          </div>
+          {hooksStatus && (
+            <span className={`workspace-settings__source ${hooksStatus.ok ? 'is-configured' : ''}`}>{hooksStatus.text}</span>
+          )}
+        </div>
+        <div className="hooks-editor">
+          <div className="hooks-editor__add">
+            <select value={hookDraft.event} onChange={event => setHookDraft(draft => ({ ...draft, event: event.target.value }))} aria-label="钩子事件">
+              {hookEvents.map(event => <option key={event} value={event}>{event}</option>)}
+            </select>
+            <input
+              value={hookDraft.command}
+              onChange={event => setHookDraft(draft => ({ ...draft, command: event.target.value }))}
+              placeholder="要执行的命令，例如 python notify.py"
+              spellCheck={false}
+              aria-label="钩子命令"
+            />
+            <input
+              value={hookDraft.matcher}
+              onChange={event => setHookDraft(draft => ({ ...draft, matcher: event.target.value }))}
+              placeholder="匹配正则（可选）"
+              spellCheck={false}
+              aria-label="匹配正则"
+            />
+            <button type="button" className="hooks-editor__add-btn" onClick={addHook} disabled={!hookDraft.command.trim()}>
+              <Plus size={14} />添加
+            </button>
+          </div>
+          {hooks.length === 0 ? (
+            <p className="hooks-editor__empty">还没有配置钩子。</p>
+          ) : (
+            <ul className="hooks-editor__list">
+              {hooks.map((hook, index) => (
+                <li key={index} className={hook.enabled ? '' : 'is-disabled'}>
+                  <code className="hooks-editor__event">{hook.event}</code>
+                  <code className="hooks-editor__command">{hook.command}</code>
+                  {hook.matcher && <code className="hooks-editor__matcher">匹配 {hook.matcher}</code>}
+                  <label className="hooks-editor__toggle">
+                    <input
+                      type="checkbox"
+                      checked={hook.enabled}
+                      onChange={event => setHooks(previous => previous.map((item, i) => i === index ? { ...item, enabled: event.target.checked } : item))}
+                    />
+                    启用
+                  </label>
+                  <button type="button" className="hooks-editor__remove" onClick={() => setHooks(previous => previous.filter((_, i) => i !== index))} title="删除" aria-label="删除钩子">
+                    <X size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="hooks-editor__footer">
+            <button type="button" className="icon-button" onClick={() => void saveHooksConfig()} disabled={hooksSaving}>
+              <Save size={14} />{hooksSaving ? '保存中…' : '保存钩子配置'}
+            </button>
+          </div>
+        </div>
+        <div className="mcp-status">
+          <div className="mcp-status__heading">
+            <strong>MCP 工具服务器</strong>
+            <button type="button" className="icon-button" onClick={() => void refreshMcp()} disabled={mcpLoading}>
+              <RefreshCw size={13} className={mcpLoading ? 'is-spinning' : ''} />刷新
+            </button>
+          </div>
+          {mcpStatus ? (
+            mcpStatus.connected && mcpStatus.servers.length > 0 ? (
+              <ul className="mcp-status__servers">
+                {mcpStatus.servers.map(server => (
+                  <li key={server}>
+                    <code>{server}</code>
+                    <span>{mcpStatus.tools.filter(tool => tool.server === server).length} 个工具</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mcp-status__empty">未连接 MCP 服务器。请在项目根目录的 .mcp.json 中配置 mcpServers，重启后自动连接。</p>
+            )
+          ) : (
+            <p className="mcp-status__empty">无法读取 MCP 状态（未安装 mcp 包或连接失败）。</p>
+          )}
         </div>
       </section>
 

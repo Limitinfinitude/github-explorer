@@ -463,7 +463,7 @@ export function ProjectWorkspaceView({
           <section className="project-summary-grid">
             <div><small>当前阶段</small><strong>{STAGES.find(stage => stage.id === activeStage)?.label || '项目体检'}</strong></div>
             <div><small>下一步</small><strong>{overview.next_action}</strong></div>
-            <div><small>执行事实</small><strong>{overview.evidence_counts.tool_runs} 次工具 · {overview.evidence_counts.events} 个事件</strong></div>
+            <div><small>改动产出</small><strong>{overview.summary.changed_file_count ? `${overview.summary.changed_file_count} 个文件` : '尚未改动文件'}{overview.summary.process_count ? ` · ${overview.summary.process_count} 个服务` : ''}</strong></div>
             <div><small>验证</small><strong>{overview.summary.verification_count ? `${overview.summary.verification_count} 项` : '尚未验证'}</strong></div>
           </section>
           <section className="project-details" aria-label="运行详情">

@@ -1,6 +1,6 @@
 import type {
   AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
-  DefaultWorkspaceResponse, EvaluationReport, Message, Model, ObservabilityStatus, ProjectEvidence, ProjectImportResult, ProjectMatrixRow, ProjectMemory, ProjectOverview, ProjectReport, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
+  DefaultWorkspaceResponse, EvaluationReport, HookConfig, Message, Model, ObservabilityStatus, ProjectEvidence, ProjectImportResult, ProjectMatrixRow, ProjectMemory, ProjectOverview, ProjectReport, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
@@ -172,6 +172,27 @@ export const api = {
       body: JSON.stringify({ mode }),
     })
     if (!res.ok) throw new Error(`保存权限模式失败：HTTP ${res.status}`)
+  },
+
+  async getHooks(): Promise<{ events: string[]; hooks: HookConfig[] }> {
+    const res = await fetch('/api/settings/hooks')
+    if (!res.ok) throw new Error(`读取钩子配置失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ events: string[]; hooks: HookConfig[] }>
+  },
+
+  async saveHooks(hooks: HookConfig[]) {
+    const res = await fetch('/api/settings/hooks', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hooks }),
+    })
+    if (!res.ok) throw new Error(`保存钩子配置失败：HTTP ${res.status}`)
+  },
+
+  async getMcpStatus(): Promise<{ connected: boolean; servers: string[]; tools: Array<{ name: string; description?: string; server?: string }> }> {
+    const res = await fetch('/api/mcp/tools')
+    if (!res.ok) throw new Error(`读取 MCP 状态失败：HTTP ${res.status}`)
+    return res.json()
   },
 
   async setDefaultWorkspace(path: string) {
