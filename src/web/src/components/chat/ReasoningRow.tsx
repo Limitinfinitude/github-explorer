@@ -2,12 +2,14 @@ import React, { useState } from 'react'
 import { Brain, ChevronDown } from 'lucide-react'
 import type { ThinkingSegment } from '../../types'
 
-function firstLine(text: string): string {
+function firstLine(text: string | undefined): string {
+  if (typeof text !== 'string' || text.length === 0) return ''
   const newline = text.indexOf('\n')
   return newline === -1 ? text : text.slice(0, newline)
 }
 
-function latestLine(text: string): string {
+function latestLine(text: string | undefined): string {
+  if (typeof text !== 'string' || text.length === 0) return ''
   const visible = text.trimEnd()
   const newline = visible.lastIndexOf('\n')
   return newline === -1 ? visible : visible.slice(newline + 1)
@@ -18,6 +20,8 @@ export function ReasoningRow({ segments, running }: { segments: ThinkingSegment[
   const [expanded, setExpanded] = useState(false)
 
   if (segments.length === 0) return null
+  const validSegments = segments.filter(seg => typeof seg?.content === 'string' && seg.content.length > 0)
+  if (validSegments.length === 0) return null
 
   return (
     <div className={`think-row ${running ? 'is-running' : ''}`}>
@@ -30,13 +34,13 @@ export function ReasoningRow({ segments, running }: { segments: ThinkingSegment[
         <Brain size={13} />
         <span className="think-row__title">Think</span>
         <span className="think-row__summary">
-          {running ? latestLine(segments[segments.length - 1].content) : firstLine(segments[0].content)}
+          {running ? latestLine(validSegments[validSegments.length - 1].content) : firstLine(validSegments[0].content)}
         </span>
         <ChevronDown size={12} className={expanded ? 'is-open' : ''} />
       </button>
       {expanded && (
         <div className="think-row__body think-row__body--timeline">
-          {segments.map((segment, index) => (
+          {validSegments.map((segment, index) => (
             <div key={index} className="think-segment">
               <span className="think-segment__marker">第 {segment.round + 1} 轮</span>
               <div className="think-segment__content">{segment.content}</div>
