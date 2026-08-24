@@ -38,8 +38,16 @@ GitHub Explorer 不是云端 IDE，也不是只生成代码的聊天框。它的
 - 结构化文件创建、编辑、diff、ChangeSet 和最近一次撤销
 - `.venv` 准备、依赖安装、测试、构建和服务启动
 - 前台命令、后台进程、端口检查和 HTTP 就绪检查
-- 分级自动执行：普通读取和验证自动执行，高风险操作需要确认
-- 工作区边界、loopback HTTP 边界和工具参数 Schema 校验
+- 五档权限模式：confirm / auto / open / guardian（AI 审查，fail-closed）/ full（完全访问，需确认弹窗）
+- 边界硬拦截：判分脚本目录、评测结果文件和全局工具链写入（setx / npm -g / go install）在非 full 档一律拒绝
+- 工作区边界、loopback HTTP 边界、外网只读 `web_fetch`（禁内网）和工具参数 Schema 校验
+
+### 扩展机制
+
+- **生命周期钩子**：session_start / pre_tool / post_tool / session_end，命令经 stdin 收 JSON 载荷；pre_tool 退出码 2 阻断工具调用
+- **MCP 工具**：`.mcp.json` 服务器工具自动注册进 agent 工具集，任务启动时预热连接
+- **子智能体**：`spawn_subagent` 委托聚焦任务，权限范围固定不可扩大，预算强制收敛
+- **技能系统**：agentskills.io 规范，描述索引常驻提示词、正文按需加载（内置仓库速览/检索/实时搜索）
 
 ### Agent 可靠性与恢复
 
@@ -47,7 +55,8 @@ GitHub Explorer 不是云端 IDE，也不是只生成代码的聊天框。它的
 - 工具调用账本、唯一 `call_id`、失败恢复和恢复耗尽终态
 - 四阶段预算：项目体检、实现、测试、运行验收分别计数
 - 重启后将遗留任务、开放工具调用和后台进程标记为 `interrupted/orphaned`
-- 任务取消、一次性重新规划、上下文压缩和需求账本
+- 任务取消、一次性重新规划、需求账本
+- 上下文压缩：首次由 LLM 生成 Claude Code 9 节摘要（安全约束逐字保留），失败回退确定性 ContextHandoff
 
 ### 观测与开发者证据
 
@@ -210,7 +219,7 @@ git grep -n -I -E "sk-[A-Za-z0-9]|gho_[A-Za-z0-9]|Bearer [A-Za-z0-9]" -- ':!*.md
 GitHub Explorer 当前评分为 `6.8 / 10`。它已经在“GitHub 项目发现 + 本地执行 + 事实观测”这个交叉场景形成差异化，但与成熟 Harness 相比仍有差距：
 
 - 真实 OS 级沙箱和跨平台隔离还不完整；
-- 插件、Provider、Skill 的生命周期边界仍需进一步接口化；
+- 插件体系（hooks / MCP / 技能）已落地，但生命周期边界仍需进一步接口化与文档化；
 - 长任务恢复、多 Agent 协作和生态集成仍较薄；
 - 真实浏览器 E2E、发布闭环和更大规模测试矩阵尚未完成。
 
