@@ -960,6 +960,12 @@ button { cursor: pointer; }
 .activity-event-row { min-height: 25px; display: grid; grid-template-columns: 24px minmax(0, 1fr) 120px; align-items: center; gap: 8px; color: var(--text-2); font-size: 9px; }
 .activity-event-row__sequence { color: var(--muted-2); font: 8px/12px Consolas, monospace; }
 .activity-event-row strong { font-weight: 500; }
+.activity-stage-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.activity-stage-summary__item { height: 24px; padding: 0 9px; display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 5px; font-size: 10px; }
+.activity-stage-summary__item strong { color: var(--text); font-weight: 600; }
+.activity-stage-summary__item.is-failed strong { color: var(--error); }
+.activity-event-toggle { min-height: 22px; padding: 0 6px; color: var(--muted-2); background: transparent; border: 0; border-radius: 4px; font-size: 10px; }
+.activity-event-toggle:hover { color: var(--text); background: var(--hover); }
 .activity-event-row time { color: var(--muted-2); text-align: right; }
 .activity-event-row--task_failed, .activity-event-row--error { color: var(--error); }
 .activity-event-row--task_completed { color: var(--success); }

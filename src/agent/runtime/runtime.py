@@ -1465,6 +1465,7 @@ class LocalAgentRuntime:
                     "args": args,
                     "call_id": call_id,
                     "batch_id": batch_id,
+                    "stage": self._tool_stage(name),
                 })
 
             if is_resumed_tool and approval_decision is False:
@@ -1841,6 +1842,7 @@ class LocalAgentRuntime:
             "data": result.data,
             "error_kind": result.error_kind,
             "artifact": artifact,
+            "stage": self._tool_stage(name),
         }]
         summary = state["summary"]
         workspace_root = state["workspace_root"]

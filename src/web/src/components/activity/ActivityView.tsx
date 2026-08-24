@@ -123,9 +123,34 @@ const EMPTY_TRACE_FILTERS: TraceFilters = {
   to: '',
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  inspect: '体检', implement: '实施', test: '测试', run: '运行验收',
+}
+
+// 事件时间线中应隐藏的内部噪音事件（无信息量）
+const NOISE_EVENT_TYPES = new Set([
+  'thinking', 'token', 'model_request_started', 'model_request_completed',
+  'model_request_retrying', 'model_request_failed',
+])
+
+// 按 stage 聚合工具调用，形成语义阶段摘要
+function aggregateStages(events: AgentEvent[]): Array<{ stage: string; toolCount: number; failed: number }> {
+  const stages = new Map<string, { toolCount: number; failed: number }>()
+  for (const event of events) {
+    if (event.type !== 'tool_call' && event.type !== 'tool_result') continue
+    const stage = typeof event.payload.stage === 'string' ? event.payload.stage : 'implement'
+    const current = stages.get(stage) || { toolCount: 0, failed: 0 }
+    if (event.type === 'tool_call') current.toolCount += 1
+    if (event.type === 'tool_result' && event.payload.success === false) current.failed += 1
+    stages.set(stage, current)
+  }
+  return Array.from(stages.entries()).map(([stage, stats]) => ({ stage, ...stats }))
+}
+
 function TraceDetails({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<AgentTraceDetail | null>(null)
   const [loading, setLoading] = useState(false)
+  const [showRaw, setShowRaw] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -134,18 +159,32 @@ function TraceDetails({ taskId }: { taskId: string }) {
 
   if (loading) return <div className="activity-trace__detail muted">正在读取工具明细…</div>
   if (!detail) return <div className="activity-trace__detail muted">暂无明细</div>
+  const stageSummary = aggregateStages(detail.activity.events)
   return (
     <div className="activity-trace__detail">
+      {stageSummary.length > 0 && (
+        <div className="activity-stage-summary" aria-label="阶段摘要">
+          {stageSummary.map(item => (
+            <div key={item.stage} className={`activity-stage-summary__item ${item.failed > 0 ? 'is-failed' : ''}`}>
+              <strong>{STAGE_LABELS[item.stage] || item.stage}</strong>
+              <span>{item.toolCount} 次工具{item.failed > 0 ? ` · ${item.failed} 失败` : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {detail.activity.events?.length > 0 && (
-        <div className="activity-event-list" aria-label="任务事件时间线">
-          {detail.activity.events.map(event => (
+        <>
+          <button type="button" className="activity-event-toggle" onClick={() => setShowRaw(v => !v)} aria-expanded={showRaw}>
+            {showRaw ? '收起详细事件' : `显示全部 ${detail.activity.events.length} 条事件`}
+          </button>
+          {(showRaw ? detail.activity.events : detail.activity.events.filter(event => !NOISE_EVENT_TYPES.has(event.type))).map(event => (
             <div key={`${event.sequence}-${event.type}`} className={`activity-event-row activity-event-row--${event.type}`}>
               <span className="activity-event-row__sequence">{String(event.sequence).padStart(2, '0')}</span>
               <strong>{eventLabel(event)}</strong>
               <time>{formatLocalTimestamp(event.created_at)}</time>
             </div>
           ))}
-        </div>
+        </>
       )}
       {detail.activity.tool_runs.length > 0 && (
         <div className="activity-tool-list">
