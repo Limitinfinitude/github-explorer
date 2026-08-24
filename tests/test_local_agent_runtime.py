@@ -844,6 +844,9 @@ def test_runtime_compacts_model_input_but_preserves_full_task_messages(tmp_path:
 
     async def fake_llm(**kwargs):
         captured.update(kwargs)
+        if kwargs.get("system", "").startswith("CRITICAL: Respond with TEXT ONLY"):
+            # 摘要器失败 → 回退确定性 ContextHandoff（本测试验证的正是该路径）
+            raise RuntimeError("summarizer unavailable")
         return {"text": "done", "tool_uses": [], "stop_reason": "end_turn"}
 
     runtime = LocalAgentRuntime(

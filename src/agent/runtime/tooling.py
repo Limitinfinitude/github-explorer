@@ -52,6 +52,15 @@ class LocalAgentServices:
         )
 
 
+# 运行时构造后注入：spawn_subagent 等需要模型循环的工具经此访问 runtime。
+_active_runtime: "LocalAgentRuntime | None" = None
+
+
+def set_active_runtime(runtime: "LocalAgentRuntime | None") -> None:
+    global _active_runtime
+    _active_runtime = runtime
+
+
 _DESTRUCTIVE_COMMANDS = re.compile(
     r"\b(Remove-Item|rm|del|rmdir|mkfs|diskpart)\b|"
     r"^\s*format(?:\.com)?(?:\s|$)|git\s+(reset\s+--hard|clean\s+-[a-z]*f)",
@@ -265,6 +274,88 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     add("use_skill", "加载一个技能到上下文（技能正文按需加载，名称见系统提示词技能索引）", {
         "name": {"type": "string"},
     }, ["name"], ToolRisk.READ, use_skill)
+
+    # MCP 扩展工具：来自 .mcp.json 连接的外部 server。默认 EXTERNAL 风险
+    # （confirm 档需确认，auto/open/full 自动放行）；未安装 mcp 包或未连接时
+    # 静默跳过，不影响内置工具集。
+    try:
+        from agent.mcp_client import cached_mcp_tools
+
+        for mcp_tool in cached_mcp_tools():
+            tool_name = str(mcp_tool.get("name") or "")
+            server = str(mcp_tool.get("server") or "mcp")
+            if not tool_name or tool_name in registry._definitions:
+                continue
+            description = str(mcp_tool.get("description") or tool_name)
+            schema = mcp_tool.get("input_schema") or {}
+
+            async def mcp_handler(a, _tool_name=tool_name):
+                from agent.mcp_client import mcp_tool_call
+
+                payload = await mcp_tool_call(_tool_name, a)
+                if payload.get("success"):
+                    return ToolResult.ok(
+                        data={"server": payload.get("server"), "tool": _tool_name},
+                        output=str(payload.get("content") or ""),
+                    )
+                return ToolResult.fail(
+                    str(payload.get("error") or f"MCP 工具 {_tool_name} 调用失败"),
+                    error_kind="mcp_error",
+                )
+
+            registry.register(ToolDefinition(
+                name=tool_name,
+                description=f"[MCP:{server}] {description}",
+                input_schema=(
+                    schema
+                    if isinstance(schema, dict) and schema.get("type") == "object"
+                    else _schema({})
+                ),
+                risk=ToolRisk.EXTERNAL,
+                handler=mcp_handler,
+            ))
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    async def spawn_subagent(a):
+        from .subagent import run_subagent
+        from .tracing import current_tool_call_context
+
+        runtime = _active_runtime
+        if runtime is None:
+            return ToolResult.fail("子代理运行时不可用", error_kind="tool_error")
+        task = str(a.get("task") or "").strip()
+        if not task:
+            return ToolResult.fail("委托任务不能为空", error_kind="invalid_input")
+        task_id = current_tool_call_context().get("task_id", "")
+        try:
+            state = runtime._load_task(task_id) or {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_message": task,
+                "summary": {},
+            }
+        except Exception:
+            state = {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_message": task,
+                "summary": {},
+            }
+        return await run_subagent(
+            runtime,
+            state,
+            registry,
+            task,
+            [str(item) for item in (a.get("tools") or [])] or None,
+        )
+
+    add("spawn_subagent", "委托一个聚焦任务给子代理执行并返回其结论摘要。适合独立的只读调研/检索：给出明确目标与产出要求，子代理使用受限工具集并在预算内收敛", {
+        "task": {"type": "string", "description": "委托任务：目标、需要的上下文、期望产出"},
+        "tools": {"type": "array", "items": {"type": "string"}, "description": "工具白名单；缺省为只读工具集"},
+    }, ["task"], ToolRisk.PROCESS, spawn_subagent)
 
     def http_request_batch(a):
         group_id = str(a.get("group_id") or f"batch-{uuid.uuid4().hex[:12]}")

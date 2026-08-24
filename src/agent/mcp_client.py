@@ -92,7 +92,8 @@ class MCPClient:
                 {
                     "name": tool.name,
                     "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
+                    "input_schema": getattr(tool, "input_schema", None)
+                    or getattr(tool, "inputSchema", None) or {},
                     "server": name,
                 }
                 for tool in tools_result.tools
@@ -200,3 +201,30 @@ async def mcp_tool_call(tool_name: str, arguments: dict = None) -> dict:
         if result.get("error"):
             return {"success": False, "error": f"MCP 连接失败: {result['error']}"}
     return await client.call_tool(tool_name, arguments)
+
+
+def cached_mcp_tools() -> list:
+    """同步读取已连接 MCP Server 的工具缓存（未连接时返回空列表）。
+
+    agent 工具注册表是同步构建的，无法在此 await 连接；启动期由
+    ensure_mcp_connected 预连，这里只读缓存。
+    """
+    if _mcp_client is None:
+        return []
+    return _mcp_client.get_all_tools()
+
+
+async def ensure_mcp_connected() -> dict:
+    """尽力连接 MCP（供任务启动前预热，失败不阻断任务）。"""
+    try:
+        return await init_mcp()
+    except asyncio.CancelledError:
+        # wait_for 超时取消：清理半连接，避免留下僵尸 npx/stdio 进程
+        if _mcp_client is not None:
+            try:
+                await _mcp_client.disconnect()
+            except Exception:
+                pass
+        raise
+    except Exception as exc:
+        return {"connected": [], "failed": [{"name": "*", "error": str(exc)}]}

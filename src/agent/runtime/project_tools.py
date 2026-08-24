@@ -104,6 +104,10 @@ class ProjectTools:
             )
         command = f"{command_executable(Path(sys.executable))} -m venv .venv"
         result = self.runner.run(session_id, command, cwd=path, timeout=180)
+        if not result.success and not venv_python.is_file():
+            # Windows 模板复制偶发失败（文件锁/杀软扫描），重试一次；
+            # venv 对已存在目录幂等补齐，不会叠加副作用
+            result = self.runner.run(session_id, command, cwd=path, timeout=180)
         if result.success and venv_python.is_file():
             result.data["cwd"] = str(root)
             result.data["python_executable"] = str(venv_python)

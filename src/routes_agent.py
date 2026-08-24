@@ -111,6 +111,12 @@ def get_local_agent_runtime():
         except Exception:
             # 归档清理失败不应阻止服务启动
             pass
+        from agent.runtime.hooks import HookRunner, parse_hook_configs
+        from agent.runtime.tooling import set_active_runtime
+
+        def hook_config_provider():
+            return parse_hook_configs(memory.get_preference("hooks_config"))
+
         _local_agent_runtime = LocalAgentRuntime(
             services.workspaces,
             lambda session_id: build_tool_registry(session_id, services),
@@ -119,7 +125,9 @@ def get_local_agent_runtime():
             max_rounds=32,
             task_store=memory,
             context_engine=services.context,
+            hook_runner=HookRunner(hook_config_provider),
         )
+        set_active_runtime(_local_agent_runtime)
     return _local_agent_runtime
 
 
@@ -626,6 +634,33 @@ async def set_approval_mode(request: ApprovalModeUpdate):
 
     memory.set_preference("approval_mode", request.mode)
     return {"mode": request.mode}
+
+
+class HooksConfigUpdate(BaseModel):
+    hooks: list[dict]
+
+
+@router_agent.get("/api/settings/hooks")
+async def get_hooks_config():
+    from agent.memory import memory
+    from agent.runtime.hooks import HOOK_EVENTS, parse_hook_configs
+
+    configs = parse_hook_configs(memory.get_preference("hooks_config"))
+    return {
+        "events": list(HOOK_EVENTS),
+        "hooks": [config.__dict__ for config in configs],
+    }
+
+
+@router_agent.put("/api/settings/hooks")
+async def set_hooks_config(request: HooksConfigUpdate):
+    from agent.memory import memory
+    from agent.runtime.hooks import parse_hook_configs, serialize_hook_configs
+
+    configs = parse_hook_configs(request.hooks)
+    memory.set_preference("hooks_config", serialize_hook_configs(configs))
+    return {"hooks": [config.__dict__ for config in configs]}
+
 
 
 @router_agent.get("/api/agent/tasks/{task_id}/events")

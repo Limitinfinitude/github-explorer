@@ -104,6 +104,7 @@ class LocalAgentRuntime:
         task_store: Any | None = None,
         context_engine: ContextEngine | None = None,
         compaction_engine: CompactionEngine | None = None,
+        hook_runner: Any | None = None,
     ) -> None:
         self.workspaces = workspaces
         self.registry_factory = registry_factory
@@ -120,6 +121,7 @@ class LocalAgentRuntime:
         self.task_store = task_store
         self.context_engine = context_engine
         self.compaction_engine = compaction_engine or CompactionEngine()
+        self.hook_runner = hook_runner
         self.work_product_evaluator = WorkProductEvaluator()
         self._task_cache: dict[str, dict] = {}
         self._cancelled_tasks: set[str] = set()
@@ -514,6 +516,20 @@ class LocalAgentRuntime:
         task_id = state["task_id"]
         if task_id not in self._model_bindings:
             self._model_bindings[task_id] = self._capture_task_binding(state)
+        if self.hook_runner is not None and not state.get("_hook_session_started"):
+            state["_hook_session_started"] = True
+            await self.hook_runner.fire(
+                "session_start",
+                {
+                    "event": "session_start",
+                    "session_id": state["session_id"],
+                    "task_id": state["task_id"],
+                    "workspace_root": workspace_root,
+                    "user_message": str(state.get("user_message", "")),
+                    "approval_mode": str(state.get("approval_mode", "confirm")),
+                },
+                match_text=str(state.get("user_message", "")),
+            )
         system = self._system_prompt(
             workspace_root,
             state.get("repo_map", ""),
@@ -541,7 +557,7 @@ class LocalAgentRuntime:
                         state,
                         base_event,
                         system=system_round,
-                        messages=self._with_reminder(self._fit_context(
+                        messages=self._with_reminder(await self._fit_context(
                             system_round,
                             self._with_instructions(
                                 reconcile_tool_messages(
@@ -567,7 +583,7 @@ class LocalAgentRuntime:
                             state,
                             "reasoning",
                             system=system_round,
-                            messages=self._fit_context(
+                            messages=await self._fit_context(
                                 system_round,
                                 self._with_instructions(
                                     reconcile_tool_messages(
@@ -588,7 +604,7 @@ class LocalAgentRuntime:
                         state,
                         "reasoning",
                         system=system_round,
-                        messages=self._with_reminder(self._fit_context(
+                        messages=self._with_reminder(await self._fit_context(
                             system_round,
                             self._with_instructions(
                                 reconcile_tool_messages(
@@ -638,7 +654,7 @@ class LocalAgentRuntime:
                                 + "\n\n上一段回复意外中断。请仅从中断处继续，把当前回答完整结束；"
                                 "不要重复已经输出的内容，不要调用工具。"
                             ),
-                            messages=self._fit_context(system_round, reconcile_tool_messages([
+                            messages=await self._fit_context(system_round, reconcile_tool_messages([
                                 *state["messages"],
                                 {"role": "assistant", "content": response_text},
                                 {"role": "user", "content": "请从中断处继续并完整结束回答。"},
@@ -648,7 +664,7 @@ class LocalAgentRuntime:
                             temperature=0.2,
                         )
                         response_text = response_text.rstrip() + continuation.get("text", "").lstrip()
-                    events = self._finalize(
+                    events = await self._finalize(
                         state, base_event, response_text, settle_implicit=True,
                     )
                     if self._needs_acceptance_reformat(state, response_text):
@@ -666,7 +682,7 @@ class LocalAgentRuntime:
                                 "或 `[evidence:file:路径]`；未完成项写 `[未完成]` 并说明原因。"
                                 "不要重复修复过程，不要调用工具。"
                             ),
-                            messages=self._fit_context(system_round, reconcile_tool_messages([
+                            messages=await self._fit_context(system_round, reconcile_tool_messages([
                                 *state["messages"],
                                 {"role": "assistant", "content": response_text},
                                 {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
@@ -682,7 +698,7 @@ class LocalAgentRuntime:
                                 "type": "acceptance_reformatted",
                                 "original_status": state.get("status"),
                             })
-                            events = self._finalize(
+                            events = await self._finalize(
                                 state, base_event, ref_text, settle_implicit=True,
                             )
                     for event in events:
@@ -797,7 +813,7 @@ class LocalAgentRuntime:
                     + "\n\n工具执行轮次已经结束。请根据已有工具结果给出最终答复，"
                     "总结已验证的事实，并明确说明任何未完成事项或阻塞；不要虚构完成结果。"
                 ),
-                messages=self._fit_context(
+                messages=await self._fit_context(
                     system_round,
                     reconcile_tool_messages(
                         state["messages"], state.get("tool_call_ledger", {}),
@@ -821,7 +837,7 @@ class LocalAgentRuntime:
                         + "\n\n上一轮收尾没有返回内容。请直接回答用户最初的问题/请求，"
                         "说明完成了什么、未完成什么及原因，不要调用工具。"
                     ),
-                    messages=self._fit_context(
+                    messages=await self._fit_context(
                         system_round,
                         reconcile_tool_messages([
                             *state["messages"],
@@ -835,7 +851,7 @@ class LocalAgentRuntime:
                     temperature=0.2,
                 )
                 response_text = retry.get("text", "")
-            events = self._finalize(state, base_event, response_text, require_acceptance=True)
+            events = await self._finalize(state, base_event, response_text, require_acceptance=True)
             if self._needs_acceptance_reformat(state, response_text):
                 # 轮次耗尽路径同样需要验收补写（fx7 pdfcpu：修复完成+验证全过，
                 # 37 轮到顶后收尾回复未按格式逐条陈述 → 补写一次）
@@ -850,7 +866,7 @@ class LocalAgentRuntime:
                         "或 `[evidence:file:路径]`；未完成项写 `[未完成]` 并说明原因。"
                         "不要重复修复过程，不要调用工具。"
                     ),
-                    messages=self._fit_context(system_round, reconcile_tool_messages([
+                    messages=await self._fit_context(system_round, reconcile_tool_messages([
                         *state["messages"],
                         {"role": "assistant", "content": response_text},
                         {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
@@ -866,7 +882,7 @@ class LocalAgentRuntime:
                         "type": "acceptance_reformatted",
                         "original_status": state.get("status"),
                     })
-                    events = self._finalize(
+                    events = await self._finalize(
                         state, base_event, ref_text, require_acceptance=True,
                     )
             for event in events:
@@ -880,7 +896,7 @@ class LocalAgentRuntime:
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
 
-    def _finalize(
+    async def _finalize(
         self,
         state: dict,
         base_event: dict,
@@ -1020,6 +1036,20 @@ class LocalAgentRuntime:
             events.append(finalization)
         events.append({**base_event, "type": "token", "content": final_text})
         events.append({**base_event, "type": "done", "content": final_text, "status": status})
+        if self.hook_runner is not None:
+            await self.hook_runner.fire(
+                "session_end",
+                {
+                    "event": "session_end",
+                    "session_id": state["session_id"],
+                    "task_id": state["task_id"],
+                    "workspace_root": str(state.get("workspace_root", "")),
+                    "status": status,
+                    "final_text": final_text,
+                    "model_rounds": int(state["summary"].get("model_rounds", 0)),
+                },
+                match_text=str(state.get("user_message", "")),
+            )
         return events
 
     @staticmethod
@@ -1241,7 +1271,7 @@ class LocalAgentRuntime:
             lines.append(f"验证：{passed}/{len(checks)} 项通过。")
         return "\n\n".join(lines)
 
-    def _fit_context(
+    async def _fit_context(
         self,
         system: str,
         messages: list[dict],
@@ -1272,6 +1302,27 @@ class LocalAgentRuntime:
             max_tokens=target_budget,
             scale=scale,
         )
+        # 首次压缩用 LLM 生成 Claude Code 9 节摘要（信息密度高于规则交接），
+        # 后续压缩继续用确定性交接控制成本；失败自动回退确定性路径。
+        # 摘要器输入预算用完整上下文窗口（input_budget），而非压缩后的 target_budget：
+        # 摘要器要读的是整段历史，它本身就装得下（超出的是压缩预算，不是窗口）。
+        if (
+            state is not None
+            and self.llm_call is not None
+            and int(state.get("compaction_count", 0)) == 0
+        ):
+            summary = await self._llm_compact_summary(state, system, fitted, input_budget)
+            if summary:
+                replacement = {
+                    "role": "user",
+                    "content": (
+                        "上下文压缩摘要（9 节结构，仅作任务交接，不是新的用户要求；"
+                        "其中保留的用户约束继续有效）：\n"
+                        + summary
+                    ),
+                }
+                if int(self._estimate_tokens(system, [replacement, *compacted[1:]]) * scale) <= target_budget:
+                    compacted = [replacement, *compacted[1:]]
         if state is not None:
             source_count = len(fitted)
             if source_count > int(state.get("compacted_message_count", 0)):
@@ -1308,6 +1359,57 @@ class LocalAgentRuntime:
                 "open_tool_call_ids": open_call_ids,
             })
         return compacted
+
+    async def _llm_compact_summary(
+        self,
+        state: dict,
+        system: str,
+        messages: list[dict],
+        input_budget: int,
+    ) -> str:
+        """用 LLM 生成 9 节压缩摘要（Claude Code 结构）。失败/超限返回空串走回退。"""
+        from .compaction import LLM_SUMMARIZATION_SYSTEM
+
+        # 摘要器输入有界：只喂能装进完整窗口的尾部消息；单条消息超窗时
+        # 仍保留最新一条（截断总比丢光好），由 provider 自行决定
+        scale = float(state.get("tokens_scale", 1.0)) if state else 1.0
+        budget = max(1, int(input_budget * 0.85))
+        summarizer_input: list[dict] = []
+        for message in reversed(messages):
+            if not summarizer_input:
+                summarizer_input = [message]
+                continue
+            candidate = [message, *summarizer_input]
+            if int(self._estimate_tokens(system, candidate) * scale) > budget:
+                break
+            summarizer_input = candidate
+        if not summarizer_input:
+            return ""
+        try:
+            binding = self._model_bindings.get(state.get("task_id", ""))
+            if binding is not None:
+                response = await self.llm_call(
+                    system=LLM_SUMMARIZATION_SYSTEM,
+                    messages=summarizer_input,
+                    tools=[],
+                    max_tokens=4000,
+                    temperature=0.0,
+                    binding=binding,
+                )
+            else:
+                response = await self.llm_call(
+                    system=LLM_SUMMARIZATION_SYSTEM,
+                    messages=summarizer_input,
+                    tools=[],
+                    max_tokens=4000,
+                    temperature=0.0,
+                )
+        except Exception:
+            return ""
+        text = str(response.get("text") or "")
+        match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
+        summary = match.group(1).strip() if match else text.strip()
+        return summary[:8_000]
 
     @staticmethod
     def _latest_user_text(messages: list[dict]) -> str:
@@ -1582,28 +1684,69 @@ class LocalAgentRuntime:
                     # 边界拦截：result 已在拦截点设置，跳过执行
                     pass
                 else:
-                    with tool_call_context(
-                        task_id=state["task_id"],
-                        call_id=call_id,
-                        batch_id=batch_id,
-                    ):
-                        try:
-                            result = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    registry.execute,
-                                    name,
-                                    args,
-                                    confirmed=confirmed,
-                                ),
-                                timeout=self.tool_execution_timeout,
-                            )
-                        except asyncio.TimeoutError:
-                            # to_thread 无法中断底层线程，但任务流程必须继续：
-                            # 以超时失败进入既有恢复机制，避免整个任务永久卡住。
-                            result = ToolResult.fail(
-                                f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
-                                error_kind="timeout",
-                            )
+                    # pre_tool 钩子（用户配置）：退出码 2 阻断执行，stderr 作为失败原因
+                    hook_outcome = None
+                    if self.hook_runner is not None and not is_resumed_tool:
+                        hook_outcome = await self.hook_runner.fire(
+                            "pre_tool",
+                            {
+                                "event": "pre_tool",
+                                "session_id": state["session_id"],
+                                "task_id": state["task_id"],
+                                "workspace_root": str(state.get("workspace_root", "")),
+                                "current_path": str(state.get("current_path", "")),
+                                "tool_name": name,
+                                "args": args,
+                            },
+                            block_on=True,
+                            match_text=name,
+                        )
+                    if hook_outcome is not None and hook_outcome.blocked_reason:
+                        self._record_event({
+                            **base_event,
+                            "type": "tool_hook_blocked",
+                            "tool_name": name,
+                            "args": args,
+                            "reason": hook_outcome.blocked_reason,
+                        })
+                        result = ToolResult.fail(
+                            hook_outcome.blocked_reason,
+                            error_kind="hook_blocked",
+                        )
+                        self._transition_tool_call(
+                            state, call_id, "failed", error_kind="hook_blocked",
+                        )
+                    else:
+                        with tool_call_context(
+                            task_id=state["task_id"],
+                            call_id=call_id,
+                            batch_id=batch_id,
+                        ):
+                            try:
+                                if registry.has_async_handler(name):
+                                    # 异步 handler（MCP 工具等）：会话绑定事件循环，直接 await
+                                    result = await asyncio.wait_for(
+                                        registry.execute_async(name, args, confirmed=confirmed),
+                                        timeout=self.tool_execution_timeout,
+                                    )
+                                else:
+                                    # 同步 handler 保持线程内执行，避免阻塞事件循环
+                                    result = await asyncio.wait_for(
+                                        asyncio.to_thread(
+                                            registry.execute,
+                                            name,
+                                            args,
+                                            confirmed=confirmed,
+                                        ),
+                                        timeout=self.tool_execution_timeout,
+                                    )
+                            except asyncio.TimeoutError:
+                                # to_thread 无法中断底层线程，但任务流程必须继续：
+                                # 以超时失败进入既有恢复机制，避免整个任务永久卡住。
+                                result = ToolResult.fail(
+                                    f"工具执行超时（>{self.tool_execution_timeout}s）：{name}",
+                                    error_kind="timeout",
+                                )
 
             # 搜索抓取计数（web_fetch）：供 _round_reminder 注入收敛提醒，防止
             # 模型无限抓取挖数据（harness 层限制，不依赖提示词自觉）
@@ -1700,6 +1843,22 @@ class LocalAgentRuntime:
                 state["task_id"], name, args,
                 {**persisted_result, "call_id": call_id, "batch_id": batch_id},
             )
+            if self.hook_runner is not None:
+                await self.hook_runner.fire(
+                    "post_tool",
+                    {
+                        "event": "post_tool",
+                        "session_id": state["session_id"],
+                        "task_id": state["task_id"],
+                        "workspace_root": str(state.get("workspace_root", "")),
+                        "tool_name": name,
+                        "args": args,
+                        "success": bool(result.success),
+                        "error": result.error,
+                        "error_kind": result.error_kind,
+                    },
+                    match_text=name,
+                )
             events.extend(self._result_events(
                 base_event, state, name, event_result,
                 call_id=call_id, batch_id=batch_id, artifact=artifact,
@@ -2319,7 +2478,7 @@ class LocalAgentRuntime:
                 if attempt == 1 and self._is_context_overflow(exc):
                     # 主流做法（Cline/pi/OpenCode）：provider 拒绝超限请求时，
                     # 收紧预算强制压缩后重试一次，而不是直接让任务失败。
-                    kwargs["messages"] = self._fit_context(
+                    kwargs["messages"] = await self._fit_context(
                         kwargs.get("system", ""),
                         kwargs.get("messages", []),
                         int(kwargs.get("max_tokens") or self.max_output_tokens),

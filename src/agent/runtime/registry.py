@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import inspect
 from typing import Callable
 
 from .models import ToolResult, ToolRisk
@@ -88,10 +89,15 @@ class ToolRegistry:
             return ""
         return f"正确参数：{'; '.join(parts)}。最小示例：{example}"
 
-    def execute(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
+    def has_async_handler(self, name: str) -> bool:
+        definition = self._definitions.get(name)
+        return definition is not None and inspect.iscoroutinefunction(definition.handler)
+
+    def _precheck(self, name: str, args: dict, confirmed: bool) -> tuple[ToolDefinition | None, ToolResult | None]:
+        """校验 + 权限门，返回 (definition, None) 或 (None, 失败结果)。"""
         definition = self._definitions.get(name)
         if definition is None:
-            return ToolResult.fail(f"未知工具: {name}", error_kind="unknown_tool")
+            return None, ToolResult.fail(f"未知工具: {name}", error_kind="unknown_tool")
 
         validation_issue = schema_issue(args, definition.input_schema)
         if validation_issue:
@@ -101,7 +107,7 @@ class ToolRegistry:
             )
             if hint:
                 message = f"{message}。{hint}"
-            return ToolResult.fail(
+            return None, ToolResult.fail(
                 message,
                 error_kind="invalid_input",
                 data={"validation": validation_issue.to_dict()},
@@ -109,19 +115,15 @@ class ToolRegistry:
 
         risk = definition.risk_resolver(args) if definition.risk_resolver else definition.risk
         if self._permission_gate.requires_confirmation(risk) and not confirmed:
-            return ToolResult(
+            return None, ToolResult(
                 success=False,
                 requires_confirmation=True,
                 confirmation_reason=self._permission_gate.reason(risk, name),
                 error_kind="permission_denied",
             )
+        return definition, None
 
-        try:
-            metadata = {**self._trace_metadata(), **current_tool_call_context()}
-            with tool_span(name, args, metadata):
-                result = definition.handler(args)
-        except Exception as exc:
-            return ToolResult.fail(str(exc), error_kind="tool_error")
+    def _postcheck(self, name: str, result) -> ToolResult:
         if not isinstance(result, ToolResult):
             return ToolResult.fail(f"工具 {name} 返回了无效结果", error_kind="invalid_result")
         result_error = result.validation_error()
@@ -133,3 +135,32 @@ class ToolRegistry:
         if not result.success and result.error_kind is None:
             result.error_kind = "tool_error"
         return result
+
+    def execute(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
+        """同步执行：适用于 handler 为普通函数的工具（保持既有契约不变）。"""
+        definition, issue = self._precheck(name, args, confirmed)
+        if issue is not None:
+            return issue
+        try:
+            metadata = {**self._trace_metadata(), **current_tool_call_context()}
+            with tool_span(name, args, metadata):
+                result = definition.handler(args)
+        except Exception as exc:
+            return ToolResult.fail(str(exc), error_kind="tool_error")
+        return self._postcheck(name, result)
+
+    async def execute_async(self, name: str, args: dict, *, confirmed: bool = False) -> ToolResult:
+        """异步执行：handler 是协程函数时使用（如 MCP 工具），
+        必须在调用方事件循环上运行（MCP 会话绑定该循环）。"""
+        definition, issue = self._precheck(name, args, confirmed)
+        if issue is not None:
+            return issue
+        try:
+            metadata = {**self._trace_metadata(), **current_tool_call_context()}
+            with tool_span(name, args, metadata):
+                result = definition.handler(args)
+                if inspect.isawaitable(result):
+                    result = await result
+        except Exception as exc:
+            return ToolResult.fail(str(exc), error_kind="tool_error")
+        return self._postcheck(name, result)
