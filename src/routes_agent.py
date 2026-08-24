@@ -73,6 +73,10 @@ class ProjectImportRequest(BaseModel):
     workspace: str
 
 
+class GithubImportRequest(BaseModel):
+    url: str
+
+
 class ProjectMemoriesClearRequest(BaseModel):
     workspace: str
 
@@ -882,13 +886,8 @@ async def list_agent_traces(
 
 
 def _project_task_states(memory, limit: int = 500):
-    states = []
-    for trace in memory.list_agent_traces(limit):
-        state = memory.get_agent_task(trace["task_id"])
-        if state is None:
-            continue
-        states.append({**state, "created_at": trace.get("created_at"), "updated_at": trace.get("updated_at")})
-    return states
+    # 轻量画像：SQL 层 json_extract 只取矩阵/反查字段（大库 1s → 0.3s）
+    return memory.list_task_profiles(limit)
 
 
 def _resolve_project_task(memory, project_id: str):
@@ -928,6 +927,47 @@ async def list_project_workspaces():
     return {"projects": build_project_summary(_project_task_states(memory))}
 
 
+@router_agent.get("/api/projects/overviews")
+async def list_project_overviews():
+    """项目矩阵：所有项目的轻量状态，一次返回（供工作台矩阵视图）。
+
+    只从 task state 提取（stage 推断只依赖 summary，与 activity 等价），
+    不构建完整 overview，保证 60+ 项目也在 1s 内返回。
+    """
+    from agent.memory import memory
+    from agent.runtime.project_projection import _project_message, _stage_for_task, _stage_status, project_id_for_workspace
+
+    tasks = _project_task_states(memory)
+    rows = []
+    for state in tasks:
+        root = str(state.get("workspace_root") or "")
+        if not root:
+            continue
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        verification = summary.get("verification") if isinstance(summary.get("verification"), list) else []
+        status = str(state.get("status") or "")
+        rows.append({
+            "project_id": project_id_for_workspace(root),
+            "workspace_root": root,
+            "stage": _stage_for_task(state, {}),
+            "stage_status": _stage_status(state),
+            "message": _project_message(state, root),
+            "status": status,
+            "failed": status == "failed",
+            "verification_count": len(verification),
+            "updated_at": state.get("updated_at") or "",
+        })
+    # 同一项目多个任务取最新一条，按更新时间倒序
+    seen: set[str] = set()
+    deduped = []
+    for row in sorted(rows, key=lambda item: str(item["updated_at"]), reverse=True):
+        if row["project_id"] in seen:
+            continue
+        seen.add(row["project_id"])
+        deduped.append(row)
+    return {"projects": deduped}
+
+
 @router_agent.get("/api/projects/{project_id}/overview")
 async def get_project_overview(project_id: str):
     """Read-only project journey summary backed by persisted agent facts."""
@@ -938,12 +978,13 @@ async def get_project_overview(project_id: str):
     task_id = task.get("task_id") if task else None
     activity = memory.get_agent_task_activity(task_id) if task_id else {}
     workspace = memory.get_workspace_state(task.get("session_id", "")) if task else None
+    # 不传全量 traces：list_agent_traces(500) 逐条计算 metrics 是主要耗时，
+    # overview 只用它匹配一条旧兼容 trace（前端未使用该字段）
     return build_project_overview(
         project_id=project_id,
         workspace=workspace,
         task=task,
         activity=activity,
-        traces=memory.list_agent_traces(500),
     )
 
 
@@ -1106,6 +1147,63 @@ async def import_project(request: ProjectImportRequest):
 
     session_id = project_session_id_for_workspace(str(path))
     workspace, _ = resolve_agent_workspace(session_id, str(path))
+    project_id = project_id_for_workspace(str(workspace.root))
+    try:
+        task_id = get_agent_task_supervisor().start(
+            session_id,
+            project_action_prompt("inspect"),
+            model_context={
+                "id": get_model(),
+                "protocol": get_protocol(),
+                "base_url": os.environ.get("LLM_BASE_URL", ""),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "session_id": session_id,
+        "task_id": task_id,
+        "workspace": str(workspace.root),
+        "status": "pending",
+    }
+
+
+@router_agent.post("/api/projects/import-github", status_code=202)
+async def import_github_project(request: GithubImportRequest):
+    """克隆 GitHub 仓库到默认工作区并启动项目体检（探索页一键带回）。"""
+    import subprocess
+
+    from agent.llm import get_model, get_protocol
+    from agent.memory import memory
+    from agent.runtime.project_projection import (
+        project_action_prompt,
+        project_id_for_workspace,
+        project_session_id_for_workspace,
+    )
+
+    url = str(request.url or "").strip()
+    if not url.startswith(("https://", "http://", "git@")):
+        raise HTTPException(status_code=400, detail="仓库地址必须使用 http(s) 或 git@ 格式")
+    default_root = memory.get_preference("default_workspace_root") or str(
+        Path(__file__).resolve().parent.parent / "cloned_repos"
+    )
+    name = (url.rstrip("/").split("/")[-1] or "repo").removesuffix(".git")
+    target = Path(default_root) / name
+    if not (target.is_dir() and any(target.iterdir())):
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            proc = subprocess.run(
+                ["git", "clone", "--depth", "1", "--", url, str(target)],
+                capture_output=True, text=True, timeout=600,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise HTTPException(status_code=400, detail=f"克隆失败: {exc}") from exc
+        if proc.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"克隆失败: {(proc.stderr or proc.stdout)[-200:]}")
+    # 注册项目并启动体检（复用本地导入流程）
+    session_id = project_session_id_for_workspace(str(target))
+    workspace, _ = resolve_agent_workspace(session_id, str(target))
     project_id = project_id_for_workspace(str(workspace.root))
     try:
         task_id = get_agent_task_supervisor().start(

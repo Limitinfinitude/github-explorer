@@ -1391,6 +1391,65 @@ class Memory:
             ],
         }
 
+    def list_task_profiles(self, limit: int = 500) -> List[Dict]:
+        """轻量任务画像：SQL 层 json_extract 只取矩阵/反查所需字段，
+        不传输完整 state_json（大库可快 3-4 倍）。"""
+        rows = self.conn.execute(
+            """SELECT task_id, session_id, created_at, updated_at,
+                      json_extract(state_json, '$.workspace_root'),
+                      json_extract(state_json, '$.status'),
+                      json_extract(state_json, '$.user_message'),
+                      json_extract(state_json, '$.summary')
+               FROM agent_tasks
+               ORDER BY updated_at DESC, rowid DESC LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+        profiles = []
+        for task_id, session_id, created_at, updated_at, workspace_root, status, user_message, summary_json in rows:
+            summary = {}
+            if summary_json:
+                try:
+                    parsed = json.loads(summary_json)
+                    if isinstance(parsed, dict):
+                        summary = parsed
+                except (json.JSONDecodeError, TypeError):
+                    summary = {}
+            profiles.append({
+                "task_id": task_id,
+                "session_id": session_id or "",
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "workspace_root": workspace_root or "",
+                "status": status or "",
+                "user_message": user_message or "",
+                "summary": summary,
+            })
+        return profiles
+
+    def list_task_states(self, limit: int = 500) -> List[Dict]:
+        """轻量全量任务状态：一次 SQL 读取原始 state（不计算 metrics），
+        供项目矩阵/反查等需要遍历全表的场景（比 list_agent_traces 快一个量级）。"""
+        rows = self.conn.execute(
+            """SELECT task_id, session_id, state_json, created_at, updated_at
+               FROM agent_tasks
+               ORDER BY updated_at DESC, rowid DESC LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+        states = []
+        for task_id, session_id, state_json, created_at, updated_at in rows:
+            try:
+                state = json.loads(state_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(state, dict):
+                continue
+            state.setdefault("task_id", task_id)
+            state.setdefault("session_id", session_id)
+            state.setdefault("created_at", created_at)
+            state.setdefault("updated_at", updated_at)
+            states.append(state)
+        return states
+
     def list_agent_traces(
         self,
         limit: int = 50,

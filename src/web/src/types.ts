@@ -322,6 +322,20 @@ export interface ProjectSummary {
   updated_at?: string
 }
 
+/** 项目矩阵行：所有项目的轻量状态（工作台矩阵视图） */
+export interface ProjectMatrixRow {
+  project_id: string
+  workspace_root: string
+  stage: string
+  stage_status: string
+  next_action: string
+  message: string
+  status: string
+  failed: boolean
+  verification_count: number
+  updated_at: string
+}
+
 export interface ProjectFailurePattern {
   tool_name: string
   error: string

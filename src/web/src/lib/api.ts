@@ -1,6 +1,6 @@
 import type {
   AgentAcceptanceItem, AgentProcess, AgentTrace, AgentTraceDetail, CustomModelInput,
-  DefaultWorkspaceResponse, EvaluationReport, Message, Model, ObservabilityStatus, ProjectEvidence, ProjectImportResult, ProjectMemory, ProjectOverview, ProjectReport, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
+  DefaultWorkspaceResponse, EvaluationReport, Message, Model, ObservabilityStatus, ProjectEvidence, ProjectImportResult, ProjectMatrixRow, ProjectMemory, ProjectOverview, ProjectReport, ProjectSummary, Repo, SSEEvent, WorkspaceResponse,
 } from '../types'
 import type { CanonicalHistoryRow } from './chatHistory'
 import type { ModelDiscoveryResult, ProbeResult } from './modelProbe'
@@ -236,6 +236,26 @@ export const api = {
     if (!res.ok) throw new Error(`读取项目列表失败：HTTP ${res.status}`)
     const data = await res.json() as { projects?: ProjectSummary[] }
     return data.projects ?? []
+  },
+
+  async getProjectOverviews(): Promise<ProjectMatrixRow[]> {
+    const res = await fetch('/api/projects/overviews')
+    if (!res.ok) throw new Error(`读取项目矩阵失败：HTTP ${res.status}`)
+    const data = await res.json() as { projects?: ProjectMatrixRow[] }
+    return data.projects ?? []
+  },
+
+  async importGithub(url: string): Promise<ProjectImportResult> {
+    const res = await fetch('/api/projects/import-github', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null) as { detail?: string } | null
+      throw new Error(detail?.detail || `导入仓库失败：HTTP ${res.status}`)
+    }
+    return res.json()
   },
 
   async getProjectEvidence(projectId: string): Promise<ProjectEvidence> {

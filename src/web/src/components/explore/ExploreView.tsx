@@ -1,18 +1,26 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Clock3, ExternalLink, GitFork, RefreshCw, Search, SlidersHorizontal, Star, X } from 'lucide-react'
+import { Check, Clock3, Download, ExternalLink, GitFork, RefreshCw, Search, SlidersHorizontal, Star, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { Repo } from '../../types'
 
 const LANGS = ['', 'Python', 'TypeScript', 'Go', 'Rust', 'Java']
 const PERIODS = [{ label: '今日', value: 1 }, { label: '本周', value: 7 }, { label: '本月', value: 30 }]
 
-function RepoCard({ repo }: { repo: Repo }) {
+// 会话级结果缓存：切换视图再回来不重复拉取（key = 模式|筛选|查询）
+const exploreCache = new Map<string, Repo[]>()
+
+function cacheKey(mode: string, period: number, lang: string, query: string) {
+  return `${mode}|${period}|${lang}|${query}`
+}
+
+function RepoCard({ repo, isLocal, onBring }: { repo: Repo; isLocal: boolean; onBring: (repo: Repo) => void }) {
   const href = repo.html_url || repo.url || '#'
   return (
     <article className="explore-repo">
       <div className="explore-repo__topline">
         <span className="explore-repo__rank">REPO</span>
         {repo.trending_period && <span className="explore-repo__period">{repo.trending_period}</span>}
+        {isLocal && <span className="explore-repo__local"><Check size={11} />已导入</span>}
       </div>
       <a href={href} target="_blank" rel="noreferrer" className="explore-repo__name">
         {repo.full_name}<ExternalLink size={13} />
@@ -29,6 +37,11 @@ function RepoCard({ repo }: { repo: Repo }) {
           {(repo.topics ?? []).slice(0, 4).map(topic => <span key={topic}>{topic}</span>)}
         </div>
       )}
+      {!isLocal && (
+        <button type="button" className="explore-repo__bring" onClick={() => onBring(repo)}>
+          <Download size={13} />带回工作区并体检
+        </button>
+      )}
     </article>
   )
 }
@@ -41,14 +54,53 @@ export function ExploreView() {
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [mode, setMode] = useState<'trending' | 'search'>('trending')
+  const [localRepos, setLocalRepos] = useState<Set<string>>(new Set())
+  const [bringBusy, setBringBusy] = useState('')
+  const [bringMessage, setBringMessage] = useState('')
 
-  const loadTrending = useCallback(async () => {
+  // 本机已导入项目名集合（用于卡片显示「已导入」状态）
+  useEffect(() => {
+    api.getProjects()
+      .then(projects => setLocalRepos(new Set(projects.map(project => {
+        const parts = project.workspace_root.replace(/\\/g, '/').split('/')
+        return parts[parts.length - 1] || ''
+      }).filter(Boolean))))
+      .catch(() => {})
+  }, [])
+
+  async function bringBack(repo: Repo) {
+    const url = repo.html_url || repo.url || ''
+    if (!url || bringBusy) return
+    setBringBusy(repo.full_name); setBringMessage('')
+    try {
+      await api.importGithub(url)
+      const name = repo.full_name.split('/').pop() || ''
+      setBringMessage(`「${name}」已克隆到工作区，体检已启动。可到项目工作台查看。`)
+      setLocalRepos(current => new Set(current).add(name))
+    } catch (err) {
+      setBringMessage(err instanceof Error ? err.message : '导入失败')
+    } finally {
+      setBringBusy('')
+    }
+  }
+
+  const loadTrending = useCallback(async (force = false) => {
+    const key = cacheKey(mode, period, lang, '')
+    const cached = exploreCache.get(key)
+    if (cached && !force) {
+      setRepos(cached)
+      setError('')
+      return
+    }
     setLoading(true)
     setError('')
-    try { setRepos(await api.getTrending(period, lang)) }
-    catch (err) { setRepos([]); setError(err instanceof Error ? err.message : '热榜暂时不可用') }
+    try {
+      const next = await api.getTrending(period, lang)
+      exploreCache.set(key, next)
+      setRepos(next)
+    } catch (err) { setRepos([]); setError(err instanceof Error ? err.message : '热榜暂时不可用') }
     finally { setLoading(false) }
-  }, [lang, period])
+  }, [lang, period, mode])
 
   useEffect(() => {
     if (mode === 'trending') void loadTrending()
@@ -59,10 +111,17 @@ export function ExploreView() {
     const nextQuery = query.trim()
     if (!nextQuery) return
     setMode('search')
+    const key = cacheKey('search', period, lang, nextQuery)
+    const cached = exploreCache.get(key)
+    if (cached) {
+      setRepos(cached)
+      setError('')
+      return
+    }
     setLoading(true)
     setError('')
     api.searchRepos(nextQuery, lang)
-      .then(setRepos)
+      .then(next => { exploreCache.set(key, next); setRepos(next) })
       .catch(err => { setRepos([]); setError(err instanceof Error ? err.message : '搜索暂时不可用') })
       .finally(() => setLoading(false))
   }
@@ -114,13 +173,15 @@ export function ExploreView() {
         {loading ? (
           <div className="explore-grid">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="explore-skeleton" />)}</div>
         ) : error ? (
-          <div className="explore-state explore-state--error"><strong>暂时无法读取 GitHub</strong><span>{error}</span><button type="button" onClick={() => void loadTrending()}><RefreshCw size={14} />重试</button></div>
+          <div className="explore-state explore-state--error"><strong>暂时无法读取 GitHub</strong><span>{error}</span><button type="button" onClick={() => void loadTrending(true)}><RefreshCw size={14} />重试</button></div>
         ) : repos.length === 0 ? (
           <div className="explore-state"><strong>{mode === 'search' ? '没有匹配结果' : '暂无趋势数据'}</strong><span>{mode === 'search' ? '换一个关键词或移除语言筛选试试。' : '稍后刷新，或切换语言范围。'}</span></div>
         ) : (
-          <div className="explore-grid">{repos.map(repo => <RepoCard key={repo.full_name} repo={repo} />)}</div>
+          <div className="explore-grid">{repos.map(repo => <RepoCard key={repo.full_name} repo={repo} isLocal={localRepos.has(repo.full_name.split('/').pop() || '')} onBring={bringBack} />)}</div>
         )}
       </section>
+      {bringBusy && <div className="explore-bring"><span className="explore-bring__spinner" />正在克隆 {bringBusy} 并启动体检…</div>}
+      {bringMessage && <div className="explore-bring explore-bring--done">{bringMessage}</div>}
     </div>
   )
 }

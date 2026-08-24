@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, BookMarked, BookOpen, Check, ChevronDown, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Upload, Waypoints } from 'lucide-react'
+import { Activity, BookMarked, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Upload, Waypoints } from 'lucide-react'
 import { api } from '../../lib/api'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
 import { processIdentityLabel, qualityState, terminalReasonLabel } from '../../lib/projectInsights'
-import type { ProjectEvidence, ProjectEvidenceFilter, ProjectMemory, ProjectOverview, ProjectSummary } from '../../types'
+import type { ProjectEvidence, ProjectEvidenceFilter, ProjectMatrixRow, ProjectMemory, ProjectOverview, ProjectSummary } from '../../types'
 
 const STAGES = [
   { id: 'inspect', label: '项目体检', icon: Search },
@@ -16,6 +16,10 @@ const STAGES = [
 ]
 
 const LIVE_STATUSES = new Set(['running', 'waiting_approval', 'pending'])
+
+// 会话级缓存：矩阵与项目详情（切换视图/返回不再重复拉取）
+let sharedMatrix: ProjectMatrixRow[] | null = null
+let sharedOverviews = new Map<string, ProjectOverview>()
 
 function statusLabel(status: string) {
   return ({ completed: '已完成', incomplete: '未完成', failed: '失败', waiting_approval: '等待确认', running: '进行中', not_started: '未开始', pending: '排队中' } as Record<string, string>)[status] || status
@@ -236,6 +240,8 @@ export function ProjectWorkspaceView({
   onOpenProjectConversation: (sessionId: string, title: string, userMessage?: string, project?: { projectId: string; workspace: string }) => void
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [matrix, setMatrix] = useState<ProjectMatrixRow[] | null>(null)
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [projectId, setProjectId] = useState('')
   const [overview, setOverview] = useState<ProjectOverview | null>(null)
   const [loading, setLoading] = useState(true)
@@ -245,22 +251,72 @@ export function ProjectWorkspaceView({
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [exporting, setExporting] = useState(false)
+  const [showDetails, setShowDetails] = useState(false)
   const [importPath, setImportPath] = useState('')
   const [importing, setImporting] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
 
+  async function refreshMatrix(force = false) {
+    // 有缓存先直接显示，后台静默刷新（切换视图回来秒开）
+    if (!force && sharedMatrix) {
+      setMatrix(sharedMatrix)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
+    setError('')
+    try {
+      const next = await api.getProjectOverviews()
+      sharedMatrix = next
+      setMatrix(next)
+      setProjects(await api.getProjects())
+      setLastUpdated(Date.now())
+    } catch (err) {
+      if (!sharedMatrix) setError(err instanceof Error ? err.message : '读取项目工作台失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void refreshMatrix() }, [])
+
   async function refresh() {
+    if (selectedProjectId) {
+      setLoading(true); setError('')
+      try {
+        const next = await api.getProjectOverview(selectedProjectId)
+        sharedOverviews.set(selectedProjectId, next)
+        setOverview(next); setLastUpdated(Date.now())
+      } catch (err) { setError(err instanceof Error ? err.message : '读取项目失败') } finally { setLoading(false) }
+      return
+    }
+    await refreshMatrix(true)
+  }
+
+  async function openProject(id: string) {
+    setSelectedProjectId(id)
+    const cached = sharedOverviews.get(id)
+    if (cached) {
+      setProjectId(id)
+      setOverview(cached)
+      setLoading(false)
+      setError('')
+      return
+    }
     setLoading(true); setError('')
     try {
-      const next = await api.getProjects()
-      setProjects(next)
-      const selected = next.some(project => project.project_id === projectId) ? projectId : (next[0]?.project_id || '')
-      setProjectId(selected)
-      setOverview(selected ? await api.getProjectOverview(selected) : null)
+      const next = await api.getProjectOverview(id)
+      sharedOverviews.set(id, next)
+      setProjectId(id)
+      setOverview(next)
       setLastUpdated(Date.now())
-    } catch (err) { setError(err instanceof Error ? err.message : '读取项目工作台失败') } finally { setLoading(false) }
+    } catch (err) { setError(err instanceof Error ? err.message : '读取项目失败') } finally { setLoading(false) }
   }
-  useEffect(() => { void refresh() }, [])
+
+  function backToMatrix() {
+    setSelectedProjectId(null)
+    setOverview(null)
+    void refreshMatrix()
+  }
 
   // 实时轮询：选中项目有非终态任务时每 3 秒刷新一次概览，终态自动停止
   useEffect(() => {
@@ -269,6 +325,7 @@ export function ProjectWorkspaceView({
       setRefreshing(true)
       try {
         const next = await api.getProjectOverview(projectId)
+        sharedOverviews.set(projectId, next)
         setOverview(next)
         setLastUpdated(Date.now())
       } catch {
@@ -326,7 +383,7 @@ export function ProjectWorkspaceView({
     try {
       const result = await api.importProject(trimmed)
       setImportPath('')
-      await refresh()
+      await refreshMatrix()
       const name = result.workspace.split(/[\\/]/).filter(Boolean).pop() || '项目'
       onOpenProjectConversation(result.session_id, `${name} 项目`, '项目体检已启动', {
         projectId: result.project_id,
@@ -337,13 +394,6 @@ export function ProjectWorkspaceView({
     } finally {
       setImporting(false)
     }
-  }
-
-  function selectProject(id: string) {
-    setProjectId(id); setLoading(true)
-    api.getProjectOverview(id).then(next => { setOverview(next); setLastUpdated(Date.now()) })
-      .catch(err => setError(err instanceof Error ? err.message : '读取项目失败'))
-      .finally(() => setLoading(false))
   }
 
   return (
@@ -359,8 +409,8 @@ export function ProjectWorkspaceView({
           <button type="button" className="icon-button" onClick={() => void refresh()} title="刷新项目状态" aria-label="刷新项目状态"><RefreshCw size={15} className={refreshing ? 'is-spinning' : ''} /></button>
         </div>
       </header>
-      {lastUpdated && overview && <div className="project-workspace__updated"><Clock size={11} /> 更新于 {new Date(lastUpdated).toLocaleTimeString()}</div>}
-      {loading ? <div className="project-state">正在读取最近项目…</div> : error && !overview ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : !overview ? (
+      {lastUpdated && <div className="project-workspace__updated"><Clock size={11} /> 更新于 {new Date(lastUpdated).toLocaleTimeString()}</div>}
+      {loading ? <div className="project-state">正在读取项目…</div> : error && !matrix ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : !matrix || matrix.length === 0 ? (
         <div className="project-import">
           <div className="project-import__icon"><FolderOpen size={20} /></div>
           <strong>导入一个本地项目</strong>
@@ -382,12 +432,19 @@ export function ProjectWorkspaceView({
           <small>也可以在设置中配置「默认工作目录」，或先在对话里导入 GitHub 仓库。</small>
           {error && <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div>}
         </div>
-      ) : (
+      ) : selectedProjectId && overview ? (
         <>
-          {projects.length > 1 && <label className="project-picker"><span>当前项目</span><select value={projectId} onChange={event => selectProject(event.target.value)}>{projects.map(project => <option key={project.project_id} value={project.project_id}>{project.workspace_root}</option>)}</select></label>}
+          <div className="project-detail-nav">
+            <button type="button" className="project-back" onClick={backToMatrix}><ChevronLeft size={14} />返回项目矩阵</button>
+            {projects.length > 1 && <label className="project-picker"><span>当前项目</span><select value={projectId} onChange={event => void openProject(event.target.value)}>{projects.map(project => <option key={project.project_id} value={project.project_id}>{project.workspace_root}</option>)}</select></label>}
+          </div>
           <section className="project-hero">
-            <div className="project-hero__icon"><GitBranch size={18} /></div>
-            <div className="project-hero__main"><strong>{overview.summary.message}</strong><code>{overview.workspace_root || '工作区尚未绑定'}</code></div>
+            <div className="project-hero__icon"><GitBranch size={20} /></div>
+            <div className="project-hero__main">
+              <h2>{projectTitle}</h2>
+              <p>{overview.summary.message}</p>
+              <code>{overview.workspace_root || '工作区尚未绑定'}</code>
+            </div>
             <span className={`project-status project-status--${overview.stage_status}`}>{statusLabel(overview.stage_status)}</span>
             <button type="button" className="project-open-chat" onClick={() => onOpenProjectConversation(overview.project_session_id, `${projectTitle} 项目`, undefined, { projectId: overview.project_id, workspace: overview.workspace_root })}><MessageSquare size={14} />打开项目对话</button>
           </section>
@@ -409,28 +466,55 @@ export function ProjectWorkspaceView({
             <div><small>执行事实</small><strong>{overview.evidence_counts.tool_runs} 次工具 · {overview.evidence_counts.events} 个事件</strong></div>
             <div><small>验证</small><strong>{overview.summary.verification_count ? `${overview.summary.verification_count} 项` : '尚未验证'}</strong></div>
           </section>
-          <section className="project-trust-strip" aria-label="运行与可信度">
-            <div className="project-trust-strip__heading"><Waypoints size={15} /><span>运行与可信度</span></div>
-            <div><small>服务身份</small><strong>{activeProcess ? processIdentityLabel(activeProcess) : '尚未启动服务'}</strong></div>
-            <div><small>作品完成度</small><strong className={`project-trust--${quality?.tone || 'neutral'}`}>{quality?.label || '等待执行事实'}</strong></div>
-            <div><small>本轮结束原因</small><strong>{terminalReasonLabel(overview.quality_metrics.terminal_reason)}</strong></div>
-            <div><small>验收清单</small><strong>{overview.quality_metrics.acceptance_total ? `${overview.quality_metrics.acceptance_passed_count}/${overview.quality_metrics.acceptance_total} 项通过` : '暂无验收清单'}</strong></div>
-            <div><small>阶段预算</small><strong>{Object.values(overview.stage_budgets).reduce((sum, item) => sum + item.used, 0)} 次操作</strong></div>
-            <div><small>模型成本</small><strong>{overview.quality_metrics.model_rounds} 轮 · {overview.quality_metrics.total_tokens.toLocaleString()} tokens</strong></div>
-            <div className="project-budget-track" aria-label="阶段预算明细">
-              {Object.entries(overview.stage_budgets).map(([stage, budget]) => (
-                <span key={stage} className={budget.status === 'exhausted' ? 'is-exhausted' : ''}>
-                  <small>{BUDGET_LABELS[stage] || stage}</small>
-                  <b>{budget.used}/{budget.limit}</b>
-                </span>
-              ))}
-            </div>
+          <section className="project-details" aria-label="运行详情">
+            <button type="button" className="project-details__toggle" onClick={() => setShowDetails(v => !v)} aria-expanded={showDetails}>
+              <Waypoints size={14} /><span>运行详情</span><small>服务 / 完成度 / 验收 / 预算 / 成本</small><ChevronDown size={14} className={showDetails ? 'is-open' : ''} />
+            </button>
+            {showDetails && (
+              <div className="project-trust-strip" aria-label="运行与可信度">
+                <div><small>服务身份</small><strong>{activeProcess ? processIdentityLabel(activeProcess) : '尚未启动服务'}</strong></div>
+                <div><small>作品完成度</small><strong className={`project-trust--${quality?.tone || 'neutral'}`}>{quality?.label || '等待执行事实'}</strong></div>
+                <div><small>本轮结束原因</small><strong>{terminalReasonLabel(overview.quality_metrics.terminal_reason)}</strong></div>
+                <div><small>验收清单</small><strong>{overview.quality_metrics.acceptance_total ? `${overview.quality_metrics.acceptance_passed_count}/${overview.quality_metrics.acceptance_total} 项通过` : '暂无验收清单'}</strong></div>
+                <div><small>阶段预算</small><strong>{Object.values(overview.stage_budgets).reduce((sum, item) => sum + item.used, 0)} 次操作</strong></div>
+                <div><small>模型成本</small><strong>{overview.quality_metrics.model_rounds} 轮 · {overview.quality_metrics.total_tokens.toLocaleString()} tokens</strong></div>
+                <div className="project-budget-track" aria-label="阶段预算明细">
+                  {Object.entries(overview.stage_budgets).map(([stage, budget]) => (
+                    <span key={stage} className={budget.status === 'exhausted' ? 'is-exhausted' : ''}>
+                      <small>{BUDGET_LABELS[stage] || stage}</small>
+                      <b>{budget.used}/{budget.limit}</b>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
           <FailurePatterns patterns={overview.failure_patterns} />
           <EvidenceDrawer projectId={projectId} overview={overview} />
           <div className="project-drawer-gap" />
           <ProjectMemoriesDrawer projectId={projectId} />
         </>
+      ) : (
+        <section className="project-matrix" aria-label="项目矩阵">
+          <div className="project-matrix__heading">
+            <h2>{matrix.length} 个项目</h2>
+            <span>点开项目查看详情与动作</span>
+          </div>
+          {matrix.map(row => (
+            <button key={row.project_id} type="button" className="project-matrix-row" onClick={() => void openProject(row.project_id)}>
+              <span className={`project-matrix-row__status project-status--${row.stage_status}`}>{statusLabel(row.stage_status)}</span>
+              <span className="project-matrix-row__name">{row.workspace_root.split(/[\\/]/).filter(Boolean).pop() || '项目'}</span>
+              <span className="project-matrix-row__message">{row.message || '尚无任务'}</span>
+              <span className="project-matrix-row__meta">
+                {row.stage && <em>{STAGES.find(stage => stage.id === row.stage)?.label || row.stage}</em>}
+                {row.verification_count > 0 && <em>{row.verification_count} 项验证</em>}
+                {row.failed && <em className="is-failed">失败</em>}
+                {row.updated_at && <time>{formatLocalTimestamp(row.updated_at)}</time>}
+              </span>
+              <ChevronRight size={14} className="project-matrix-row__chevron" />
+            </button>
+          ))}
+        </section>
       )}
     </div>
   )

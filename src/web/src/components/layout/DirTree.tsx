@@ -37,7 +37,7 @@ function DirNode({
       setLoading(true)
       try {
         const result = await api.listFs(sessionId, entry.path)
-        setChildren(result.entries.filter(e => e.type === 'directory'))
+        setChildren(result.entries)
       } catch {
         setChildren([])
       } finally { setLoading(false) }
@@ -96,7 +96,7 @@ export function DirTree({ sessionId, value, onSelect }: Props) {
     api.getWorkspace(sessionId)
       .then(async () => {
         const result = await api.listFs(sessionId, '.')
-        if (active) { setRoot(result.root); setEntries(result.entries.filter(e => e.type === 'directory')) }
+        if (active) { setRoot(result.root); setEntries(result.entries) }
       })
       .catch(err => { if (active) setError(err instanceof Error ? err.message : '读取目录失败') })
       .finally(() => { if (active) setLoading(false) })
@@ -117,8 +117,8 @@ export function DirTree({ sessionId, value, onSelect }: Props) {
       onSelect(fullPath)
       setCreateHint(`${name} 已创建`)
       // 重新加载当前目录
-      const result = await api.listFs(sessionId, '.' )
-      setEntries(result.entries.filter(e => e.type === 'directory'))
+      const result = await api.listFs(sessionId, '.')
+      setEntries(result.entries)
     } catch (err) {
       setCreateHint(err instanceof Error ? err.message : '创建失败')
     } finally { setCreating(false) }

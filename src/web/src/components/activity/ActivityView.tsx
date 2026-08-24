@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react'
-import { Activity, AlertTriangle, CheckCircle2, ChevronDown, Clock3, Database, Gauge, RefreshCw, Wrench, XCircle } from 'lucide-react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { Activity, AlertTriangle, CheckCircle2, ChevronDown, Clock3, Database, FolderGit2, Gauge, RefreshCw, Wrench, XCircle } from 'lucide-react'
 import { api } from '../../lib/api'
 import { localCoverageLabels } from '../../lib/observability'
 import { formatLocalTimestamp } from '../../lib/time'
@@ -225,14 +225,12 @@ function TraceRow({ trace, onResume }: { trace: AgentTrace; onResume: (trace: Ag
           <small>{trace.task_id} · {formatLocalTimestamp(trace.updated_at)}</small>
         </span>
         <span className="activity-trace__metrics">
-          <b>{trace.tool_count}</b><small>工具</small>
-           <b>{trace.changed_file_count}</b><small>文件</small>
-           {trace.recovered_tool_count > 0 && <span className="trace-badge trace-badge--recovered">{trace.recovered_tool_count} 已恢复</span>}
            <span className={`trace-badge trace-badge--${trace.verification}`}>{trace.verification === 'passed' ? '验证通过' : trace.verification === 'failed' ? '验证失败' : '未验证'}</span>
            <span className={`trace-badge trace-badge--${evidenceTone}`}>{evidenceLabel}</span>
            <span className="trace-badge trace-badge--reason">{terminalReasonLabel(trace.terminal_reason)}</span>
+           {trace.acceptance_total ? <span className={`trace-badge ${trace.acceptance_passed ? 'trace-badge--recovered' : 'trace-badge--failed'}`}>验收 {trace.acceptance_passed ? '通过' : '未过'}/{trace.acceptance_total}</span> : null}
+           {trace.recovered_tool_count > 0 && <span className="trace-badge trace-badge--recovered">{trace.recovered_tool_count} 已恢复</span>}
            {trace.model_error_count ? <span className="trace-badge trace-badge--failed">模型错误 {trace.model_error_count}</span> : null}
-           {trace.provider_truncation_count ? <span className="trace-badge trace-badge--recovered">输出截断 {trace.provider_truncation_count}</span> : null}
            {trace.message_encoding_status === 'legacy_corrupted' ? <span className="trace-badge trace-badge--failed">编码异常</span> : null}
          </span>
         <ChevronDown size={15} className={open ? 'is-open' : ''} />
@@ -273,6 +271,18 @@ export function ActivityView() {
   }, [refresh])
 
   useEffect(() => { refresh() }, [refresh])
+
+  // 按项目（workspace）分组，同一项目内按更新时间倒序
+  const groupedTraces = useMemo(() => {
+    const map = new Map<string, AgentTrace[]>()
+    for (const trace of traces) {
+      const key = trace.workspace_root || '(未绑定工作区)'
+      map.set(key, [...(map.get(key) || []), trace])
+    }
+    return Array.from(map.entries())
+      .map(([workspace, items]) => [workspace, items.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))] as const)
+      .sort((a, b) => (b[1][0]?.updated_at || '').localeCompare(a[1][0]?.updated_at || ''))
+  }, [traces])
 
   return (
     <div className="activity-view">
@@ -337,8 +347,18 @@ export function ActivityView() {
       </section>
 
       <section className="activity-view__list">
-        <div className="activity-view__list-header"><h2>最近任务</h2><span>{traces.length} 条记录</span></div>
-        {loading ? <div className="activity-empty">正在读取本地记录…</div> : error ? <div className="activity-empty activity-empty--error">{error}<button type="button" onClick={refresh}>重试</button></div> : traces.length === 0 ? <div className="activity-empty">还没有运行记录</div> : traces.map(trace => <TraceRow key={trace.task_id} trace={trace} onResume={resumeTask} />)}
+        <div className="activity-view__list-header"><h2>最近任务</h2><span>{traces.length} 条记录 · {groupedTraces.length} 个项目</span></div>
+        {loading ? <div className="activity-empty">正在读取本地记录…</div> : error ? <div className="activity-empty activity-empty--error">{error}<button type="button" onClick={refresh}>重试</button></div> : traces.length === 0 ? <div className="activity-empty">还没有运行记录</div> : groupedTraces.map(([workspace, items]) => (
+          <div key={workspace} className="activity-group">
+            <div className="activity-group__head">
+              <FolderGit2 size={13} />
+              <strong>{workspace.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '未绑定工作区'}</strong>
+              <small>{items.length} 个任务</small>
+              <code>{workspace}</code>
+            </div>
+            {items.map(trace => <TraceRow key={trace.task_id} trace={trace} onResume={resumeTask} />)}
+          </div>
+        ))}
       </section>
     </div>
   )
