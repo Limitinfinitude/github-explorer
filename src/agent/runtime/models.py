@@ -11,6 +11,8 @@ class ToolRisk(str, Enum):
     DESTRUCTIVE = "destructive"
     PRIVILEGED = "privileged"
     EXTERNAL = "external"
+    # 命令引用工作区外受限路径（判分脚本目录等）或全局工具链写入（setx/npm -g/go install）
+    BOUNDARY = "boundary"
 
 
 @dataclass(frozen=True)

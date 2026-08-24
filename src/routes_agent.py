@@ -566,7 +566,7 @@ async def start_agent_task(request: LocalChatRequest):
         workspace, _ = require_agent_workspace(request.session_id, request.workspace)
         history = memory.get_agent_chat_history(request.session_id, limit=10)
         approval_mode = request.approval_mode or memory.get_preference("approval_mode") or "confirm"
-        if approval_mode not in {"confirm", "auto", "open", "guardian"}:
+        if approval_mode not in {"confirm", "auto", "open", "guardian", "full"}:
             approval_mode = "confirm"
         task_id = get_agent_task_supervisor().start(
             request.session_id,
@@ -603,7 +603,7 @@ async def get_encoding_health():
 
 
 class ApprovalModeUpdate(BaseModel):
-    mode: Literal["confirm", "auto", "open", "guardian"]
+    mode: Literal["confirm", "auto", "open", "guardian", "full"]
 
 
 @router_agent.get("/api/settings/approval-mode")
@@ -611,7 +611,7 @@ async def get_approval_mode():
     from agent.memory import memory
 
     mode = memory.get_preference("approval_mode") or "confirm"
-    if mode not in {"confirm", "auto", "open", "guardian"}:
+    if mode not in {"confirm", "auto", "open", "guardian", "full"}:
         mode = "confirm"
     return {"mode": mode}
 

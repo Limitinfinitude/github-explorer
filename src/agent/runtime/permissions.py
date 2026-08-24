@@ -6,6 +6,7 @@ class PermissionGate:
         ToolRisk.DESTRUCTIVE,
         ToolRisk.PRIVILEGED,
         ToolRisk.EXTERNAL,
+        ToolRisk.BOUNDARY,
     }
 
     def requires_confirmation(self, risk: ToolRisk, *, crosses_workspace: bool = False) -> bool:
@@ -16,5 +17,6 @@ class PermissionGate:
             ToolRisk.DESTRUCTIVE: "该操作可能删除或覆盖数据",
             ToolRisk.PRIVILEGED: "该操作需要管理员或系统级权限",
             ToolRisk.EXTERNAL: "该操作会修改外部系统状态",
+            ToolRisk.BOUNDARY: "该命令引用工作区外受限路径或全局工具链写入（判分脚本目录/系统级修改）",
         }
         return labels.get(risk, f"工具 {tool_name} 需要确认")
