@@ -2,326 +2,425 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>架构分层 — 按代码真实组织：认知 · 治理闸门 · 执行 · 世界 · 观测脊柱</title>
+<title>Agent 架构分层 — 认知 · 治理闸门 · 执行 · 世界 · 观测脊柱</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --line: #30363d;
-    --text: #e6edf3; --text2: #8b949e; --muted: #6e7681;
-    --gold: #f0b429; --blue: #4493f8; --purple: #a371f7;
-    --green: #3fb950; --orange: #f0883e; --pink: #db61a2; --teal: #39c5cf;
+    --bg: #0c0d10;
+    --bg-soft: #101216;
+    --line: #22262d;
+    --line-soft: #1a1d23;
+    --text: #e6edf3;
+    --text-2: #9da7b3;
+    --muted: #6e7681;
+    --muted-2: #4a5058;
+    --gold: #d4a017;
+    --blue: #4493f8;
+    --purple: #a371f7;
+    --green: #3fb950;
+    --orange: #f0883e;
+    --pink: #db61a2;
+    --teal: #39c5cf;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 30px 0 40px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 48px 0 56px;
+    line-height: 1.6;
+  }
 
-  header { text-align: center; margin-bottom: 22px; }
-  header h1 { font-size: 21px; }
-  header .formula { margin-top: 12px; font-size: 13px; color: var(--text2); }
-  header .formula b { padding: 2px 10px; border-radius: 6px; margin: 0 3px; font-weight: 700; }
-  .f-pink { background: rgba(219,97,162,.12); color: var(--pink); }
-  .f-teal { background: rgba(57,197,207,.12); color: var(--teal); }
-  .f-gold { background: rgba(240,180,41,.14); color: var(--gold); }
-  .f-green { background: rgba(63,185,80,.14); color: var(--green); }
-  .f-blue { background: rgba(68,147,248,.12); color: var(--blue); }
-  .f-orange { background: rgba(240,136,62,.12); color: var(--orange); }
-  .f-plus { color: var(--muted); }
+  /* ============ 头部 ============ */
+  header {
+    width: 1120px;
+    margin: 0 auto 56px;
+    text-align: left;
+  }
+  header .eyebrow {
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--muted-2);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  header h1 {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+  header .formula {
+    margin-top: 18px;
+    font-size: 14px;
+    color: var(--text-2);
+    letter-spacing: 0.3px;
+  }
+  header .formula b { font-weight: 600; }
+  header .formula .sep { color: var(--muted-2); margin: 0 6px; font-weight: 400; }
+  header .formula .eq { color: var(--muted-2); margin: 0 4px; }
 
-  .stack { width: 1200px; margin: 0 auto; display: flex; gap: 14px; align-items: stretch; }
-  .main { flex: 1; min-width: 0; }
+  /* ============ 分层：用节奏与留白，不用框 ============ */
+  .wrap { width: 1120px; margin: 0 auto; }
 
-  /* ===== 带 / 层容器 ===== */
-  .layer { position: relative; border-radius: 14px; padding: 14px 18px 13px 108px; margin-bottom: 0;
-    border: 1.5px solid var(--line); background: var(--panel); }
-  .layer .tag { position: absolute; left: 0; top: 0; bottom: 0; width: 88px; border-radius: 12px 0 0 12px;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
-  .layer .tag .big { font-size: 14px; font-weight: 800; letter-spacing: 1px; }
-  .layer .tag .en { font-size: 8.5px; opacity: .8; letter-spacing: 1px; font-weight: 700; }
-  .layer .metaphor { font-size: 9.5px; color: inherit; opacity: .85; text-align: center; line-height: 1.45; padding: 0 5px; margin-top: 3px; }
-  .layer h2 { font-size: 13.5px; margin-bottom: 2px; }
-  .layer .sub { font-size: 10.5px; color: var(--text2); margin-bottom: 10px; }
-  .layer.thin { padding-top: 11px; padding-bottom: 10px; }
-  .layer.thin h2 { font-size: 12.5px; }
-  .blocks { display: flex; gap: 9px; flex-wrap: wrap; }
+  .layer {
+    position: relative;
+    padding: 36px 0 40px 88px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .layer:last-of-type { border-bottom: 0; }
 
-  .mod { flex: 1 1 0; min-width: 138px; background: var(--bg); border: 1.2px solid var(--line); border-radius: 10px;
-    padding: 9px 11px; cursor: pointer; transition: transform .15s, border-color .15s, box-shadow .15s; }
-  .mod:hover { transform: translateY(-3px); }
-  .mod .tt { font-size: 11.5px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
-  .mod .sb { font-size: 9.5px; color: var(--text2); margin-top: 4px; line-height: 1.5; }
+  /* 左侧色标：一条细线，不是一个块 */
+  .layer::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 44px;
+    bottom: 40px;
+    width: 2px;
+    border-radius: 2px;
+  }
+  .layer.ui::before { background: var(--pink); }
+  .layer.orch::before { background: var(--teal); }
+  .layer.cog::before { background: var(--gold); }
+  .layer.gate::before { background: var(--green); }
+  .layer.exec::before { background: var(--blue); }
+  .layer.world::before { background: var(--orange); }
 
-  /* 接口带 */
-  .layer.ui { border-color: rgba(219,97,162,.5); background: linear-gradient(180deg, rgba(219,97,162,.05), var(--panel)); }
-  .layer.ui .tag { background: rgba(219,97,162,.1); color: var(--pink); }
-  .layer.ui .mod { border-color: rgba(219,97,162,.35); }
-  .layer.ui .mod:hover { border-color: var(--pink); box-shadow: 0 8px 24px rgba(219,97,162,.18); }
-  .layer.ui .tt { color: var(--pink); }
+  .layer .tag {
+    position: absolute;
+    left: 18px;
+    top: 44px;
+    width: 52px;
+    text-align: left;
+  }
+  .layer .tag .big {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    line-height: 1.3;
+  }
+  .layer.ui .tag .big { color: var(--pink); }
+  .layer.orch .tag .big { color: var(--teal); }
+  .layer.cog .tag .big { color: var(--gold); }
+  .layer.gate .tag .big { color: var(--green); }
+  .layer.exec .tag .big { color: var(--blue); }
+  .layer.world .tag .big { color: var(--orange); }
+  .layer .tag .en {
+    display: block;
+    margin-top: 4px;
+    font-size: 8.5px;
+    letter-spacing: 2px;
+    color: var(--muted-2);
+    text-transform: uppercase;
+  }
 
-  /* 编排带 */
-  .layer.orch { border-color: rgba(57,197,207,.5); background: linear-gradient(180deg, rgba(57,197,207,.05), var(--panel)); }
-  .layer.orch .tag { background: rgba(57,197,207,.1); color: var(--teal); }
-  .layer.orch .mod { border-color: rgba(57,197,207,.35); }
-  .layer.orch .mod:hover { border-color: var(--teal); box-shadow: 0 8px 24px rgba(57,197,207,.18); }
-  .layer.orch .tt { color: var(--teal); }
+  .layer h2 {
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: -0.2px;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .layer .sub {
+    font-size: 13px;
+    color: var(--text-2);
+    margin-bottom: 22px;
+    max-width: 640px;
+  }
+  .layer .metaphor {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: -14px;
+    margin-bottom: 22px;
+    letter-spacing: 0.2px;
+  }
 
-  /* 认知层 */
-  .layer.cog { border-color: rgba(240,180,41,.5); background: linear-gradient(180deg, rgba(240,180,41,.05), var(--panel)); }
-  .layer.cog .tag { background: rgba(240,180,41,.1); color: var(--gold); }
-  .layer.cog .mod { border-color: rgba(240,180,41,.35); }
-  .layer.cog .mod:hover { border-color: var(--gold); box-shadow: 0 8px 24px rgba(240,180,41,.18); }
-  .layer.cog .tt { color: var(--gold); }
+  /* 模块卡：直接浮在背景上，无框，只有左侧一条颜色呼吸线 */
+  .blocks { display: flex; gap: 12px; flex-wrap: wrap; }
+  .mod {
+    flex: 1 1 0;
+    min-width: 170px;
+    padding: 14px 16px 13px;
+    background: var(--bg-soft);
+    border-radius: 10px;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+    transition: background .15s ease, transform .15s ease, border-left-color .15s ease;
+  }
+  .mod:hover { background: #14161b; transform: translateY(-2px); }
+  .layer.ui .mod:hover { border-left-color: var(--pink); }
+  .layer.orch .mod:hover { border-left-color: var(--teal); }
+  .layer.cog .mod:hover { border-left-color: var(--gold); }
+  .layer.gate .mod:hover { border-left-color: var(--green); }
+  .layer.exec .mod:hover { border-left-color: var(--blue); }
+  .layer.world .mod:hover { border-left-color: var(--orange); }
 
-  /* 模型引擎条（认知层内嵌） */
-  .engine { margin-top: 10px; border: 1.2px dashed rgba(163,113,247,.55); border-radius: 10px;
-    background: rgba(163,113,247,.05); padding: 8px 12px 9px; }
-  .engine .cap { font-size: 10px; font-weight: 700; color: var(--purple); letter-spacing: 1px; margin-bottom: 7px; }
-  .engine .cap small { color: var(--text2); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
-  .engine .blocks .mod { border-color: rgba(163,113,247,.4); min-width: 120px; }
-  .engine .blocks .mod:hover { border-color: var(--purple); box-shadow: 0 8px 24px rgba(163,113,247,.18); }
-  .engine .tt { color: var(--purple); }
+  .mod .tt {
+    font-size: 13px;
+    font-weight: 650;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text);
+  }
+  .mod .tt .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .layer.ui .mod .dot { background: var(--pink); }
+  .layer.orch .mod .dot { background: var(--teal); }
+  .layer.cog .mod .dot { background: var(--gold); }
+  .layer.gate .mod .dot { background: var(--green); }
+  .layer.exec .mod .dot { background: var(--blue); }
+  .layer.world .mod .dot { background: var(--orange); }
 
-  /* 治理闸门条 */
-  .layer.gate { border-color: rgba(63,185,80,.55); background: linear-gradient(90deg, rgba(63,185,80,.08), rgba(63,185,80,.03));
-    border-style: dashed; padding-left: 108px; }
-  .layer.gate .tag { background: rgba(63,185,80,.1); color: var(--green); }
-  .layer.gate .mod { border-color: rgba(63,185,80,.4); }
-  .layer.gate .mod:hover { border-color: var(--green); box-shadow: 0 8px 24px rgba(63,185,80,.18); }
-  .layer.gate .tt { color: var(--green); }
+  .mod .sb {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 7px;
+    line-height: 1.65;
+  }
 
-  /* 执行层 */
-  .layer.exec { border-color: rgba(68,147,248,.5); background: linear-gradient(180deg, rgba(68,147,248,.05), var(--panel)); }
-  .layer.exec .tag { background: rgba(68,147,248,.1); color: var(--blue); }
-  .layer.exec .mod { border-color: rgba(68,147,248,.35); }
-  .layer.exec .mod:hover { border-color: var(--blue); box-shadow: 0 8px 24px rgba(68,147,248,.18); }
-  .layer.exec .tt { color: var(--blue); }
+  /* 模型引擎条：嵌在认知层里，虚线轻框而不是重框 */
+  .engine {
+    margin-top: 18px;
+    padding: 14px 16px 14px;
+    border: 1px dashed #3a2a4a;
+    border-radius: 10px;
+    background: rgba(163,113,247,.03);
+  }
+  .engine .cap {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--purple);
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .engine .cap small { color: var(--muted); font-weight: 400; letter-spacing: 0; margin-left: 8px; text-transform: none; }
+  .engine .blocks .mod { min-width: 130px; border-left-color: transparent; }
+  .engine .blocks .mod:hover { border-left-color: var(--purple); }
+  .engine .tt .dot { background: var(--purple); }
 
-  /* 世界层 */
-  .layer.world { border-color: rgba(240,136,62,.5); background: linear-gradient(180deg, rgba(240,136,62,.05), var(--panel)); }
-  .layer.world .tag { background: rgba(240,136,62,.1); color: var(--orange); }
-  .layer.world .mod { border-color: rgba(240,136,62,.35); }
-  .layer.world .mod:hover { border-color: var(--orange); box-shadow: 0 8px 24px rgba(240,136,62,.18); }
-  .layer.world .tt { color: var(--orange); }
+  /* 治理闸门：用一条虚线边提示「这是闸不是层」，其余留白 */
+  .layer.gate {
+    border-left: 1px dashed rgba(63,185,80,.35);
+    padding-left: 96px;
+  }
+  .layer.gate::before { left: 8px; }
 
-  /* ===== 层间连接 ===== */
-  .between { display: flex; align-items: center; justify-content: center; gap: 26px; height: 46px; }
-  .between .arrow { display: flex; flex-direction: column; align-items: center; color: var(--text2); font-size: 9.5px; }
-  .between .arrow .line { width: 2px; height: 18px; background: linear-gradient(180deg, var(--text2), transparent); position: relative; }
-  .between .arrow .line::after { content: "▼"; position: absolute; bottom: -8px; left: -4px; font-size: 8px; }
-  .between .note { font-size: 10px; color: var(--text2); background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; padding: 4px 12px; }
+  /* ============ 层间连接：一条极简注释线，不画箭头 ============ */
+  .between {
+    padding: 14px 0 0 88px;
+    font-size: 12px;
+    color: var(--muted-2);
+    letter-spacing: 0.2px;
+  }
+  .between .note { color: var(--muted); }
 
-  /* ===== 右侧观测脊柱 ===== */
-  .spine { width: 188px; flex: none; border: 1.5px dashed #4a545e; border-radius: 14px; background: rgba(139,148,158,.04);
-    padding: 12px 12px; display: flex; flex-direction: column; gap: 8px; }
-  .spine .cap { text-align: center; font-size: 11px; font-weight: 800; letter-spacing: 1px; color: var(--text); }
-  .spine .cap small { display: block; font-size: 8.5px; color: var(--text2); font-weight: 400; letter-spacing: 2px; margin-top: 2px; }
-  .spine .s-mod { background: var(--bg); border: 1.2px solid #3a424b; border-radius: 9px; padding: 8px 10px; cursor: pointer;
-    transition: transform .15s, border-color .15s; }
-  .spine .s-mod:hover { transform: translateY(-2px); border-color: var(--text2); }
-  .spine .s-mod .tt { font-size: 10.5px; font-weight: 700; color: var(--text); }
-  .spine .s-mod .sb { font-size: 9px; color: var(--text2); margin-top: 3px; line-height: 1.45; }
-  .spine .s-note { font-size: 9px; color: var(--text2); line-height: 1.55; text-align: center; margin-top: auto; padding-top: 4px; }
+  /* ============ 观测脊柱：极简侧注，不是一整列卡 ============ */
+  .spine {
+    margin: 48px 0 0 88px;
+    padding: 20px 0 0 20px;
+    border-left: 1px solid var(--line);
+  }
+  .spine .cap {
+    font-size: 11px;
+    letter-spacing: 2.5px;
+    color: var(--muted-2);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  .spine .cap small { display: block; margin-top: 3px; letter-spacing: 1px; font-size: 9px; color: var(--muted-2); }
+  .spine .s-item {
+    padding: 10px 0;
+    cursor: pointer;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .spine .s-item:last-child { border-bottom: 0; }
+  .spine .s-item .tt { font-size: 12px; font-weight: 650; color: var(--text-2); }
+  .spine .s-item .tt:hover { color: var(--text); }
+  .spine .s-item .sb { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .spine .s-note { margin-top: 16px; font-size: 11px; color: var(--muted-2); line-height: 1.7; }
 
-  /* ===== 判断标准带 ===== */
-  .base { width: 1200px; margin: 18px auto 0; border-radius: 12px; padding: 12px 20px;
-    background: linear-gradient(90deg, rgba(240,180,41,.07), rgba(63,185,80,.07));
-    border: 1.2px dashed var(--gold); }
-  .base .cap { font-size: 10px; font-weight: 700; color: var(--gold); letter-spacing: 2px; }
-  .base .txt { font-size: 11px; color: var(--text); line-height: 1.8; margin-top: 4px; }
-  .base .txt small { color: var(--text2); }
+  /* ============ 判断标准：左侧色标 + 文字，不是虚线框 ============ */
+  .base {
+    margin: 56px 0 0 88px;
+    padding: 4px 0 4px 22px;
+    border-left: 2px solid var(--gold);
+  }
+  .base .cap {
+    font-size: 10px;
+    letter-spacing: 2.5px;
+    color: var(--gold);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .base .txt { font-size: 13px; color: var(--text-2); line-height: 1.9; max-width: 860px; }
+  .base .txt small { color: var(--muted); }
 
-  /* ===== 详情面板 ===== */
-  .detail { width: 1200px; margin: 14px auto 0; min-height: 86px; padding: 13px 18px;
-    background: var(--panel); border: 1.2px solid var(--line); border-radius: 12px; }
-  .detail .dt { font-size: 13px; font-weight: 700; margin-bottom: 5px; }
-  .detail .dd { font-size: 11.5px; line-height: 1.7; color: var(--text); }
-  .detail .df { font-size: 10px; color: var(--muted); margin-top: 6px; font-family: Consolas, monospace; }
+  /* ============ 详情面板 ============ */
+  .detail {
+    width: 1120px;
+    margin: 40px auto 0;
+    padding: 22px 26px;
+    background: var(--bg-soft);
+    border-radius: 12px;
+    border-left: 2px solid var(--blue);
+  }
+  .detail .dt { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+  .detail .dd { font-size: 13px; line-height: 1.85; color: var(--text-2); }
+  .detail .df { font-size: 11px; color: var(--muted-2); margin-top: 10px; font-family: Consolas, monospace; }
 
-  footer { text-align: center; color: var(--muted); font-size: 10px; margin-top: 20px; }
+  footer {
+    width: 1120px;
+    margin: 44px auto 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--muted-2);
+    font-size: 11px;
+    letter-spacing: 0.2px;
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Agent 架构分层 — 认知 · 治理闸门 · 执行 · 世界 · 观测脊柱</h1>
+  <div class="eyebrow">GitHub Explorer · Agent 架构</div>
+  <h1>认知决定下一步，治理决定能不能做</h1>
   <div class="formula">
-    <b class="f-pink">接口</b><span class="f-plus">＋</span>
-    <b class="f-teal">编排 · 循环之外</b><span class="f-plus">＋</span>
-    <b class="f-gold">认知 = decide</b><span class="f-plus">＋</span>
-    <b class="f-green">治理闸门 = govern</b><span class="f-plus">＋</span>
-    <b class="f-blue">执行 = act</b><span class="f-plus">＋</span>
-    <b class="f-orange">世界 = world</b>
-    <span class="f-plus">　右侧一根脊柱纵贯：记录一切</span>
+    <b style="color:var(--purple)">Model 我输出什么</b><span class="eq">＋</span>
+    <b style="color:var(--gold)">Agent 我下一步做什么</b><span class="eq">＝</span>
+    <b style="color:var(--gold)">decide</b><span class="sep">｜</span>
+    <b style="color:var(--green)">Harness 如何被可靠地运行</b><span class="eq">＝</span>
+    <b style="color:var(--green)">govern</b><span class="sep">｜</span>
+    <b style="color:var(--blue)">Tools 实际执行</b><span class="eq">＋</span>
+    <b style="color:var(--orange)">Environment 世界</b>
   </div>
 </header>
 
-<div class="stack">
-<div class="main">
+<div class="wrap">
 
-  <!-- ===== 接口带 ===== -->
-  <div class="layer ui thin">
-    <div class="tag">
-      <div class="big">接口</div>
-      <div class="en">INTERFACE</div>
-      <div class="metaphor">用户进出的门<br>不参与决策</div>
-    </div>
+  <!-- 接口 -->
+  <section class="layer ui">
+    <div class="tag"><span class="big">接口</span><span class="en">Interface</span></div>
     <h2>用户看到和操作的入口</h2>
+    <div class="metaphor">不参与决策，只负责把请求送进来、把事件带出去</div>
     <div class="blocks">
-      <div class="mod" data-d="ui-web"><div class="tt">🖼 Web UI</div><div class="sb">对话流 SSE 实时渲染<br>批准卡片 · 命令面板 /plan /compact /cost<br>上下文容量仪表 · 轨迹回放视图</div></div>
-      <div class="mod" data-d="ui-api"><div class="tt">🔌 HTTP API</div><div class="sb">routes_agent：start / resume / compact<br>traces · token-usage · evaluation-report<br>评测驱动（SWE-bench 批跑走这里）</div></div>
+      <div class="mod" data-d="ui-web"><div class="tt"><span class="dot"></span>🖼 Web UI</div><div class="sb">对话流 SSE 实时渲染<br>批准卡片 · 命令面板 /plan /compact /cost<br>上下文容量仪表 · 轨迹回放视图</div></div>
+      <div class="mod" data-d="ui-api"><div class="tt"><span class="dot"></span>🔌 HTTP API</div><div class="sb">routes_agent：start / resume / compact<br>traces · token-usage · evaluation-report<br>评测驱动（SWE-bench 批跑走这里）</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="between">
-    <div class="arrow"><div class="line"></div></div>
-    <div class="note">请求进 API → 编排接单；事件沿 SSE 原路回传到界面</div>
-    <div class="arrow"><div class="line"></div></div>
-  </div>
+  <div class="between"><span class="note">请求进 API → 编排接单；事件沿 SSE 原路回传到界面</span></div>
 
-  <!-- ===== 编排带 ===== -->
-  <div class="layer orch thin">
-    <div class="tag">
-      <div class="big">编排</div>
-      <div class="en">ORCHESTRATE</div>
-      <div class="metaphor">任务调度台<br>在循环<b>之外</b><br>管什么时候跑</div>
-    </div>
-    <h2>Supervisor — 任务的生命周期（不碰单轮推理）</h2>
-    <div class="sub">它决定「任务何时跑、何时停、崩了怎么办」；循环内部的每一步它都不插手——所以独立成带，不塞进治理闸门</div>
+  <!-- 编排 -->
+  <section class="layer orch">
+    <div class="tag"><span class="big">编排</span><span class="en">Orchestrate</span></div>
+    <h2>Supervisor — 任务的生命周期</h2>
+    <div class="metaphor">决定任务何时跑、何时停、崩了怎么办；循环内部的每一步它都不插手</div>
     <div class="blocks">
-      <div class="mod" data-d="orch-lifecycle"><div class="tt">⚙ 任务生命周期</div><div class="sb">同会话任务互斥<br>后台 worker 轮询<br>状态机 idle→running→done/failed</div></div>
-      <div class="mod" data-d="orch-approval"><div class="tt">⏸ 暂停 / 恢复</div><div class="sb">waiting_approval 冻结循环<br>resume 携带批准结果续跑<br>拒绝 → 取消，不静默重试</div></div>
-      <div class="mod" data-d="orch-resume"><div class="tt">🔄 断线与重启</div><div class="sb">中断任务有界续跑（重放预算）<br>进程重启 reconcile 恢复现场<br>Agent 崩了任务不丢</div></div>
+      <div class="mod" data-d="orch-lifecycle"><div class="tt"><span class="dot"></span>⚙ 任务生命周期</div><div class="sb">同会话任务互斥<br>后台 worker 轮询<br>状态机 idle→running→done/failed</div></div>
+      <div class="mod" data-d="orch-approval"><div class="tt"><span class="dot"></span>⏸ 暂停 / 恢复</div><div class="sb">waiting_approval 冻结循环<br>resume 携带批准结果续跑<br>拒绝 → 取消，不静默重试</div></div>
+      <div class="mod" data-d="orch-resume"><div class="tt"><span class="dot"></span>🔄 断线与重启</div><div class="sb">中断任务有界续跑（重放预算）<br>进程重启 reconcile 恢复现场<br>Agent 崩了任务不丢</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="between">
-    <div class="arrow"><div class="line"></div></div>
-    <div class="note">接单后把轮次交给循环；要审批时整层冻结，批准后解冻继续</div>
-    <div class="arrow"><div class="line"></div></div>
-  </div>
+  <div class="between"><span class="note">接单后把轮次交给循环；要审批时整层冻结，批准后解冻继续</span></div>
 
-  <!-- ===== 认知层 ===== -->
-  <div class="layer cog">
-    <div class="tag">
-      <div class="big">认知层</div>
-      <div class="en">DECIDE</div>
-      <div class="metaphor">驾驶员<br>决定下一步<br>做什么</div>
-    </div>
+  <!-- 认知 -->
+  <section class="layer cog">
+    <div class="tag"><span class="big">认知</span><span class="en">Decide</span></div>
     <h2>「我下一步应该做什么？」— 决定模型看到什么、想到什么、做什么</h2>
-    <div class="sub">decide 层：换掉 LLM 就失效的部分——包括「模型看到什么」的组装与记忆，因为那是决策的输入</div>
+    <div class="metaphor">decide 层：换掉 LLM 就失效的部分——包括「模型看到什么」的组装与记忆，因为那是决策的输入</div>
     <div class="blocks">
-      <div class="mod" data-d="cog-loop"><div class="tt">↻ ReAct 主循环</div><div class="sb">组装上下文 → 调模型 → 解析工具调用<br>→ 回填观察 → 收敛判断<br>「先了解再行动」</div></div>
-      <div class="mod" data-d="cog-context"><div class="tt">🧩 上下文引擎</div><div class="sb">ContextEngine：决定模型<b>看到什么</b><br>系统提示 + 历史 + 工具说明 + 注入内容<br>决策的地基在认知层，不在治理层</div></div>
-      <div class="mod" data-d="cog-memory"><div class="tt">📚 记忆压缩</div><div class="sb">9 节 LLM 压缩（Files / Errors / Pending…）<br>75% 软阈值触发 · /compact 手动<br>首次 LLM 摘要，后续确定性回退控成本</div></div>
-      <div class="mod" data-d="cog-plan"><div class="tt">🗺 计划</div><div class="sb">模型自主 [[PLAN_REQUEST]]<br>或 /plan 带提示词<br>交编排层批准门，先看地图再出发</div></div>
-      <div class="mod" data-d="cog-reflect"><div class="tt">🪞 反思与重规划</div><div class="sb">连续失败退一步换思路<br>截断输出自动续写<br>收敛判断该停就停</div></div>
-      <div class="mod" data-d="cog-skills"><div class="tt">🎨 技能注入</div><div class="sb">agentskills.io 规范<br>内置 web-search / find-things / repo-intro<br>use_skill 按需注入正文</div></div>
+      <div class="mod" data-d="cog-loop"><div class="tt"><span class="dot"></span>↻ ReAct 主循环</div><div class="sb">组装上下文 → 调模型 → 解析工具调用<br>→ 回填观察 → 收敛判断<br>「先了解再行动」</div></div>
+      <div class="mod" data-d="cog-context"><div class="tt"><span class="dot"></span>🧩 上下文引擎</div><div class="sb">ContextEngine：决定模型<b>看到什么</b><br>系统提示 + 历史 + 工具说明 + 注入内容<br>决策的地基在认知层，不在治理层</div></div>
+      <div class="mod" data-d="cog-memory"><div class="tt"><span class="dot"></span>📚 记忆压缩</div><div class="sb">9 节 LLM 压缩（Files / Errors / Pending…）<br>75% 软阈值触发 · /compact 手动<br>首次 LLM 摘要，后续确定性回退控成本</div></div>
+      <div class="mod" data-d="cog-plan"><div class="tt"><span class="dot"></span>🗺 计划</div><div class="sb">模型自主 [[PLAN_REQUEST]]<br>或 /plan 带提示词<br>交编排层批准门，先看地图再出发</div></div>
+      <div class="mod" data-d="cog-reflect"><div class="tt"><span class="dot"></span>🪞 反思与重规划</div><div class="sb">连续失败退一步换思路<br>截断输出自动续写<br>收敛判断该停就停</div></div>
+      <div class="mod" data-d="cog-skills"><div class="tt"><span class="dot"></span>🎨 技能注入</div><div class="sb">agentskills.io 规范<br>内置 web-search / find-things / repo-intro<br>use_skill 按需注入正文</div></div>
     </div>
     <div class="engine">
       <div class="cap">⚙ 模型接入引擎 — MODEL I/O <small>认知层的发动机：被循环调用，不是独立一层</small></div>
       <div class="blocks">
-        <div class="mod" data-d="eng-protocol"><div class="tt">🧠 推理引擎</div><div class="sb">deepseek-v4-flash · 双协议<br>OpenAI / Anthropic 适配<br>thinking off / high / max</div></div>
-        <div class="mod" data-d="eng-stream"><div class="tt">📡 流式调用</div><div class="sb">逐 token 流式回传<br>解析文本内嵌工具调用</div></div>
-        <div class="mod" data-d="eng-window"><div class="tt">📏 窗口配置</div><div class="sb">「1M」「256k」按模型声明解析<br>切换模型热更新预算</div></div>
-        <div class="mod" data-d="eng-cache"><div class="tt">💾 前缀缓存</div><div class="sb">实测命中 89.5%<br>稳定前缀是铺路<br>省钱结果记在脊柱账本</div></div>
+        <div class="mod" data-d="eng-protocol"><div class="tt"><span class="dot"></span>🧠 推理引擎</div><div class="sb">deepseek-v4-flash · 双协议<br>OpenAI / Anthropic 适配<br>thinking off / high / max</div></div>
+        <div class="mod" data-d="eng-stream"><div class="tt"><span class="dot"></span>📡 流式调用</div><div class="sb">逐 token 流式回传<br>解析文本内嵌工具调用</div></div>
+        <div class="mod" data-d="eng-window"><div class="tt"><span class="dot"></span>📏 窗口配置</div><div class="sb">「1M」「256k」按模型声明解析<br>切换模型热更新预算</div></div>
+        <div class="mod" data-d="eng-cache"><div class="tt"><span class="dot"></span>💾 前缀缓存</div><div class="sb">实测命中 89.5%<br>稳定前缀是铺路<br>省钱结果记在脊柱账本</div></div>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div class="between">
-    <div class="arrow"><div class="line"></div></div>
-    <div class="note">循环发出动作请求：「我要调 read_file，参数如下」（decide 到此为止）——等闸门放行</div>
-    <div class="arrow"><div class="line"></div></div>
-  </div>
+  <div class="between"><span class="note">循环发出动作请求：「我要调 read_file，参数如下」（decide 到此为止）——等闸门放行</span></div>
 
-  <!-- ===== 治理闸门 ===== -->
-  <div class="layer gate thin">
-    <div class="tag">
-      <div class="big">治理闸门</div>
-      <div class="en">GOVERN</div>
-      <div class="metaphor">关卡 · 不是层<br>只决定<br>能不能做</div>
-    </div>
+  <!-- 治理闸门 -->
+  <section class="layer gate">
+    <div class="tag"><span class="big">治理闸门</span><span class="en">Govern</span></div>
     <h2>「允许吗？还有预算吗？该停了吗？」— 治理是动作路径上的一道闸，不做事</h2>
-    <div class="sub">govern：每个动作请求只向下穿过一次；闸门本身不懂任务，只懂规则——换任何 LLM 都原样工作</div>
+    <div class="metaphor">govern：每个动作请求只向下穿过一次；闸门本身不懂任务，只懂规则——换任何 LLM 都原样工作</div>
     <div class="blocks">
-      <div class="mod" data-d="gate-perm"><div class="tt">🔐 权限闸门</div><div class="sb">四级风险 safe→destructive<br>destructive 强制人工确认<br>pre_tool 钩子退出码 2 阻断</div></div>
-      <div class="mod" data-d="gate-boundary"><div class="tt">📁 沙箱边界</div><div class="sb">workspaces.resolve 校验路径<br>越界即抛 WorkspaceBoundaryError<br>文件能读写，只在圈内</div></div>
-      <div class="mod" data-d="gate-budget"><div class="tt">📉 预算熔断</div><div class="sb">轮次过半提醒<br>轮次 / 诊断预算耗尽即停<br>防无限发散</div></div>
-      <div class="mod" data-d="gate-accept"><div class="tt">🛑 验收终止</div><div class="sb">Verifier 验收测试证据<br>WorkProductEvaluator 评产物<br>什么时候停，模型说了不算</div></div>
+      <div class="mod" data-d="gate-perm"><div class="tt"><span class="dot"></span>🔐 权限闸门</div><div class="sb">四级风险 safe→destructive<br>destructive 强制人工确认<br>pre_tool 钩子退出码 2 阻断</div></div>
+      <div class="mod" data-d="gate-boundary"><div class="tt"><span class="dot"></span>📁 沙箱边界</div><div class="sb">workspaces.resolve 校验路径<br>越界即抛 WorkspaceBoundaryError<br>文件能读写，只在圈内</div></div>
+      <div class="mod" data-d="gate-budget"><div class="tt"><span class="dot"></span>📉 预算熔断</div><div class="sb">轮次过半提醒<br>轮次 / 诊断预算耗尽即停<br>防无限发散</div></div>
+      <div class="mod" data-d="gate-accept"><div class="tt"><span class="dot"></span>🛑 验收终止</div><div class="sb">Verifier 验收测试证据<br>WorkProductEvaluator 评产物<br>什么时候停，模型说了不算</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="between">
-    <div class="arrow"><div class="line"></div></div>
-    <div class="note">放行 → 交执行层调度；拦截 → 带着拒绝原因回炉（govern 全部职责就这么多，所以是条不是层）</div>
-    <div class="arrow"><div class="line"></div></div>
-  </div>
+  <div class="between"><span class="note">放行 → 交执行层调度；拦截 → 带着拒绝原因回炉（govern 全部职责就这么多，所以是条不是层）</span></div>
 
-  <!-- ===== 执行层 ===== -->
-  <div class="layer exec">
-    <div class="tag">
-      <div class="big">执行层</div>
-      <div class="en">ACT</div>
-      <div class="metaphor">手脚<br>真实执行体<br>只管干活</div>
-    </div>
+  <!-- 执行 -->
+  <section class="layer exec">
+    <div class="tag"><span class="big">执行</span><span class="en">Act</span></div>
     <h2>「实际执行什么？」— 动作空间 → 批次调度 → 执行体</h2>
-    <div class="sub">动作空间的契约归执行层所有：认知是调用方，schema 与 handler 的绑定、重试与回滚都在这层</div>
+    <div class="metaphor">动作空间的契约归执行层所有：认知是调用方，schema 与 handler 的绑定、重试与回滚都在这层</div>
     <div class="blocks">
-      <div class="mod" data-d="exec-registry"><div class="tt">📋 动作空间注册</div><div class="sb">ToolRegistry：24 工具 + MCP 动态注册<br>schema（模型可见）↔ handler（真实执行）<br>决策面只是它的读侧</div></div>
-      <div class="mod" data-d="exec-dispatch"><div class="tt">🔧 批次调度与自愈</div><div class="sb">edit_files 批次原子提交 / 回滚<br>失败 tool_recovered 按 error_kind 分流<br>要么整套成功，要么不留痕迹</div></div>
-      <div class="mod" data-d="exec-fs"><div class="tt">📖 文件 · 编辑 · 命令</div><div class="sb">list_directory / read_file / search_text / repo_map<br>create_directory / edit_files / undo_last_change<br>run_command 真实退出码 · verify_project 真跑测试</div></div>
-      <div class="mod" data-d="exec-net"><div class="tt">🌐 进程 · 网络 · 元能力</div><div class="sb">start/get/list/stop_process · check_port · wait_http<br>http_request 仅回环 · batch ≤32 步验收<br>clone_repository · web_fetch · spawn_subagent<br>spawn_subagents 并行扇出 · use_skill</div></div>
+      <div class="mod" data-d="exec-registry"><div class="tt"><span class="dot"></span>📋 动作空间注册</div><div class="sb">ToolRegistry：26 工具 + MCP 动态注册<br>schema（模型可见）↔ handler（真实执行）<br>决策面只是它的读侧</div></div>
+      <div class="mod" data-d="exec-dispatch"><div class="tt"><span class="dot"></span>🔧 批次调度与自愈</div><div class="sb">edit_files 批次原子提交 / 回滚<br>失败 tool_recovered 按 error_kind 分流<br>要么整套成功，要么不留痕迹</div></div>
+      <div class="mod" data-d="exec-fs"><div class="tt"><span class="dot"></span>📖 文件 · 编辑 · 命令</div><div class="sb">list_directory / read_file / search_text / repo_map<br>create_directory / edit_files / undo_last_change<br>run_command 真实退出码 · verify_project 真跑测试</div></div>
+      <div class="mod" data-d="exec-net"><div class="tt"><span class="dot"></span>🌐 进程 · 网络 · 元能力</div><div class="sb">start/get/list/stop_process · check_port · wait_http<br>http_request 仅回环 · batch ≤32 步验收<br>clone_repository · web_fetch · spawn_subagent<br>spawn_subagents 并行扇出 · web_search · use_skill</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="between">
-    <div class="arrow"><div class="line"></div></div>
-    <div class="note">执行体真正碰世界：改文件、跑命令、发请求；观察结果原路回传给循环</div>
-    <div class="arrow"><div class="line"></div></div>
-  </div>
+  <div class="between"><span class="note">真正碰世界的一层：改文件、跑命令、发请求；观察结果原路回传给循环</span></div>
 
-  <!-- ===== 世界层 ===== -->
-  <div class="layer world">
-    <div class="tag">
-      <div class="big">世界层</div>
-      <div class="en">WORLD</div>
-      <div class="metaphor">路面与环境<br>被读写<br>被观测</div>
-    </div>
+  <!-- 世界 -->
+  <section class="layer world">
+    <div class="tag"><span class="big">世界</span><span class="en">World</span></div>
     <h2>「Agent 操作的世界是什么？」— 被改变、并产生真实反馈的地方</h2>
-    <div class="sub">世界的性质决定行为上限：围墙（沙箱）、路况（网络）、天地（外部服务）都在这层</div>
+    <div class="metaphor">世界的性质决定行为上限：围墙（沙箱）、路况（网络）、天地（外部服务）都在这层</div>
     <div class="blocks">
-      <div class="mod" data-d="world-fs"><div class="tt">📁 工作区文件系统</div><div class="sb">每会话独立工作区<br>真实文件与目录<br>越界请求到不了这层</div></div>
-      <div class="mod" data-d="world-proc"><div class="tt">🖥 进程与 Python 环境</div><div class="sb">受管后台进程树（可查可停）<br>venv 独立虚拟环境<br>本机 shell</div></div>
-      <div class="mod" data-d="world-net"><div class="tt">🕸 网络世界</div><div class="sb">内网只开 127.0.0.1 回环<br>外网只许 clone / web_fetch 方向<br>网络不是默认可达的</div></div>
-      <div class="mod" data-d="world-ext"><div class="tt">🌍 外部服务</div><div class="sb">GitHub API（搜索 / 元数据）<br>MCP 外部服务器（动态工具）<br>真实仓库本体</div></div>
+      <div class="mod" data-d="world-fs"><div class="tt"><span class="dot"></span>📁 工作区文件系统</div><div class="sb">每会话独立工作区<br>workspaces.resolve 越界即拒<br>世界有围墙</div></div>
+      <div class="mod" data-d="world-proc"><div class="tt"><span class="dot"></span>🖥 进程与 Python 环境</div><div class="sb">受管后台进程树（可查可停）<br>venv 虚拟环境<br>本机 shell</div></div>
+      <div class="mod" data-d="world-net"><div class="tt"><span class="dot"></span>🕸 网络世界</div><div class="sb">内网只开 127.0.0.1 回环<br>外网只许 clone / web_fetch 方向<br>网络不是默认可达的</div></div>
+      <div class="mod" data-d="world-ext"><div class="tt"><span class="dot"></span>🌍 外部服务</div><div class="sb">GitHub API（搜索 / 元数据）<br>MCP 外部服务器（动态工具）<br>真实仓库本体</div></div>
+    </div>
+  </section>
+
+  <!-- 观测脊柱 -->
+  <div class="spine">
+    <div class="cap">观测脊柱<small>OBSERVE · 纵贯全部</small></div>
+    <div class="s-item" data-d="spine-events"><div class="tt">🗄 事件流落库</div><div class="sb">每层每事件带序列号写 SQLite，_sanitize_event 脱敏后才落</div></div>
+    <div class="s-item" data-d="spine-replay"><div class="tt">🎞 轨迹与重放</div><div class="sb">断线按 sequence 精确重放；/traces 回放任意历史会话</div></div>
+    <div class="s-item" data-d="spine-cost"><div class="tt">💰 成本核算</div><div class="sb">/token-usage 七天聚合——0.22 元/实例就由它核算</div></div>
+    <div class="s-item" data-d="spine-evidence"><div class="tt">🧾 证据链</div><div class="sb">evidence 路径校验 + evaluation-report，评测结论可回溯</div></div>
+    <div class="s-item" data-d="spine-proj"><div class="tt">📐 项目投影</div><div class="sb">project_projection：过滤内部噪音事件，只留有信息量证据</div></div>
+    <div class="s-note">脊柱是横切面不是层：每层都往里写事件；删掉它系统照跑——但立刻变瞎，且不可回溯</div>
+  </div>
+
+  <!-- 判断标准 -->
+  <div class="base">
+    <div class="cap">分层判断标准（按代码组织，不凑层数）</div>
+    <div class="txt">
+      ① 需要懂任务吗？<b>需要 → 认知</b>（上下文组装和记忆是决策输入，所以归认知）；只懂规则 → 闸门 / 执行。② 闸门不是层：权限 / 边界 / 预算 / 验收只是动作路径上的检查点，<b>不产生任何动作</b>——所以画成条，「什么时候停」的唯一来源是 LoopGuard 纯策略（只答「允许吗 / 该停吗」，绝不调 LLM）；治理层仅有两处 LLM 接缝（压缩摘要 + guardian 安全审查），都不替 Agent 决策。③ 编排在循环之外：管任务生死，不管单轮推理。④ 脊柱是纵切：观测贯穿所有层，不是其中一层。⑤ <b>State 三分已固化</b>：state_schema.py 把任务状态拆成信封 / 认知 / 运行（state["run"]）/ 环境四分区，测试强制任何新键先归类——超级 dict 有了法律。一次动作只向下穿过一个闸门；观察沿原路回传。<small>点击任意模块查看对应实现与源码位置。</small>
     </div>
   </div>
 
-</div>
-
-<!-- ===== 右侧观测脊柱 ===== -->
-<div class="spine">
-  <div class="cap">观测脊柱<small>OBSERVE · 纵贯全部</small></div>
-  <div class="s-mod" data-d="spine-events"><div class="tt">🗄 事件流落库</div><div class="sb">每层每事件带序列号写 SQLite，_sanitize_event 脱敏后才落</div></div>
-  <div class="s-mod" data-d="spine-replay"><div class="tt">🎞 轨迹与重放</div><div class="sb">断线按 sequence 精确重放；/traces 回放任意历史会话</div></div>
-  <div class="s-mod" data-d="spine-cost"><div class="tt">💰 成本核算</div><div class="sb">/token-usage 七天聚合——0.22 元/实例就由它核算</div></div>
-  <div class="s-mod" data-d="spine-evidence"><div class="tt">🧾 证据链</div><div class="sb">evidence 路径校验 + evaluation-report，评测结论可回溯</div></div>
-  <div class="s-mod" data-d="spine-proj"><div class="tt">📐 项目投影</div><div class="sb">project_projection：过滤内部噪音事件，只留有信息量证据</div></div>
-  <div class="s-note">脊柱是横切面不是层：<br>每层都往里写事件；<br>删掉它系统照跑——<br>但立刻变瞎，且不可回溯</div>
-</div>
-</div>
-
-<!-- ===== 分层判断标准 ===== -->
-<div class="base">
-  <div class="cap">◈ 分层判断标准（这次按代码组织，不凑层数）</div>
-  <div class="txt">
-    ① 需要懂任务吗？<b>需要 → 认知</b>（上下文组装和记忆是决策输入，所以归认知）；只懂规则 → 闸门 / 执行。② 闸门不是层：权限 / 边界 / 预算 / 验收只是动作路径上的检查点，<b>不产生任何动作</b>——所以画成条，「什么时候停」的唯一来源是 LoopGuard 纯策略（只答「允许吗 / 该停吗」，绝不调 LLM）；治理层仅有两处 LLM 接缝（压缩摘要 + guardian 安全审查），都不替 Agent 决策。③ 编排在循环之外：管任务生死，不管单轮推理。④ 脊柱是纵切：观测贯穿所有层，不是其中一层。⑤ <b>State 三分已固化</b>：state_schema.py 把任务状态拆成信封 / 认知 / 运行（state["run"]）/ 环境四分区，测试强制任何新键先归类——超级 dict 有了法律。一次动作只向下穿过一个闸门；观察沿原路回传。<small>点击任意模块查看对应实现与源码位置。</small>
+  <div class="detail" id="detail">
+    <div class="dt" style="color: var(--gold)">◈ 全景</div>
+    <div class="dd">接口接单 → 编排决定任务何时跑 → 认知循环决定下一步（decide）→ 治理闸门决定能不能做（govern）→ 执行层调度真实执行体 → 世界被改变并回传观察 → 脊柱全程记录。认知层的发动机（模型接入）内嵌在层内，因为它只被循环调用。</div>
   </div>
-</div>
 
-<div class="detail" id="detail">
-  <div class="dt" style="color: var(--gold)">◈ 全景</div>
-  <div class="dd">接口接单 → 编排决定任务何时跑 → 认知循环决定下一步（decide）→ 治理闸门决定能不能做（govern）→ 执行层调度真实执行体 → 世界被改变并回传观察 → 脊柱全程记录。认知层的发动机（模型接入）内嵌在层内，因为它只被循环调用。</div>
+  <footer>SWE-bench Verified 抽样 40 实例实测 48% resolved（同模型 mini-swe-agent 基线 43%）· 成本 0.22 vs 0.27 元/实例 · 358 项回归测试</footer>
 </div>
-
-<footer>SWE-bench Verified 抽样 40 实例实测 48% resolved（同模型 mini-swe-agent 基线 43%）· 成本 0.22 vs 0.27 元/实例 · 332 项回归测试</footer>
 
 <script>
 const DETAILS = {
@@ -349,13 +448,13 @@ const DETAILS = {
   "gate-budget": { t: "📉 预算熔断", c: "var(--green)", d: "「什么时候停」的唯一来源 LoopGuard（runtime/guard.py）——纯策略对象，只读状态返回决定，绝不调 LLM。判定项：轮次、诊断预算、重规划触发、同签名失败熔断、阶段预算（inspect 36 / implement 24 / test 8 / run 8 耗尽即停）。预算参数由构造注入、测试可活读调参；子代理预算也从 runtime 注入。宿主循环只消费决定，不自己判停。", f: "runtime/guard.py · LoopGuard" },
   "gate-accept": { t: "🛑 验收终止", c: "var(--green)", d: "终止权不在模型：Verifier 验收测试证据（真跑过才算），WorkProductEvaluator 评估工作产物，加上预算熔断共同决定「该停了」。验收是规则判定，所以是闸门的一部分。", f: "verifier.py · acceptance.py" },
 
-  "exec-registry": { t: "📋 动作空间注册", c: "var(--blue)", d: "ToolRegistry 持有 24 个注册工具 + MCP 动态注册（risk=external）。每个 ToolDefinition 绑定 schema（模型可见的读侧）与 handler（真实执行的写侧）——之前把「决策面」画在认知层是重复计费：契约归执行层所有，认知只是调用方。", f: "runtime/registry.py · tooling.py（24 注册）" },
+  "exec-registry": { t: "📋 动作空间注册", c: "var(--blue)", d: "ToolRegistry 持有 26 个注册工具 + MCP 动态注册（只读 MCP 降级 READ，写动词仍 EXTERNAL）。每个 ToolDefinition 绑定 schema（模型可见的读侧）与 handler（真实执行的写侧）——契约归执行层所有，认知只是调用方。", f: "runtime/registry.py · tooling.py（26 注册）" },
   "exec-dispatch": { t: "🔧 批次调度与自愈", c: "var(--blue)", d: "tool_calls 统一调度：edit_files 批次原子提交 / 回滚（ChangeSet），要么整套成功要么不留痕迹；失败按 error_kind 分流——可恢复的 tool_recovered 自动重试，不可恢复的如实上报。", f: "runtime/tool_calls.py · edits.py ChangeSet" },
   "exec-fs": { t: "📖 文件 · 编辑 · 命令执行体", c: "var(--blue)", d: "读：list_directory / read_file（行范围）/ search_text / repo_map（结构地图）；写：create_directory / edit_files（search 唯一匹配的原子多编辑）/ undo_last_change（FileSnapshot 回滚）；执行：run_command 真实退出码、ensure_venv / install_dependencies、verify_project 真跑测试保留真实失败。", f: "file_tools.py · edits.py · commands.py" },
-  "exec-net": { t: "🌐 进程 · 网络 · 元能力执行体", c: "var(--blue)", d: "进程：start/get/list/stop_process 受管进程树、check_port / wait_http 等就绪；网络：http_request 硬限 127.0.0.1 / ::1 回环、http_request_batch ≤32 步端到端验收、web_fetch 只读外网；元能力：clone_repository、spawn_subagent 单子代理（受限白名单 + 预算一次委托）、<b>spawn_subagents 并行扇出</b>（map-reduce 的 fan-out 侧：多个子代理 Semaphore 限流并发、各自收敛后结论交回，<b>主模型 synthesize 汇总</b>——治理层只并发收集，不代写结论）、use_skill。", f: "processes.py · ManagedProcess · network.py · subagent.py（run_subagent / run_subagents）" },
+  "exec-net": { t: "🌐 进程 · 网络 · 元能力执行体", c: "var(--blue)", d: "进程：start/get/list/stop_process 受管进程树、check_port / wait_http 等就绪；网络：http_request 硬限 127.0.0.1 / ::1 回环、http_request_batch ≤32 步端到端验收、web_fetch 只读外网、web_search 无 key 搜索（Bing RSS 主 + DDG 回退）；元能力：clone_repository、spawn_subagent 单子代理、spawn_subagents 并行扇出（主模型 synthesize 汇总）、use_skill。", f: "processes.py · ManagedProcess · network.py · subagent.py" },
 
   "world-fs": { t: "📁 工作区文件系统", c: "var(--orange)", d: "世界的地面：每会话绑定独立工作区，真实文件与目录在这层被创建、修改、回滚。越界请求在闸门就被拦下，根本到不了这层——地面只承受合法踩踏。", f: "workspaces（services）· 会话工作区绑定" },
-  "world-proc": { t: "🖥 进程与 Python 环境", c: "var(--orange)", d: "受管后台进程树按会话隔离、可查询可终止；venv 独立虚拟环境装依赖；本机 shell 是 run_command 的世界——进程生灭都在受控范围内。", f: "processes.py · ManagedProcess" },
+  "world-proc": { t: "🖥 进程与 Python 环境", c: "var(--orange)", d: "受管后台进程树按会话隔离、可查询可终止；ensure_venv 创建独立虚拟环境装依赖；本机 shell 是 run_command 的世界——进程生灭都在受控范围内。", f: "processes.py · ManagedProcess" },
   "world-net": { t: "🕸 网络世界", c: "var(--orange)", d: "路况：内网方向只开 127.0.0.1 / ::1 回环（验收本机服务用），外网方向只许 clone / web_fetch 的白名单用例。网络可达性是世界的性质，不是工具的属性。", f: "network.py · NetworkTools" },
   "world-ext": { t: "🌍 外部服务", c: "var(--orange)", d: "天地：GitHub API（search_github / fetch_repo_info）看远端；MCP 外部服务器动态接入；clone 下来的真实仓库本体。外部世界只通过受控入口触碰。", f: "search_github · fetch_repo_info · mcp_client.py" },
 
@@ -366,15 +465,14 @@ const DETAILS = {
   "spine-proj": { t: "📐 项目投影（脊柱）", c: "var(--text)", d: "project_projection 把事件时间线过滤成「开发者证据视图」：剔除 token / 模型请求等内部噪音，只留有信息量的动作与结果。", f: "project_projection.py" },
 };
 
-document.querySelectorAll(".mod, .s-mod").forEach(el => {
+document.querySelectorAll(".mod, .s-item").forEach(el => {
   el.addEventListener("click", () => {
     const key = el.dataset.d;
     const d = DETAILS[key];
     if (!d) return;
     document.getElementById("detail").innerHTML =
       `<div class="dt" style="color:${d.c}">${d.t}</div><div class="dd">${d.d}</div><div class="df">源码：${d.f}</div>`;
-    document.querySelectorAll(".mod, .s-mod").forEach(e => e.style.borderColor = "");
-    el.style.borderColor = d.c === "var(--text)" ? "#8b949e" : d.c;
+    document.getElementById("detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 });
 </script>
