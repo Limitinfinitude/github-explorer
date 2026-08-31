@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 760" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <radialGradient id="llmGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f0b429" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#f0b429" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6e7681"/>
+    </marker>
+    <marker id="arrowA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f0b429"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="980" height="760" fill="#0d1117" rx="14"/>
+  <text x="490" y="40" text-anchor="middle" fill="#e6edf3" font-size="20" font-weight="700">GitHub Explorer · 本地 Agent Harness 架构</text>
+  <text x="490" y="60" text-anchor="middle" fill="#8b949e" font-size="11">中心 LLM · 内环运行时 · 外环能力与护栏 · 一切事件落库可回放</text>
+
+  <!-- ===== 外环带（治理护栏） ===== -->
+  <circle cx="450" cy="400" r="290" fill="none" stroke="#30363d" stroke-width="72" stroke-opacity="0.55"/>
+  <text x="450" y="128" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700" letter-spacing="2">护 栏 · 治 理</text>
+
+  <!-- ===== 中环带（能力） ===== -->
+  <circle cx="450" cy="400" r="205" fill="none" stroke="#30363d" stroke-width="66" stroke-opacity="0.45"/>
+  <text x="450" y="222" text-anchor="middle" fill="#a371f7" font-size="12" font-weight="700" letter-spacing="2">上：上下文管理　·　下：工具执行</text>
+
+  <!-- ===== 内环带（核心循环） ===== -->
+  <circle cx="450" cy="400" r="132" fill="none" stroke="#30363d" stroke-width="58" stroke-opacity="0.6"/>
+
+  <!-- ===== LLM 光晕与核心 ===== -->
+  <circle cx="450" cy="400" r="118" fill="url(#llmGlow)"/>
+  <circle cx="450" cy="400" r="86" fill="#161b22" stroke="#f0b429" stroke-width="2.5"/>
+  <text x="450" y="382" text-anchor="middle" fill="#f0b429" font-size="22" font-weight="800">LLM</text>
+  <text x="450" y="406" text-anchor="middle" fill="#c9d1d9" font-size="10.5">deepseek-v4-flash 等</text>
+  <text x="450" y="422" text-anchor="middle" fill="#8b949e" font-size="9.5">OpenAI / Anthropic 协议</text>
+  <text x="450" y="440" text-anchor="middle" fill="#8b949e" font-size="9.5">思考强度 off/high/max · 1M 窗口</text>
+
+  <!-- 内环：核心循环 -->
+  <g font-size="11" font-weight="600">
+    <rect x="332" y="300" width="150" height="30" rx="15" fill="#1c2a3f" stroke="#4493f8" stroke-width="1.4"/>
+    <text x="407" y="319" text-anchor="middle" fill="#79c0ff">_drive 主循环</text>
+    <text x="407" y="343" text-anchor="middle" fill="#8b949e" font-size="8.5">感知 → 计划 → 行动 → 观察</text>
+
+    <rect x="395" y="472" width="160" height="30" rx="15" fill="#1c2a3f" stroke="#4493f8" stroke-width="1.4"/>
+    <text x="475" y="491" text-anchor="middle" fill="#79c0ff">Supervisor 任务编排</text>
+    <text x="475" y="515" text-anchor="middle" fill="#8b949e" font-size="8.5">并发 · 暂停恢复 · 断线续跑</text>
+
+    <rect x="300" y="400" width="104" height="26" rx="13" fill="#1c2a3f" stroke="#4493f8" stroke-width="1.2"/>
+    <text x="352" y="417" text-anchor="middle" fill="#79c0ff" font-size="9.5">模型绑定/协议</text>
+    <rect x="497" y="400" width="104" height="26" rx="13" fill="#1c2a3f" stroke="#4493f8" stroke-width="1.2"/>
+    <text x="549" y="417" text-anchor="middle" fill="#79c0ff" font-size="9.5">轮次/预算收敛</text>
+  </g>
+
+  <!-- 中环：上下文管理（上弧） -->
+  <g font-size="10">
+    <rect x="300" y="212" width="118" height="26" rx="13" fill="#241a38" stroke="#a371f7" stroke-width="1.3"/>
+    <text x="359" y="229" text-anchor="middle" fill="#d2a8ff">9 节压缩引擎</text>
+    <rect x="428" y="196" width="110" height="26" rx="13" fill="#241a38" stroke="#a371f7" stroke-width="1.3"/>
+    <text x="483" y="213" text-anchor="middle" fill="#d2a8ff">上下文容量仪表</text>
+    <rect x="548" y="228" width="112" height="26" rx="13" fill="#241a38" stroke="#a371f7" stroke-width="1.3"/>
+    <text x="604" y="245" text-anchor="middle" fill="#d2a8ff">计划批准门</text>
+    <text x="450" y="185" text-anchor="middle" fill="#8b949e" font-size="8.5">75% 软阈值主动压缩 · [[PLAN_REQUEST]] 模型自主触发 · /plan 手动</text>
+  </g>
+
+  <!-- 中环：工具执行（下弧） -->
+  <g font-size="10">
+    <rect x="292" y="560" width="112" height="26" rx="13" fill="#12261e" stroke="#3fb950" stroke-width="1.3"/>
+    <text x="348" y="577" text-anchor="middle" fill="#7ee787">文件读写/编辑</text>
+    <rect x="416" y="584" width="112" height="26" rx="13" fill="#12261e" stroke="#3fb950" stroke-width="1.3"/>
+    <text x="472" y="601" text-anchor="middle" fill="#7ee787">命令执行/安装</text>
+    <rect x="540" y="560" width="118" height="26" rx="13" fill="#12261e" stroke="#3fb950" stroke-width="1.3"/>
+    <text x="599" y="577" text-anchor="middle" fill="#7ee787">网络/克隆/搜索</text>
+    <text x="450" y="635" text-anchor="middle" fill="#8b949e" font-size="8.5">工具结果预览截断 · 失败恢复 · 重规划 · 诊断预算收敛</text>
+  </g>
+
+  <!-- 外环：治理分块 -->
+  <g font-size="10">
+    <rect x="96" y="238" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="160" y="257" text-anchor="middle" fill="#ffa657" font-weight="700">权限分级</text>
+    <text x="160" y="272" text-anchor="middle" fill="#c9a227" font-size="8">auto/confirm/guardian/full</text>
+
+    <rect x="60" y="330" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="124" y="349" text-anchor="middle" fill="#ffa657" font-weight="700">生命周期 Hooks</text>
+    <text x="124" y="364" text-anchor="middle" fill="#c9a227" font-size="8">pre_tool 拦截 · 退出码2阻断</text>
+
+    <rect x="96" y="424" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="160" y="443" text-anchor="middle" fill="#ffa657" font-weight="700">验收与验证</text>
+    <text x="160" y="458" text-anchor="middle" fill="#c9a227" font-size="8">acceptance · verifier · 证据链</text>
+
+    <rect x="756" y="238" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="820" y="257" text-anchor="middle" fill="#ffa657" font-weight="700">子代理</text>
+    <text x="820" y="272" text-anchor="middle" fill="#c9a227" font-size="8">只读白名单 · 预算限制</text>
+
+    <rect x="792" y="330" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="856" y="349" text-anchor="middle" fill="#ffa657" font-weight="700">MCP 外接</text>
+    <text x="856" y="364" text-anchor="middle" fill="#c9a227" font-size="8">stdio · EXTERNAL 风险</text>
+
+    <rect x="756" y="424" width="128" height="46" rx="10" fill="#2b1a10" stroke="#f0883e" stroke-width="1.3"/>
+    <text x="820" y="443" text-anchor="middle" fill="#ffa657" font-weight="700">轨迹与指标</text>
+    <text x="820" y="458" text-anchor="middle" fill="#c9a227" font-size="8">tracing · metrics · observability</text>
+  </g>
+
+  <!-- ===== 顶部 UI 条 ===== -->
+  <rect x="60" y="70" width="860" height="44" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <text x="90" y="96" fill="#8b949e" font-size="10" font-weight="700" letter-spacing="1">UI / 交互层</text>
+  <g font-size="10" fill="#c9d1d9">
+    <rect x="196" y="80" width="128" height="24" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <text x="260" y="96" text-anchor="middle">命令面板 / 斜杠命令</text>
+    <rect x="336" y="80" width="150" height="24" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <text x="411" y="96" text-anchor="middle">批准卡片（计划/命令审批）</text>
+    <rect x="498" y="80" width="130" height="24" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <text x="563" y="96" text-anchor="middle">上下文容量仪表</text>
+    <rect x="640" y="80" width="120" height="24" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <text x="700" y="96" text-anchor="middle">SSE 实时流</text>
+  </g>
+  <line x1="450" y1="114" x2="450" y2="140" stroke="#6e7681" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- ===== 底部持久化条 ===== -->
+  <rect x="60" y="686" width="860" height="44" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <text x="90" y="712" fill="#8b949e" font-size="10" font-weight="700" letter-spacing="1">持久化</text>
+  <text x="480" y="712" text-anchor="middle" fill="#c9d1d9" font-size="10.5">SQLite 全量落库 — 每任务 / 每工具调用 / 每事件 · 断线重连 · 进程重启恢复 · 全程可回放复盘</text>
+  <line x1="450" y1="672" x2="450" y2="686" stroke="#6e7681" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- 循环箭头（LLM <-> 主循环 <-> 工具） -->
+  <path d="M 536 400 A 86 86 0 0 1 450 486" fill="none" stroke="#f0b429" stroke-width="1.6" marker-end="url(#arrowA)" opacity="0.9"/>
+  <path d="M 364 400 A 86 86 0 0 1 450 314" fill="none" stroke="#f0b429" stroke-width="1.6" marker-end="url(#arrowA)" opacity="0.9"/>
+  <text x="450" y="300" text-anchor="middle" fill="#f0b429" font-size="9" opacity="0.9">推理 ⇄ 行动 循环</text>
+
+  <!-- 内环到外环连接线 -->
+  <line x1="160" y1="261" x2="332" y2="330" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+  <line x1="124" y1="353" x2="330" y2="402" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+  <line x1="160" y1="447" x2="340" y2="480" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+  <line x1="756" y1="261" x2="570" y2="330" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+  <line x1="792" y1="353" x2="572" y2="402" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+  <line x1="756" y1="447" x2="562" y2="480" stroke="#f0883e" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="4 3"/>
+
+  <!-- 标题注脚 -->
+  <text x="490" y="748" text-anchor="middle" fill="#6e7681" font-size="9">SWE-bench Verified 抽样实测 48% resolved（同模型基线 43%）· 修复成本 0.22 元/实例 · 332 项回归测试</text>
+</svg>

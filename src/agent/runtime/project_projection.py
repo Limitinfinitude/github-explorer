@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import ntpath
+from pathlib import Path
 from typing import Any
 
 from .tracing import sanitize
@@ -12,6 +13,28 @@ from .metrics import calculate_task_metrics
 
 
 _TERMINAL_FAILURES = {"failed", "blocked", "cancelled", "interrupted", "incomplete"}
+
+# 项目身份标记：任一存在即视为正式项目（享受体检/旅程/记忆仪式），否则为临时工作区
+_PROJECT_MARKERS = (
+    ".git", "pyproject.toml", "package.json", "requirements.txt",
+    "Cargo.toml", "go.mod", "pom.xml", "setup.py",
+)
+
+
+def detect_workspace_kind(workspace_root: str) -> str:
+    """工作区身份：正式项目（project）或临时工作区（scratch）。
+
+    简单写代码任务不该被套上项目仪式——识别只看目录里的客观标记。
+    """
+    root = Path(workspace_root) if workspace_root else None
+    if root is None:
+        return "scratch"
+    try:
+        if not root.is_dir():
+            return "scratch"
+        return "project" if any((root / marker).exists() for marker in _PROJECT_MARKERS) else "scratch"
+    except OSError:
+        return "scratch"
 
 # 事件时间线中的内部噪音事件（模型输出增量/思考/请求生命周期），
 # 对开发者证据无信息量，不在项目证据层展示

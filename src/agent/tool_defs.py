@@ -369,18 +369,28 @@ async def execute_tool(name: str, args: dict, session_id: str = "default") -> di
             return {"success": False, "output": f"工具执行错误: {str(e)}"}
 
     # --- 文件操作 ---
-    elif name == "read_file":
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(os.getcwd(), path)
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        return {"success": True, "content": content, "size": len(content)}
+    # 统一走 harness 的会话工作区边界（resolve）：越界直接拒绝，不再裸 open。
+    # 未绑定工作区时回退到进程 cwd（保持轻量模式的无绑定语义）。
+    elif name in ("read_file", "list_directory"):
+        path = str(args.get("path") or ".")
+        try:
+            from routes_agent import get_local_agent_services
+            from agent.runtime.workspace import WorkspaceError
 
-    elif name == "list_directory":
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(os.getcwd(), path)
+            services = get_local_agent_services()
+            try:
+                resolved = services.workspaces.resolve(session_id, path)
+            except WorkspaceError:
+                return {"success": False, "output": f"路径超出工作区范围: {path}"}
+        except Exception:
+            resolved = os.path.abspath(path)
+        path = str(resolved)
+
+        if name == "read_file":
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            return {"success": True, "content": content, "size": len(content)}
+
         entries = []
         for entry in os.scandir(path):
             entries.append({

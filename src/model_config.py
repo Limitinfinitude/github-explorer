@@ -13,10 +13,29 @@ _MODEL_CONFIGS_PATH = DATA_DIR / "model_configs.json"
 _ACTIVE_MODEL_PATH = DATA_DIR / "active_model.json"
 
 DEFAULT_MODEL_CONFIGS = [
-    {"id": "mimo-v2.5",       "name": "Mimo v2.5",       "model": "mimo-v2.5",       "protocol": "anthropic", "icon": "M", "color": "#8250df", "tags": ["1M", "识图"],  "api_key": "", "base_url": "https://api.xiaomimimo.com/anthropic"},
-    {"id": "grok-4.5",        "name": "Grok 4.5",        "model": "grok-4.5",        "protocol": "anthropic", "icon": "G", "color": "#cf222e", "tags": ["极速"],        "api_key": "", "base_url": "https://zz.aiapi2025.top"},
-    {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "model": "claude-sonnet-5", "protocol": "anthropic", "icon": "C", "color": "#0550ae", "tags": ["最新"],        "api_key": "", "base_url": "https://zz.aiapi2025.top"},
+    {"id": "mimo-v2.5",       "name": "Mimo v2.5",       "model": "mimo-v2.5",       "protocol": "anthropic", "icon": "M", "color": "#8250df", "tags": ["1M", "识图"],  "api_key": "", "base_url": "https://api.xiaomimimo.com/anthropic", "context_window": "1M"},
+    {"id": "grok-4.5",        "name": "Grok 4.5",        "model": "grok-4.5",        "protocol": "anthropic", "icon": "G", "color": "#cf222e", "tags": ["极速"],        "api_key": "", "base_url": "https://zz.aiapi2025.top", "context_window": "256k"},
+    {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "model": "claude-sonnet-5", "protocol": "anthropic", "icon": "C", "color": "#0550ae", "tags": ["最新"],        "api_key": "", "base_url": "https://zz.aiapi2025.top", "context_window": "200k"},
 ]
+
+DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+
+
+def parse_context_window(value) -> int:
+    """解析 context_window 配置：'1M'→1_000_000、'256k'→256_000、纯数字按 token；非法回退 128k。"""
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return DEFAULT_CONTEXT_WINDOW_TOKENS
+    try:
+        if text.endswith("m"):
+            return int(float(text[:-1]) * 1_000_000)
+        if text.endswith("k"):
+            return int(float(text[:-1]) * 1_000)
+        return int(text)
+    except (ValueError, TypeError):
+        return DEFAULT_CONTEXT_WINDOW_TOKENS
 
 
 def _load_model_configs() -> dict:
@@ -39,6 +58,7 @@ def _load_model_configs() -> dict:
                 merged.setdefault("api_key", "")
                 merged.setdefault("base_url", "")
                 merged.setdefault("thinking_effort", "off")
+                merged.setdefault("context_window", "128k")
                 base[mid] = merged
         except Exception:
             pass
@@ -126,6 +146,8 @@ def public_model(cfg: dict) -> dict:
         "base_url": cfg.get("base_url", ""),
         "has_key": bool(cfg.get("api_key", "")),
         "thinking_effort": _normalize_thinking_effort(cfg.get("thinking_effort", "off")),
+        "context_window": cfg.get("context_window", "128k"),
+        "context_window_tokens": parse_context_window(cfg.get("context_window")),
     }
 
 
@@ -167,6 +189,7 @@ def apply_model(model_id: str) -> bool:
     thinking_effort = _normalize_thinking_effort(cfg.get("thinking_effort", "off"))
     if thinking_effort in {"off", "high", "max"}:
         os.environ["LLM_THINKING_EFFORT"] = thinking_effort
+    os.environ["LLM_CONTEXT_WINDOW_TOKENS"] = str(parse_context_window(cfg.get("context_window")))
     return True
 
 

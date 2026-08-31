@@ -23,10 +23,20 @@ _DANGEROUS_PATTERNS = [
 
 
 def classify_command_risk(cmd: str) -> dict:
-    """检测命令风险等级。返回 {'risk': 'safe'|'high', 'reason': str}"""
+    """检测命令风险等级。返回 {'risk': 'safe'|'high', 'reason': str}
+
+    先匹配轻量模式特有的高危模式（Fork 炸弹/管道执行远程脚本等），
+    再叠加 harness 的 ToolRisk 分级——DESTRUCTIVE/PRIVILEGED/EXTERNAL/BOUNDARY
+    一律标 high，保证与主循环同一条风险口径。
+    """
     for pattern, reason in _DANGEROUS_PATTERNS:
         if _re_cmd.search(pattern, cmd, _re_cmd.IGNORECASE):
             return {"risk": "high", "reason": reason}
+    from agent.runtime.tooling import classify_command_risk as _harness_classify
+    from agent.runtime.models import ToolRisk
+    risk = _harness_classify({"command": cmd})
+    if risk in (ToolRisk.DESTRUCTIVE, ToolRisk.PRIVILEGED, ToolRisk.EXTERNAL, ToolRisk.BOUNDARY):
+        return {"risk": "high", "reason": f"harness 风险分级: {risk.value}"}
     return {"risk": "safe", "reason": ""}
 
 
@@ -35,19 +45,22 @@ def run_command(cmd: str, cwd: str = None, timeout: int = 60) -> dict:
     执行 shell 命令。
 
     Windows 下使用 PowerShell，Linux/Mac 下使用 bash。
+    执行体复用 harness 的 plan_shell_command（UTF-8 编码修复 + bash/curl 检测），
+    保证轻量模式与主循环同一条命令编码与打包链路（之前是另一套裸 powershell，中文乱码）。
     """
     try:
+        from agent.runtime.commands import plan_shell_command
+
         # 清理环境变量，避免 conda 等环境注入噪音
         clean_env = {k: v for k, v in os.environ.items()
                      if not k.startswith("CONDA") and k != "SSL_CERT_FILE"}
 
-        if platform.system() == "Windows":
-            shell = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd]
-        else:
-            shell = ["bash", "-c", cmd]
+        plan = plan_shell_command(cmd)
+        if plan.error:
+            return {"success": False, "output": f"{plan.error} {plan.suggestion or ''}".strip()}
 
         result = subprocess.run(
-            shell,
+            plan.args,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -86,17 +99,19 @@ async def run_command_stream(cmd: str, cwd: str = None, timeout: int = 60):
       {"type": "done", "success": bool, "returncode": int}
       {"type": "error", "text": str}
     """
+    from agent.runtime.commands import plan_shell_command
+
     clean_env = {k: v for k, v in os.environ.items()
                  if not k.startswith("CONDA") and k != "SSL_CERT_FILE"}
 
-    if platform.system() == "Windows":
-        args = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd]
-    else:
-        args = ["bash", "-c", cmd]
+    plan = plan_shell_command(cmd)
+    if plan.error:
+        yield {"type": "error", "text": f"{plan.error} {plan.suggestion or ''}".strip()}
+        return
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args,
+            *plan.args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
