@@ -37,7 +37,11 @@ def test_chat_message_roundtrip_preserves_process_data(tmp_path):
 def test_chat_messages_api_roundtrip(tmp_path, monkeypatch):
     import sys
     import agent.memory  # noqa: F401  确保模块已加载（agent/__init__ 用实例遮蔽了同名属性）
-    monkeypatch.setattr(sys.modules["agent.memory"], "memory", _store(tmp_path))
+    store = _store(tmp_path)
+    monkeypatch.setattr(sys.modules["agent.memory"], "memory", store)
+    # 聊天端点在 routes_agent，其模块级显式绑定 memory（组合根单点），需一并替换
+    import routes_agent
+    monkeypatch.setattr(routes_agent, "memory", store, raising=False)
 
     response = TestClient(main.app).post("/api/chats/sess-1/messages", json={
         "role": "assistant",

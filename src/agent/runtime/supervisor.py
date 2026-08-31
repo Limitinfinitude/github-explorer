@@ -4,6 +4,8 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from .state_schema import normalize_state
+
 
 _TERMINAL_STATUSES = {
     "completed", "incomplete", "failed", "blocked", "cancelled", "interrupted",
@@ -35,6 +37,7 @@ class AgentTaskSupervisor:
         model_context: dict | None = None,
         task_id: str | None = None,
         approval_mode: str = "confirm",
+        plan_mode: bool = False,
     ) -> str:
         active = self.task_store.get_latest_nonterminal_agent_task(session_id)
         if active is not None:
@@ -49,6 +52,7 @@ class AgentTaskSupervisor:
             task_id=task_id,
             model_context=model_context or {},
             approval_mode=approval_mode,
+            plan_mode=plan_mode,
         ))
         self._tasks[task_id] = worker
         worker.add_done_callback(lambda _: self._tasks.pop(task_id, None))
@@ -62,11 +66,12 @@ class AgentTaskSupervisor:
         model_context: dict | None = None,
     ) -> str:
         state = self.task_store.get_agent_task(task_id)
+        state = normalize_state(state) if state is not None else None
         if (
             state is None
             or state.get("session_id") != session_id
             or state.get("status") != "interrupted"
-            or not state.get("resume_available")
+            or not state["run"].get("resume_available")
         ):
             raise ValueError(f"任务不可恢复: {task_id}")
         worker = self._tasks.get(task_id)
@@ -143,6 +148,7 @@ class AgentTaskSupervisor:
                 "user_message": message,
                 "summary": {},
             }
+            normalize_state(state)
             if state.get("status") not in _TERMINAL_STATUSES:
                 state["status"] = "failed"
                 state["final_text"] = f"Agent 后台任务失败（{type(exc).__name__}）：{str(exc).strip() or '未提供错误信息'}"
@@ -168,8 +174,9 @@ class AgentTaskSupervisor:
         except Exception as exc:
             state = self.task_store.get_agent_task(task_id)
             if state is not None and state.get("status") not in _TERMINAL_STATUSES:
+                normalize_state(state)
                 state["status"] = "failed"
-                state["resume_available"] = False
+                state["run"]["resume_available"] = False
                 state["final_text"] = f"恢复任务失败（{type(exc).__name__}）：{str(exc).strip() or '未提供错误信息'}"
                 self.task_store.save_agent_task(state)
                 self.task_store.record_agent_event({

@@ -67,15 +67,20 @@ def plan_shell_command(command: str) -> ShellCommandPlan:
 
     normalized = _BARE_CURL_RE.sub("curl.exe", command)
     if _CMD_COMMAND_RE.search(normalized):
+        # chcp 65001：让 cmd 子进程按 UTF-8 输出，否则中文在 utf-8 解码下成乱码
         return ShellCommandPlan(
             command,
             normalized,
             "cmd",
-            ["cmd.exe", "/d", "/s", "/c", normalized],
+            ["cmd.exe", "/d", "/s", "/c", f"chcp 65001 >nul & {normalized}"],
         )
 
     wrapped = (
-            "& { " + normalized + "; "
+            "& { "
+            # PowerShell 默认按系统 OEM 码页（GBK）输出，runner 按 utf-8 解码会得到乱码；
+            # 先把输出编码切到 UTF-8，与 runner 的解码约定对齐
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+            + normalized + "; "
             "if (-not $?) { "
             "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }; "
             "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } "

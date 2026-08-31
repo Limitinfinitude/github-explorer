@@ -1,5 +1,4 @@
 import json
-import re
 import urllib.error
 import uuid
 from dataclasses import dataclass
@@ -61,56 +60,9 @@ def set_active_runtime(runtime: "LocalAgentRuntime | None") -> None:
     _active_runtime = runtime
 
 
-_DESTRUCTIVE_COMMANDS = re.compile(
-    r"\b(Remove-Item|rm|del|rmdir|mkfs|diskpart)\b|"
-    r"^\s*format(?:\.com)?(?:\s|$)|git\s+(reset\s+--hard|clean\s+-[a-z]*f)",
-    re.IGNORECASE,
-)
-_PRIVILEGED_COMMANDS = re.compile(
-    r"\b(sudo|runas)\b|Start-Process.+-Verb\s+RunAs|\b(winget|choco)\s+install\b",
-    re.IGNORECASE,
-)
-_EXTERNAL_COMMANDS = re.compile(
-    r"\bgit\s+push\b|\bgh\s+(repo\s+create|pr\s+create|issue\s+create|release\s+create)\b|\bnpm\s+publish\b",
-    re.IGNORECASE,
-)
-
-# 边界拦截（ToolRisk.BOUNDARY）：评测完整性 + 全局环境污染。
-# - 受限路径引用：判分脚本目录（checks/）与评测结果文件（results-*.jsonl）。
-#   语义对齐 SWE-bench「测试对 agent 物理隐藏」——agent 在非完全访问档下不可触碰；
-# - 全局工具链/系统级写入：setx（注册表持久化环境变量）、reg add、npm/pnpm/yarn -g、
-#   go install（写全局 GOBIN）。这些会跨任务污染本机环境。
-_BOUNDARY_REFERENCE_RE = re.compile(
-    r"(?:^|[\\/])(?:checks[\\/]|results-[A-Za-z0-9_.-]*\.jsonl)",
-    re.IGNORECASE,
-)
-_GLOBAL_WRITE_RE = re.compile(
-    r"\bsetx\b|\breg\s+add\b|\b(?:npm|pnpm)\s+(?:install|i|add)\s+(?:-g\b|--global\b)|"
-    r"\byarn\s+global\s+add\b|\bgo\s+install\b",
-    re.IGNORECASE,
-)
-
-
-def boundary_violation(command: str) -> str | None:
-    """检测命令是否引用工作区外受限路径或做全局工具链写入。返回违规原因或 None。"""
-    if _BOUNDARY_REFERENCE_RE.search(command):
-        return "命令引用受限路径（判分脚本/评测结果目录）"
-    if _GLOBAL_WRITE_RE.search(command):
-        return "命令执行全局工具链/系统级写入（如 setx、npm install -g、go install）"
-    return None
-
-
-def classify_command_risk(args: dict) -> ToolRisk:
-    command = str(args.get("command", ""))
-    if boundary_violation(command):
-        return ToolRisk.BOUNDARY
-    if _DESTRUCTIVE_COMMANDS.search(command):
-        return ToolRisk.DESTRUCTIVE
-    if _PRIVILEGED_COMMANDS.search(command):
-        return ToolRisk.PRIVILEGED
-    if _EXTERNAL_COMMANDS.search(command):
-        return ToolRisk.EXTERNAL
-    return ToolRisk.PROCESS
+# 治理的纯文本规则（boundary_violation / classify_command_risk）规范定义在
+# guard.py（治理规则同源，审计 E 期）。这里保留兼容别名，避免全部调用点同步改。
+from .guard import boundary_violation, classify_command_risk  # noqa: F401
 
 
 def _schema(properties: dict, required: list[str] | None = None) -> dict:
@@ -249,6 +201,12 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         "timeout": {"type": "number", "minimum": 0.1, "maximum": 60, "description": "秒，最大 60"},
     }, ["method", "url"], ToolRisk.READ, http_request)
 
+    add("web_search", "无 key 网页搜索：返回标题/链接/摘要列表（DuckDuckGo 匿名抓取，失败自动回退 Bing RSS）。需要最新信息、事实核查、榜单/新闻时优先用它；要看某条结果的正文再用 web_fetch 抓该 url", {
+        "query": {"type": "string", "description": "搜索词，中英文皆可"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 15, "description": "结果条数，默认 8"},
+    }, ["query"], ToolRisk.READ,
+        lambda a: services.network.search(str(a.get("query", "")), int(a.get("limit", 8) or 8)))
+
     add("web_fetch", "只读抓取外网页面/API 文本（GET），用于获取仓库信息、文档等；不能访问本机/内网地址", {
         "url": {"type": "string"},
         "timeout": {"type": "number", "minimum": 1, "maximum": 30, "description": "秒"},
@@ -281,6 +239,25 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
     try:
         from agent.mcp_client import cached_mcp_tools
 
+        # MCP 工具风险启发式：名字/描述明显只读的降级为 READ（少一类审批噪音），
+        # 不确定的仍保守兜底 EXTERNAL——审计 B 期
+        _MCP_READ_HINTS = (
+            "search", "fetch", "get", "list", "read", "find", "query", "describe",
+            "lookup", "view", "show", "info", "download", "crawl", "scrape",
+        )
+
+        def _mcp_risk(name: str, desc: str) -> ToolRisk:
+            haystack = f"{name} {desc}".casefold()
+            # 明显写动词的优先级最高，避免 "search and update" 被误判只读
+            if any(w in haystack for w in (
+                "create", "delete", "remove", "update", "edit", "write",
+                "upload", "publish", "send", "execute", "run ", "commit", "merge", "push",
+            )):
+                return ToolRisk.EXTERNAL
+            if any(w in haystack for w in _MCP_READ_HINTS):
+                return ToolRisk.READ
+            return ToolRisk.EXTERNAL
+
         for mcp_tool in cached_mcp_tools():
             tool_name = str(mcp_tool.get("name") or "")
             server = str(mcp_tool.get("server") or "mcp")
@@ -311,7 +288,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
                     if isinstance(schema, dict) and schema.get("type") == "object"
                     else _schema({})
                 ),
-                risk=ToolRisk.EXTERNAL,
+                risk=_mcp_risk(tool_name, description),
                 handler=mcp_handler,
             ))
     except ImportError:
@@ -320,7 +297,7 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
         pass
 
     async def spawn_subagent(a):
-        from .subagent import run_subagent
+        from .subagent import MAX_SUBAGENT_ROUNDS, MAX_SUBAGENT_TOOL_CALLS, run_subagent
         from .tracing import current_tool_call_context
 
         runtime = _active_runtime
@@ -350,12 +327,61 @@ def build_tool_registry(session_id: str, services: LocalAgentServices) -> ToolRe
             registry,
             task,
             [str(item) for item in (a.get("tools") or [])] or None,
+            # 预算从 runtime 治理参数注入，子循环不再持有写死的常量
+            max_rounds=getattr(runtime, "subagent_max_rounds", MAX_SUBAGENT_ROUNDS),
+            max_tool_calls=getattr(runtime, "subagent_max_tool_calls", MAX_SUBAGENT_TOOL_CALLS),
         )
 
     add("spawn_subagent", "委托一个聚焦任务给子代理执行并返回其结论摘要。适合独立的只读调研/检索：给出明确目标与产出要求，子代理使用受限工具集并在预算内收敛", {
         "task": {"type": "string", "description": "委托任务：目标、需要的上下文、期望产出"},
         "tools": {"type": "array", "items": {"type": "string"}, "description": "工具白名单；缺省为只读工具集"},
     }, ["task"], ToolRisk.PROCESS, spawn_subagent)
+
+    async def spawn_subagents(a):
+        """并行扇出多个聚焦子代理，结论交回让主模型汇总（map-reduce 的 fan-out 侧）。"""
+        from .subagent import (
+            MAX_FANOUT_CONCURRENCY, MAX_SUBAGENT_ROUNDS, MAX_SUBAGENT_TOOL_CALLS,
+            run_subagents,
+        )
+        from .tracing import current_tool_call_context
+
+        runtime = _active_runtime
+        if runtime is None:
+            return ToolResult.fail("子代理运行时不可用", error_kind="tool_error")
+        tasks = [t for t in (a.get("tasks") or [])]
+        if not tasks:
+            return ToolResult.fail("tasks 不能为空", error_kind="invalid_input")
+        task_id = current_tool_call_context().get("task_id", "")
+        try:
+            state = runtime._load_task(task_id) or {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_message": "并行子代理",
+                "summary": {},
+            }
+        except Exception:
+            state = {
+                "task_id": task_id,
+                "session_id": session_id,
+                "user_message": "并行子代理",
+                "summary": {},
+            }
+        return await run_subagents(
+            runtime,
+            state,
+            registry,
+            tasks,
+            [str(item) for item in (a.get("tools") or [])] or None,
+            concurrency=int(a.get("concurrency") or MAX_FANOUT_CONCURRENCY),
+            max_rounds=getattr(runtime, "subagent_max_rounds", MAX_SUBAGENT_ROUNDS),
+            max_tool_calls=getattr(runtime, "subagent_max_tool_calls", MAX_SUBAGENT_TOOL_CALLS),
+        )
+
+    add("spawn_subagents", "并行委托多个聚焦子代理（map-reduce 的 fan-out）：每个子代理独立调研并在预算内收敛，结论全部交回，由主模型综合成对主任务的答复。适合把一个复杂任务拆成互不依赖的子问题并行分析", {
+        "tasks": {"type": "array", "items": {"type": "string"}, "description": "聚焦子任务列表，每个是一个独立可并行的调研目标"},
+        "tools": {"type": "array", "items": {"type": "string"}, "description": "工具白名单；缺省为只读工具集"},
+        "concurrency": {"type": "integer", "minimum": 1, "maximum": 4, "description": "并发上限，默认 4"},
+    }, ["tasks"], ToolRisk.PROCESS, spawn_subagents)
 
     def http_request_batch(a):
         group_id = str(a.get("group_id") or f"batch-{uuid.uuid4().hex[:12]}")

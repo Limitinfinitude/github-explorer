@@ -115,6 +115,8 @@ def calculate_task_metrics(*, task: Mapping[str, Any], activity: Mapping[str, An
         execution_facts=execution_facts,
         acceptance_passed=acceptance_passed,
     )
+    # 治理集群从 state["run"] 读（旧持久化行扁平保存，回退兼容）
+    run_state = task.get("run") if isinstance(task.get("run"), Mapping) else {}
 
     return {
         "false_completion": status == "completed" and bool(failed_checks or invalid_acceptance or unrecovered_tools),
@@ -131,8 +133,8 @@ def calculate_task_metrics(*, task: Mapping[str, Any], activity: Mapping[str, An
         "terminal_reason": terminal_reason,
         "completion_evidence": completion_evidence,
         "budget_exhausted_stages": budget_exhausted_stages,
-        "diagnostic_tool_count": int(task.get("diagnostic_tool_count") or 0),
-        "diagnostic_unique_count": int(task.get("diagnostic_unique_count") or 0),
+        "diagnostic_tool_count": int(run_state.get("diagnostic_tool_count") or task.get("diagnostic_tool_count") or 0),
+        "diagnostic_unique_count": int(run_state.get("diagnostic_unique_count") or task.get("diagnostic_unique_count") or 0),
         "approval_count": approval_count,
         "failed_tool_count": failed_tools,
         "recovered_tool_count": recovered_tools,

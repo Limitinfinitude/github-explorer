@@ -207,6 +207,12 @@ class Memory:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id)"
         )
+        # 热路径：supervisor 互斥检查 / 运行记录列表都按 session_id+updated_at 查 agent_tasks，
+        # 实测缺此索引时是 SCAN+临时 B-tree（审计 P1）
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session_updated "
+            "ON agent_tasks(session_id, updated_at DESC)"
+        )
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS agent_tool_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -642,18 +648,20 @@ class Memory:
             "SELECT task_id, state_json FROM agent_tasks WHERE status IN ('queued', 'running', 'pending')"
         ).fetchall()
         reconciled: List[str] = []
+        from agent.runtime.state_schema import normalize_state
         for task_id, state_json in rows:
             state = json.loads(state_json)
+            normalize_state(state)
             # pending 任务（注册后未启动）重启后不可恢复，直接中断
             if state.get("status") == "pending":
                 state["status"] = "interrupted"
-                state["resume_available"] = False
-                state["resume_reason"] = "task_never_started"
+                state["run"]["resume_available"] = False
+                state["run"]["resume_reason"] = "task_never_started"
             else:
                 state["status"] = "interrupted"
-                state["resume_available"] = True
-                state["resume_reason"] = "runtime_restarted"
-            state["resume_count"] = int(state.get("resume_count", 0))
+                state["run"]["resume_available"] = True
+                state["run"]["resume_reason"] = "runtime_restarted"
+            state["run"]["resume_count"] = int(state["run"].get("resume_count", 0))
             state["final_text"] = "服务重启前任务未结束，已标记为中断。"
             summary = state.setdefault("summary", {})
             processes = summary.get("processes", [])
@@ -1148,6 +1156,63 @@ class Memory:
         self.conn.execute("DELETE FROM agent_task_metrics WHERE task_id = ?", (task_id,))
         self.conn.commit()
 
+    def forget_agent_project(self, project_id: str) -> Dict[str, int]:
+        """移除一个项目的全部本地运行记录（工作台「移除」）。
+
+        删除 agent 任务及其事件/工具/变更/指标、项目会话的聊天消息与工作区绑定；
+        只动数据库记录，不碰磁盘文件夹。project_id 是 workspace 规范化哈希
+        （project_projection），按它匹配任务而不是原始路径字符串，避免分隔符差异漏删。
+        """
+        from agent.runtime.project_projection import (
+            project_id_for_workspace,
+            project_session_id_for_workspace,
+        )
+
+        rows = self.conn.execute(
+            "SELECT task_id, session_id, state_json FROM agent_tasks"
+        ).fetchall()
+        task_ids: List[str] = []
+        session_ids = set()
+        matched_root = ""
+        for task_id, session_id, state_json in rows:
+            try:
+                workspace_root = str(json.loads(state_json).get("workspace_root") or "")
+            except (TypeError, ValueError):
+                continue
+            if project_id_for_workspace(workspace_root) != project_id:
+                continue
+            task_ids.append(str(task_id))
+            session_ids.add(str(session_id))
+            matched_root = workspace_root
+        # 没跑过任务的项目（刚导入）：从工作区绑定表反查 session/root
+        if not task_ids:
+            for session_id, root in self.conn.execute("SELECT session_id, root FROM workspaces").fetchall():
+                if project_id_for_workspace(str(root or "")) == project_id:
+                    session_ids.add(str(session_id))
+                    matched_root = str(root or matched_root)
+        if not session_ids:
+            return {"tasks": 0}
+        if matched_root:
+            # 项目的对话消息可能落在规范的项目会话里（打开项目对话），一并清理
+            session_ids.add(project_session_id_for_workspace(matched_root))
+        counts: Dict[str, int] = {}
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            for table in ("agent_events", "agent_tool_runs", "agent_tool_calls",
+                          "agent_changesets", "agent_task_metrics", "agent_artifacts"):
+                cursor = self.conn.execute(f"DELETE FROM {table} WHERE task_id IN ({placeholders})", task_ids)
+                counts[table] = cursor.rowcount
+            cursor = self.conn.execute(f"DELETE FROM agent_tasks WHERE task_id IN ({placeholders})", task_ids)
+            counts["agent_tasks"] = cursor.rowcount
+        for session_id in session_ids:
+            if not session_id:
+                continue
+            self.conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+            self.conn.execute("DELETE FROM workspaces WHERE session_id = ?", (session_id,))
+        counts["sessions"] = len(session_ids)
+        self.conn.commit()
+        return counts
+
     def get_agent_metrics_snapshot(self, task_id: str) -> Optional[Dict]:
         row = self.conn.execute(
             "SELECT metrics_version, metrics_json, computed_at "
@@ -1463,6 +1528,7 @@ class Memory:
     ) -> List[Dict]:
         """Build compact trace summaries from snapshots and lightweight raw facts."""
         from agent.runtime.metrics import METRICS_VERSION, calculate_task_metrics
+        from agent.runtime.state_schema import normalize_state
 
         clauses = []
         params: list = []
@@ -1488,6 +1554,7 @@ class Memory:
         terminal_statuses = {"completed", "incomplete", "failed", "blocked", "cancelled", "interrupted"}
         for task_id, session_id, message, task_status, state_json, created_at, updated_at in rows:
             state = json.loads(state_json)
+            normalize_state(state)
             snapshot = self.get_agent_metrics_snapshot(task_id)
             if snapshot and snapshot["metrics_version"] == METRICS_VERSION:
                 quality_metrics = snapshot["metrics"]
@@ -1523,7 +1590,7 @@ class Memory:
                     "legacy_corrupted" if re.search(r"\?{6,}", str(message)) else "intact"
                 ),
                 "status": task_status,
-                "resume_available": bool(state.get("resume_available")),
+                "resume_available": bool(state["run"].get("resume_available")),
                 "workspace_root": workspace_root,
                 "tool_count": quality_metrics.get("tool_count", 0),
                 "failed_tool_count": quality_metrics["unrecovered_tool_failures"],

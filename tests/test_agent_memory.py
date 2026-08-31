@@ -395,8 +395,8 @@ def test_reconcile_marks_task_resumable_and_is_idempotent(tmp_path):
     restored = memory.get_agent_task("resume-task")
 
     assert restored["status"] == "interrupted"
-    assert restored["resume_available"] is True
-    assert restored["resume_count"] == 0
+    assert restored["run"]["resume_available"] is True
+    assert restored["run"]["resume_count"] == 0
 
 
 def test_agent_tool_call_recovery_keeps_failure_terminal_and_persists_link(tmp_path):

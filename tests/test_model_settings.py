@@ -30,7 +30,7 @@ def test_custom_model_persists_and_reloads(monkeypatch, tmp_path):
     loaded = model_config._load_model_configs()
 
     # 加载时补齐默认思考程度，旧配置文件没有该字段
-    assert loaded[custom["id"]] == {**custom, "thinking_effort": "off"}
+    assert loaded[custom["id"]] == {**custom, "thinking_effort": "off", "context_window": "128k"}
 
 
 def test_unregistered_environment_model_is_loaded_with_its_credentials(monkeypatch, tmp_path):

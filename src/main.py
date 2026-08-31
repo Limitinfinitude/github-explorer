@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from agent.memory import memory
 from dataclasses import asdict
 from dotenv import load_dotenv
 
@@ -134,6 +135,14 @@ async def select_model_endpoint(s: SettingsSelectRequest):
     ok = model_config.apply_model(s.model_id)
     if ok:
         model_config._save_active_model_id(s.model_id)
+        # 热更新 runtime 的上下文窗口（新模型的 context_window）
+        try:
+            from routes_agent import get_local_agent_runtime
+            runtime = get_local_agent_runtime()
+            runtime.max_context_tokens = int(os.environ.get("LLM_CONTEXT_WINDOW_TOKENS") or runtime.max_context_tokens)
+        except Exception:
+            # runtime 尚未初始化时忽略（首次构造时会读取环境变量）
+            pass
     return {"ok": ok, "active_model": model_config.get_active_model_id()}
 
 
@@ -371,7 +380,6 @@ async def set_workspace(request: dict):
     try:
         path = request.get("path")
         if path and Path(path).is_dir():
-            from agent.memory import memory
             memory.set_preference("workspace", path)
             return {"success": True, "workspace": path}
         return {"success": False, "error": "无效路径"}
@@ -383,7 +391,6 @@ async def set_workspace(request: dict):
 async def get_workspace():
     """获取工作目录"""
     try:
-        from agent.memory import memory
         workspace = memory.get_preference("workspace") or str(Path.cwd())
         return {"workspace": workspace}
     except:

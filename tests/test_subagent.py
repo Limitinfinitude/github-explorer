@@ -7,9 +7,11 @@ from agent.runtime.registry import ToolDefinition, ToolRegistry
 from agent.runtime.runtime import LocalAgentRuntime
 from agent.runtime.subagent import (
     DEFAULT_SUBAGENT_TOOLS,
+    MAX_FANOUT_TASKS,
     MAX_SUBAGENT_ROUNDS,
     MAX_SUBAGENT_TOOL_CALLS,
     run_subagent,
+    run_subagents,
     subagent_system_prompt,
 )
 from agent.runtime.workspace import WorkspaceManager
@@ -149,3 +151,115 @@ def test_run_subagent_permission_gate_rejects_without_confirmation(tmp_path: Pat
     result = asyncio.run(scenario())
     assert result.success is True
     assert "需要用户确认" in result.output or "主代理" in result.output
+
+
+# ==================== run_subagents：并行 fan-out + 汇总 ====================
+
+def make_parallel_runtime(tmp_path: Path, per_task_conclusions: dict[str, str]):
+    """每个子代理第一轮直接给结论（无需工具），结论按 task 内容路由。"""
+    root = tmp_path / "project"
+    root.mkdir()
+    workspaces = WorkspaceManager()
+    workspaces.bind("session", root)
+
+    async def fake_llm(**kwargs):
+        messages = kwargs.get("messages") or []
+        # 子代理首条消息即 task 内容；据此路由结论
+        task = messages[0]["content"] if messages else ""
+        for key, conclusion in per_task_conclusions.items():
+            if key in task:
+                return {"text": conclusion, "tool_uses": [], "stop_reason": "end_turn"}
+        return {"text": f"处理了：{task}", "tool_uses": [], "stop_reason": "end_turn"}
+
+    def registry_factory(session_id: str):
+        return ToolRegistry()
+
+    return LocalAgentRuntime(workspaces, registry_factory, fake_llm, task_store=None), root
+
+
+def test_run_subagents_fans_out_and_collects_conclusions(tmp_path: Path):
+    conclusions = {
+        "查询A": "A 的结论：找到 3 处。",
+        "查询B": "B 的结论：无匹配。",
+        "查询C": "C 的结论：已定位。",
+    }
+    runtime, _ = make_parallel_runtime(tmp_path, conclusions)
+
+    async def scenario():
+        registry = runtime.registry_factory("session")
+        state = {"task_id": "fanout-task", "session_id": "session", "summary": {}, "user_message": "并行"}
+        runtime.register_task("session", "fanout-task")
+        return await run_subagents(runtime, state, registry, ["查询A", "查询B", "查询C"], None)
+
+    result = asyncio.run(scenario())
+    assert result.success is True
+    assert result.data["task_count"] == 3
+    assert result.data["succeeded"] == 3
+    assert result.data["failed"] == 0
+    # 交回的 output 以编号清单组织，注明让主模型 synthesize
+    assert "请综合成对主任务的答复" in result.output
+    assert "[1]" in result.output and "[2]" in result.output and "[3]" in result.output
+    assert "A 的结论" in result.output and "B 的结论" in result.output
+
+
+def test_run_subagents_isolates_failed_task(tmp_path: Path):
+    """单个子代理失败不阻断整批：失败项记录错误，成功项照常收编。"""
+    conclusions = {"OK": "成功结论。", "FAIL": "成功结论。"}
+
+    root = tmp_path / "project"
+    root.mkdir()
+    workspaces = WorkspaceManager()
+    workspaces.bind("session", root)
+
+    async def fake_llm(**kwargs):
+        messages = kwargs.get("messages") or []
+        task = messages[0]["content"] if messages else ""
+        if "FAIL" in task:
+            raise RuntimeError("子代理炸了")
+        return {"text": "成功结论。", "tool_uses": [], "stop_reason": "end_turn"}
+
+    runtime = LocalAgentRuntime(workspaces, lambda _: ToolRegistry(), fake_llm, task_store=None)
+
+    async def scenario():
+        registry = runtime.registry_factory("session")
+        state = {"task_id": "fanout-task", "session_id": "session", "summary": {}, "user_message": "并行"}
+        runtime.register_task("session", "fanout-task")
+        return await run_subagents(runtime, state, registry, ["OK 任务", "FAIL 任务"], None)
+
+    result = asyncio.run(scenario())
+    assert result.success is True  # 整批调用本身成功
+    assert result.data["succeeded"] == 1
+    assert result.data["failed"] == 1
+    # 汇总里能看到失败描摹
+    assert "失败 1" in result.output
+    failed_item = [r for r in result.data["results"] if not r["success"]][0]
+    assert failed_item["error"]
+
+
+def test_run_subagents_caps_task_count(tmp_path: Path):
+    conclusions = {}
+    runtime, _ = make_parallel_runtime(tmp_path, conclusions)
+    too_many = [f"任务{i}" for i in range(MAX_FANOUT_TASKS + 5)]
+
+    async def scenario():
+        registry = runtime.registry_factory("session")
+        state = {"task_id": "fanout-task", "session_id": "session", "summary": {}, "user_message": "并行"}
+        runtime.register_task("session", "fanout-task")
+        return await run_subagents(runtime, state, registry, too_many, None)
+
+    result = asyncio.run(scenario())
+    assert result.data["task_count"] == MAX_FANOUT_TASKS  # 超出被截断
+
+
+def test_run_subagents_rejects_empty_tasks(tmp_path: Path):
+    runtime, _ = make_parallel_runtime(tmp_path, {})
+
+    async def scenario():
+        registry = runtime.registry_factory("session")
+        state = {"task_id": "fanout-task", "session_id": "session", "summary": {}, "user_message": "并行"}
+        runtime.register_task("session", "fanout-task")
+        return await run_subagents(runtime, state, registry, [], None)
+
+    result = asyncio.run(scenario())
+    assert result.success is False
+    assert result.error_kind == "invalid_input"

@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import os
 import platform
 import re
 import time
@@ -15,11 +16,13 @@ from .compaction import CompactionEngine
 from .acceptance import WorkProductEvaluator
 from .context import ContextEngine
 from .evidence import normalize_evidence_path
+from .guard import DIAGNOSTIC_TOOLS, LoopGuard
 from .instructions import InstructionLoader
 from .models import ToolResult
 from .registry import ToolRegistry
 from .response_format import format_final_response
 from .skills import skill_index
+from .state_schema import RunState, normalize_state
 from .tool_calls import (
     TERMINAL_TOOL_CALL_STATUSES,
     normalize_tool_calls,
@@ -40,6 +43,12 @@ _DIRECT_CHAT_RE = re.compile(
     r"你的(?:能力|功能|本地操作工具)有哪些|介绍一下你自己)\s*[?？!！。]*\s*$",
     re.IGNORECASE,
 )
+
+
+def _short_text(value: Any, limit: int = 48) -> str:
+    """旁白用的单行短摘要：压掉换行、超长截断。"""
+    text = str(value if value is not None else "?").strip().replace("\r", " ").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 _UNFINISHED_TEXT_RE = re.compile(r"[\w\u3400-\u9fff]$")
 _EXPLICIT_UNFINISHED_RE = re.compile(
     r"(?:`?\[未完成\]`?|(?:^|[\s：:])未完成(?:$|[\s，。；;：:]))",
@@ -60,10 +69,8 @@ _VERIFICATION_COMMAND_RE = re.compile(
     r"\b(build|test|pytest|vitest|compileall|lint|tsc|go\s+vet|npm\s+run|pnpm\s+run)\b",
     re.IGNORECASE,
 )
-_DIAGNOSTIC_TOOLS = {
-    "list_directory", "read_file", "search_text", "repo_map", "detect_project",
-    "get_process", "list_processes", "check_port", "wait_http",
-}
+# 诊断类工具集的规范定义在 guard.py（治理规则与判定同源，运行时仅消费）
+_DIAGNOSTIC_TOOLS = DIAGNOSTIC_TOOLS
 _STAGE_TOOLS = {
     "inspect": _DIAGNOSTIC_TOOLS - {"check_port", "wait_http"},
     "test": {"verify_project"},
@@ -105,6 +112,8 @@ class LocalAgentRuntime:
         context_engine: ContextEngine | None = None,
         compaction_engine: CompactionEngine | None = None,
         hook_runner: Any | None = None,
+        subagent_max_rounds: int = 8,
+        subagent_max_tool_calls: int = 12,
     ) -> None:
         self.workspaces = workspaces
         self.registry_factory = registry_factory
@@ -113,6 +122,8 @@ class LocalAgentRuntime:
         self.max_rounds = max_rounds
         self.max_identical_failures = max_identical_failures
         self.max_context_tokens = max_context_tokens
+        # 上下文软阈值：占用超过窗口该比例即主动压缩（不必塞满才压），兼容旧档位无感
+        self.compact_ratio = float(os.environ.get("LLM_COMPACT_RATIO", "0.75"))
         self.max_output_tokens = max_output_tokens
         self.diagnostic_tool_budget = diagnostic_tool_budget
         self.replan_extra_rounds = replan_extra_rounds
@@ -126,11 +137,17 @@ class LocalAgentRuntime:
         self._task_cache: dict[str, dict] = {}
         self._cancelled_tasks: set[str] = set()
         self._model_bindings: dict[str, ModelBinding] = {}
+        # 子代理预算：治理参数集中在 runtime，经 spawn_subagent 注入子循环
+        # （原先是 subagent.py 里的写死常量，治理规则不可调不可见）
+        self.subagent_max_rounds = max(1, int(subagent_max_rounds))
+        self.subagent_max_tool_calls = max(1, int(subagent_max_tool_calls))
+        # 治理闸门：生死与预算的全部判定集中于此（纯策略，活读本对象参数）
+        self.guard = LoopGuard(self)
 
     def register_task(self, session_id: str, task_id: str) -> None:
         if self._load_task(task_id) is not None:
             return
-        self._save_task({
+        self._save_task(normalize_state({
             "task_id": task_id,
             "session_id": session_id,
             "user_message": "",
@@ -140,9 +157,7 @@ class LocalAgentRuntime:
                 "stage_budgets": self._new_stage_budgets(),
             },
             "plan": [],
-            "tool_call_ledger": {},
-            "active_batch": None,
-        })
+        }))
 
     async def confirm(self, session_id: str, task_id: str, approved: bool) -> ToolResult:
         events = [event async for event in self.resume(session_id, task_id, approved)]
@@ -182,6 +197,7 @@ class LocalAgentRuntime:
         task_id: str | None = None,
         model_context: dict | None = None,
         approval_mode: str = "confirm",
+        plan_mode: bool = False,
     ) -> AsyncIterator[dict]:
         task_id = task_id or uuid.uuid4().hex
         registered = self._load_task(task_id)
@@ -221,10 +237,8 @@ class LocalAgentRuntime:
                     "current_path": str(current_path),
                     "summary": {"changed_files": [], "verification": [], "processes": [], "successful_tools": []},
                     "plan": [],
-                    "tool_call_ledger": {},
-                    "active_batch": None,
-                    "allow_tools": False,
                 }
+                normalize_state(state)
                 self._save_task(state)
                 self._record_event({
                     "session_id": session_id,
@@ -312,21 +326,7 @@ class LocalAgentRuntime:
             "session_id": session_id,
             "user_message": user_message,
             "status": "running",
-            "approval_mode": approval_mode if approval_mode in {"confirm", "auto", "open", "guardian", "full"} else "confirm",
             "messages": [*(history or []), {"role": "user", "content": user_message}],
-            "round": 0,
-            "round_limit": self.max_rounds,
-            "diagnostic_tool_count": 0,
-            "diagnostic_unique_count": 0,
-            "diagnostic_observations": [],
-            "material_tool_seen": False,
-            "requires_material_change": requires_material_change,
-            "replanned": False,
-            "failure_counts": {},
-            "schema_repair_counts": {},
-            "unrecovered_failures": {},
-            "active_batch": None,
-            "tool_call_ledger": {},
             "repo_map": repo_map,
             "workspace_root": str(workspace.root),
             "current_path": str(current_path),
@@ -337,8 +337,6 @@ class LocalAgentRuntime:
             "instruction_warnings": instruction_context.warnings,
             "project_memories": project_memories,
             "context_handoff": None,
-            "compaction_count": 0,
-            "compacted_message_count": 0,
             "summary": {
                 "changed_files": [], "verification": [], "processes": [], "successful_tools": [],
                 "stage_budgets": self._new_stage_budgets(),
@@ -348,8 +346,14 @@ class LocalAgentRuntime:
             "session_requirements": session_requirements,
             "requirement_context": requirement_context,
             "implicit_requirement_positions": implicit_requirement_positions,
-            "context_emitted": False,
-            "allow_tools": not direct_chat,
+            "plan_mode": bool(plan_mode),
+            # 治理集群（生死/预算/重试/账目）——schema 见 state_schema.RunState
+            "run": asdict(RunState(
+                round_limit=self.max_rounds,
+                allow_tools=not direct_chat,
+                approval_mode=approval_mode if approval_mode in {"confirm", "auto", "open", "guardian", "full"} else "confirm",
+                requires_material_change=requires_material_change,
+            )),
         }
         self._save_task(state)
         self._record_event({
@@ -377,9 +381,9 @@ class LocalAgentRuntime:
             if state.get("status") == "running":
                 self._settle_open_tool_calls(state, "Task stream closed before completion.")
                 state["status"] = "interrupted"
-                state["resume_available"] = True
-                state["resume_count"] = int(state.get("resume_count", 0))
-                state["resume_reason"] = "stream_closed"
+                state["run"]["resume_available"] = True
+                state["run"]["resume_count"] = int(state["run"].get("resume_count", 0))
+                state["run"]["resume_reason"] = "stream_closed"
                 self._save_task(state)
                 self._record_event({
                     **base_event,
@@ -392,6 +396,7 @@ class LocalAgentRuntime:
         session_id: str,
         task_id: str,
         approved: bool,
+        approved_plan: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         state = self._load_task(task_id)
         base_event = {"session_id": session_id, "task_id": task_id}
@@ -400,15 +405,44 @@ class LocalAgentRuntime:
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
             return
-        if state.get("status") != "waiting_approval" or not state.get("active_batch"):
+        if state.get("status") != "waiting_approval" or not state["run"].get("active_batch"):
             error = f"任务不在等待确认状态: {task_id}"
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
             return
+        # Plan Mode 批准门：计划批准/拒绝（无 tool batch,走独立分支）
+        if state["run"]["active_batch"].get("plan_approval"):
+            pending_plan = state["run"]["active_batch"].get("plan") or []
+            self._record_event({
+                **base_event,
+                "type": "approval_resolved",
+                "approved": approved,
+                "batch_id": state["run"]["active_batch"].get("batch_id"),
+                "tool_name": "plan",
+            })
+            if not approved:
+                state["status"] = "cancelled"
+                state["final_text"] = "计划未获批准，任务已取消。"
+                state["run"]["active_batch"] = None
+                self._save_task(state)
+                yield {**base_event, "type": "done", "content": state["final_text"], "status": "cancelled"}
+                return
+            if approved_plan:
+                state["plan"] = [str(s) for s in approved_plan if str(s).strip()]
+            state["plan_mode"] = False  # 批准一次后不再拦
+            state["status"] = "running"
+            state["run"]["active_batch"] = None
+            self._save_task(state)
+            workspace = self._restore_task_workspace(state)
+            registry = self.registry_factory(session_id)
+            async for event in self._drive(state, registry, str(workspace.root)):
+                self._record_stream_event(state, event)
+                yield event
+            return
 
         workspace = self._restore_task_workspace(state)
         registry = self.registry_factory(session_id)
-        pending_batch = state["active_batch"]
+        pending_batch = state["run"]["active_batch"]
         pending_call = pending_batch["tool_uses"][pending_batch["next_index"]]
         self._record_event({
             **base_event,
@@ -450,7 +484,7 @@ class LocalAgentRuntime:
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
             return
-        if state.get("status") != "interrupted" or not state.get("resume_available"):
+        if state.get("status") != "interrupted" or not state["run"].get("resume_available"):
             error = f"任务不可恢复: {task_id}"
             yield {**base_event, "type": "error", "content": error}
             yield {**base_event, "type": "done", "content": error, "status": "failed"}
@@ -458,31 +492,31 @@ class LocalAgentRuntime:
 
         workspace = self._restore_task_workspace(state)
         registry = self.registry_factory(session_id)
-        discarded_batch = state.get("active_batch")
+        discarded_batch = state["run"].get("active_batch")
         state.setdefault("messages", [])
-        state.setdefault("tool_call_ledger", {})
-        state["active_batch"] = None
+        state["run"].setdefault("tool_call_ledger", {})
+        state["run"]["active_batch"] = None
         state["status"] = "running"
-        state["resume_available"] = False
-        state["resume_count"] = int(state.get("resume_count", 0)) + 1
-        state["resume_reason"] = "manual_resume"
+        state["run"]["resume_available"] = False
+        state["run"]["resume_count"] = int(state["run"].get("resume_count", 0)) + 1
+        state["run"]["resume_reason"] = "manual_resume"
         if model_context:
             state["model_context"] = {
                 key: str(value)
                 for key, value in model_context.items()
                 if key in {"id", "protocol", "base_url"} and value is not None
             }
-        state["round_limit"] = max(
-            int(state.get("round_limit", self.max_rounds)),
-            int(state.get("round", 0)) + max(1, self.replan_extra_rounds),
+        state["run"]["round_limit"] = max(
+            int(state["run"].get("round_limit", self.max_rounds)),
+            int(state["run"].get("round", 0)) + max(1, self.replan_extra_rounds),
         )
         self._save_task(state)
         self._record_event({
             **base_event,
             "type": "task_resumed",
-            "resume_count": state["resume_count"],
+            "resume_count": state["run"]["resume_count"],
             "discarded_batch_id": (discarded_batch or {}).get("batch_id"),
-            "round_limit": state["round_limit"],
+            "round_limit": state["run"]["round_limit"],
         })
 
         try:
@@ -493,8 +527,8 @@ class LocalAgentRuntime:
             if state.get("status") == "running":
                 self._settle_open_tool_calls(state, "Resumed task stream closed before completion.")
                 state["status"] = "interrupted"
-                state["resume_available"] = True
-                state["resume_reason"] = "resume_stream_closed"
+                state["run"]["resume_available"] = True
+                state["run"]["resume_reason"] = "resume_stream_closed"
                 self._save_task(state)
                 self._record_event({
                     **base_event,
@@ -516,8 +550,8 @@ class LocalAgentRuntime:
         task_id = state["task_id"]
         if task_id not in self._model_bindings:
             self._model_bindings[task_id] = self._capture_task_binding(state)
-        if self.hook_runner is not None and not state.get("_hook_session_started"):
-            state["_hook_session_started"] = True
+        if self.hook_runner is not None and not state["run"].get("_hook_session_started"):
+            state["run"]["_hook_session_started"] = True
             await self.hook_runner.fire(
                 "session_start",
                 {
@@ -526,7 +560,7 @@ class LocalAgentRuntime:
                     "task_id": state["task_id"],
                     "workspace_root": workspace_root,
                     "user_message": str(state.get("user_message", "")),
-                    "approval_mode": str(state.get("approval_mode", "confirm")),
+                    "approval_mode": str(state["run"].get("approval_mode", "confirm")),
                 },
                 match_text=str(state.get("user_message", "")),
             )
@@ -538,8 +572,8 @@ class LocalAgentRuntime:
             state.get("requirement_context"),
         )
         try:
-            while state["round"] < state.get("round_limit", self.max_rounds):
-                state["round"] += 1
+            while not self.guard.rounds_exhausted(state["run"]):
+                state["run"]["round"] += 1
                 self._save_task(state)
                 # 动态提醒不进 system（会破坏 provider 前缀缓存，miss input
                 # 占成本约 90%）：openai 协议注入消息尾部，anthropic 回退追加
@@ -561,15 +595,15 @@ class LocalAgentRuntime:
                             system_round,
                             self._with_instructions(
                                 reconcile_tool_messages(
-                                    state["messages"], state.get("tool_call_ledger", {}),
+                                    state["messages"], state["run"].get("tool_call_ledger", {}),
                                 ),
                                 state.get("instruction_context", ""),
                             ),
                             self.max_output_tokens,
                             state,
-                            tools=registry.schemas() if state.get("allow_tools", True) else [],
+                            tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                         ), reminder if not is_anthropic else ""),
-                        tools=registry.schemas() if state.get("allow_tools", True) else [],
+                        tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
                         temperature=0.2,
                     ):
@@ -587,15 +621,15 @@ class LocalAgentRuntime:
                                 system_round,
                                 self._with_instructions(
                                     reconcile_tool_messages(
-                                        state["messages"], state.get("tool_call_ledger", {}),
+                                        state["messages"], state["run"].get("tool_call_ledger", {}),
                                     ),
                                     state.get("instruction_context", ""),
                                 ),
                                 self.max_output_tokens,
                                 state,
-                                tools=registry.schemas() if state.get("allow_tools", True) else [],
+                                tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                             ),
-                            tools=registry.schemas() if state.get("allow_tools", True) else [],
+                            tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                             max_tokens=self.max_output_tokens,
                             temperature=0.2,
                         )
@@ -608,22 +642,28 @@ class LocalAgentRuntime:
                             system_round,
                             self._with_instructions(
                                 reconcile_tool_messages(
-                                    state["messages"], state.get("tool_call_ledger", {}),
+                                    state["messages"], state["run"].get("tool_call_ledger", {}),
                                 ),
                                 state.get("instruction_context", ""),
                             ),
                             self.max_output_tokens,
                             state,
-                            tools=registry.schemas() if state.get("allow_tools", True) else [],
+                            tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                         ), reminder if not is_anthropic else ""),
-                        tools=registry.schemas() if state.get("allow_tools", True) else [],
+                        tools=registry.schemas() if state["run"].get("allow_tools", True) else [],
                         max_tokens=self.max_output_tokens,
                         temperature=0.2,
                     )
                     thinking = response.get("thinking")
                     if thinking:
-                        yield {**base_event, "type": "thinking", "content": thinking, "round": state.get("round", 0)}
+                        yield {**base_event, "type": "thinking", "content": thinking, "round": state["run"].get("round", 0)}
                 self._track_token_scale(state, system_round, response)
+                usage_payload = self._build_context_usage_event(
+                    state, system_round, response,
+                    registry.schemas() if state["run"].get("allow_tools", True) else [],
+                )
+                if usage_payload:
+                    yield {**base_event, "type": "context_usage", **usage_payload}
                 cancelled = self._cancelled_event(state, base_event)
                 if cancelled:
                     yield cancelled
@@ -634,7 +674,7 @@ class LocalAgentRuntime:
                     stop_reason = str(response.get("stop_reason", ""))
                     explicit_truncation = stop_reason in {"max_tokens", "length"}
                     incomplete_plain_chat = (
-                        not state.get("allow_tools", True)
+                        not state["run"].get("allow_tools", True)
                         and len(response_text.strip()) >= 8
                         and bool(_CLAUSE_MARK_RE.search(response_text[:-1]))
                         and bool(_UNFINISHED_TEXT_RE.search(response_text.rstrip()))
@@ -658,7 +698,7 @@ class LocalAgentRuntime:
                                 *state["messages"],
                                 {"role": "assistant", "content": response_text},
                                 {"role": "user", "content": "请从中断处继续并完整结束回答。"},
-                            ], state.get("tool_call_ledger", {})), 4_000),
+                            ], state["run"].get("tool_call_ledger", {})), 4_000),
                             tools=[],
                             max_tokens=4_000,
                             temperature=0.2,
@@ -686,7 +726,7 @@ class LocalAgentRuntime:
                                 *state["messages"],
                                 {"role": "assistant", "content": response_text},
                                 {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
-                            ], state.get("tool_call_ledger", {})), 4_000),
+                            ], state["run"].get("tool_call_ledger", {})), 4_000),
                             tools=[],
                             max_tokens=4_000,
                             temperature=0.2,
@@ -705,10 +745,34 @@ class LocalAgentRuntime:
                         yield event
                     return
 
-                if not state.get("context_emitted"):
-                    state["context_emitted"] = True
+                if not state["run"].get("context_emitted"):
+                    state["run"]["context_emitted"] = True
                     self._save_task(state)
                     yield {**base_event, "type": "plan", "steps": state["plan"]}
+                    # Plan Mode 批准门：用户预设 plan_mode，或模型对复杂任务自主请求
+                    # （响应末尾 [[PLAN_REQUEST]] 标记）时，计划需用户批准后才继续执行。
+                    plan_requested = "[[PLAN_REQUEST]]" in str(response.get("text") or "")
+                    if plan_requested:
+                        state["run"]["plan_gate_resolved"] = True  # 只自动触发一次
+                    if (state.get("plan_mode") or plan_requested) and state["plan"]:
+                        state["status"] = "waiting_approval"
+                        state["run"]["active_batch"] = {
+                            "plan_approval": True,
+                            "plan": list(state["plan"]),
+                            "batch_id": f"plan-{state['task_id'][:8]}",
+                            "tool_uses": [{"id": f"plan-{state['task_id'][:8]}", "name": "plan",
+                                           "input": {"plan": list(state["plan"])}}],
+                            "next_index": 0,
+                        }
+                        self._save_task(state)
+                        yield {
+                            **base_event,
+                            "type": "approval_required",
+                            "tool_name": "plan",
+                            "args": {"plan": list(state["plan"])},
+                            "reason": "plan_mode：请批准或修改计划后继续",
+                        }
+                        return
                     if state.get("repo_map"):
                         yield {
                             **base_event,
@@ -719,32 +783,22 @@ class LocalAgentRuntime:
 
                 tool_uses = normalize_tool_calls(
                     tool_uses,
-                    set(state.get("tool_call_ledger", {})),
+                    set(state["run"].get("tool_call_ledger", {})),
                 )
-                repeated_diagnostics = (
-                    state.get("replanned")
-                    and not state.get("material_tool_seen")
-                    and int(state.get("diagnostic_unique_count", 0)) >= self.diagnostic_tool_budget
-                    and tool_uses
-                    and all(tool_use["name"] in _DIAGNOSTIC_TOOLS for tool_use in tool_uses)
-                    # 重规划后宽限一轮：修复型任务常需最后一两次确认读取，
-                    # 立即判死太急（fx11-13 fusion 连续三轮卡在这里）
-                    and int(state.get("round", 0)) > int(state.get("replan_round", 0)) + 1
+                repeated_diagnostics = self.guard.should_stop_repeated_diagnostics(
+                    state["run"], tool_uses,
                 )
                 if repeated_diagnostics:
-                    message = (
-                        "诊断预算已用尽，重规划后仍只请求诊断工具；"
-                        "Harness 已停止继续扩散读取，本次任务未完成。"
-                    )
+                    message = repeated_diagnostics.message
                     state["status"] = "incomplete"
                     state["final_text"] = message
                     self._save_task(state)
                     yield {
                         **base_event,
                         "type": "budget_warning",
-                        "diagnostic_tool_count": state["diagnostic_tool_count"],
-                        "diagnostic_unique_count": state.get("diagnostic_unique_count", 0),
-                        "round_limit": state["round_limit"],
+                        "diagnostic_tool_count": state["run"]["diagnostic_tool_count"],
+                        "diagnostic_unique_count": state["run"].get("diagnostic_unique_count", 0),
+                        "round_limit": state["run"]["round_limit"],
                         "message": message,
                         "plan": state["plan"],
                     }
@@ -766,7 +820,7 @@ class LocalAgentRuntime:
                         "input": tool_use["input"],
                     })
                 state["messages"].append({"role": "assistant", "content": assistant_content})
-                state["active_batch"] = {
+                state["run"]["active_batch"] = {
                     "batch_id": batch_id,
                     "tool_uses": tool_uses,
                     "next_index": 0,
@@ -816,7 +870,7 @@ class LocalAgentRuntime:
                 messages=await self._fit_context(
                     system_round,
                     reconcile_tool_messages(
-                        state["messages"], state.get("tool_call_ledger", {}),
+                        state["messages"], state["run"].get("tool_call_ledger", {}),
                     ),
                     self.max_output_tokens,
                     state,
@@ -842,7 +896,7 @@ class LocalAgentRuntime:
                         reconcile_tool_messages([
                             *state["messages"],
                             {"role": "user", "content": f"请直接回答最初的问题：{state.get('user_message', '')}"},
-                        ], state.get("tool_call_ledger", {})),
+                        ], state["run"].get("tool_call_ledger", {})),
                         self.max_output_tokens,
                         state,
                     ),
@@ -870,7 +924,7 @@ class LocalAgentRuntime:
                         *state["messages"],
                         {"role": "assistant", "content": response_text},
                         {"role": "user", "content": "请按验收清单编号逐条输出验收陈述（[完成]/[未完成] + 证据标记）。"},
-                    ], state.get("tool_call_ledger", {})), 4_000),
+                    ], state["run"].get("tool_call_ledger", {})), 4_000),
                     tools=[],
                     max_tokens=4_000,
                     temperature=0.2,
@@ -937,45 +991,31 @@ class LocalAgentRuntime:
                 flags=re.IGNORECASE,
             )
         final_text = format_final_response(response_text, state["summary"])
-        # 验证按 family 归并：http 系（wait_http/http_request/http_request_batch）
-        # 取“成功优先”——HTTP 验收的目标是证明服务可用，只要有一次成功
-        # 的端到端验证即达成；其后的失败多为清理时序噪音（如停服后的探活）。
-        # 非 http 系仍取最后状态（r11a buku：最后一次 batch 在验收后失败，
-        # 前面有成功批次，按最后状态误判死）。
-        latest_by_family: dict[str, dict] = {}
-        for check in state["summary"].get("verification", []):
-            if not isinstance(check, dict):
-                continue
-            kind = str(check.get("kind") or "command").casefold()
-            family = "http" if kind.startswith("http") else kind
-            if family == "http":
-                latest_by_family[family] = check
-                continue
-            latest_by_family[family] = check
-        if any(
-            family == "http" and check.get("success")
-            for family, check in latest_by_family.items()
-        ):
-            latest_by_family["http"] = {
-                "kind": "http",
-                "success": True,
-                "command": "http (successful)",
-            }
-        # 起服前的 port 检查失败是过程性观察（服务还没起必然不通）；
-        # 若之后有成功的 HTTP 验证，port 失败已被结果超越，不作为判死依据
-        if any(
-            family == "http" and check.get("success")
-            for family, check in latest_by_family.items()
-        ):
-            latest_by_family = {
-                family: check
-                for family, check in latest_by_family.items()
-                if not (family == "port" and not check.get("success"))
-            }
-        has_failed_verification = any(
-            not check.get("success", False)
-            for check in latest_by_family.values()
+        # 验证失败判定（D 期简化版，行为与旧归并等价）：
+        # - http 系（wait_http/http_request/http_request_batch）：任一成功即整体算成功
+        #   （验收目标是证明服务可用；后续失败多为清理时序噪音）。
+        # - 非 http 系按 family 取最后状态；port 失败在有成功 http 验证时豁免
+        #   （起服前的 port 探活是过程性观察）。
+        verification = [
+            check for check in state["summary"].get("verification", [])
+            if isinstance(check, dict)
+        ]
+        has_successful_http = any(
+            str(check.get("kind") or "").casefold().startswith("http") and check.get("success")
+            for check in verification
         )
+        latest_non_http: dict[str, dict] = {}
+        for check in verification:
+            kind = str(check.get("kind") or "command").casefold()
+            if kind.startswith("http"):
+                continue
+            latest_non_http[kind] = check
+        has_failed_non_http = any(
+            not check.get("success", False)
+            for kind, check in latest_non_http.items()
+            if not (has_successful_http and kind == "port")
+        )
+        has_failed_verification = has_failed_non_http and not has_successful_http
         # 结果优先：有成功的结果证据（验证通过/验收通过）时，过程失败痕迹
         # 降级为诊断，不判死。（Terminal-Bench：grading outcomes, not the process）
         # 注意：无任何验证证据时 result_ok 不为真——"没失败"不等于"成功了"。
@@ -987,7 +1027,7 @@ class LocalAgentRuntime:
             or bool(acceptance and all(item["status"] == "passed" for item in acceptance))
         )
         result_ok = successful_evidence and not has_failed_verification
-        critical_failures = {} if result_ok else state.get("unrecovered_failures") or {}
+        critical_failures = {} if result_ok else state["run"].get("unrecovered_failures") or {}
         if require_acceptance:
             status = "completed" if (
                 acceptance
@@ -999,8 +1039,8 @@ class LocalAgentRuntime:
             ) else "incomplete"
         else:
             missing_material_change = (
-                state.get("requires_material_change", False)
-                and not state.get("material_tool_seen", False)
+                state["run"].get("requires_material_change", False)
+                and not state["run"].get("material_tool_seen", False)
             )
             if missing_material_change:
                 final_text = (
@@ -1103,7 +1143,7 @@ class LocalAgentRuntime:
         event = {
             "session_id": state["session_id"],
             "task_id": state["task_id"],
-            "round": state.get("round", 0),
+            "round": state["run"].get("round", 0),
             "phase": "reasoning",
             "model": model_context.get("id", ""),
             "protocol": model_context.get("protocol", ""),
@@ -1124,7 +1164,7 @@ class LocalAgentRuntime:
                 if ctype == "token":
                     yield {**base_event, "type": "token", "content": chunk.get("content", "")}
                 elif ctype == "thinking":
-                    yield {**base_event, "type": "thinking", "content": chunk.get("content", ""), "round": state.get("round", 0)}
+                    yield {**base_event, "type": "thinking", "content": chunk.get("content", ""), "round": state["run"].get("round", 0)}
                 elif ctype == "done":
                     response = chunk.get("response") or {}
             if not response:
@@ -1211,27 +1251,28 @@ class LocalAgentRuntime:
         name = str(tool_use.get("name") or "")
         args = tool_use.get("input") or {}
         if name == "read_file":
-            return f"正在读取 {args.get('path', '?')}"
+            return f"正在读取 {_short_text(args.get('path', '?'))}"
         if name == "list_directory":
-            return f"正在查看目录 {args.get('path', '?')}"
+            return f"正在查看目录 {_short_text(args.get('path', '?'))}"
         if name == "search_text":
-            return f"正在搜索 {args.get('query', '?')}"
+            return f"正在搜索 {_short_text(args.get('query', '?'))}"
         if name == "run_command":
-            return f"正在执行 {args.get('command', '?')}"
+            # 命令全文在工具卡里可展开，旁白只留短摘要（避免对话里刷长命令）
+            return f"正在执行 {_short_text(args.get('command'), 60)}"
         if name == "edit_files":
             edits = args.get("edits") or []
             count = len(edits) if isinstance(edits, list) else 0
             return f"正在修改 {count} 个文件" if count else "正在修改文件"
         if name == "start_process":
-            return f"正在启动 {args.get('command', '进程')}"
+            return f"正在启动 {_short_text(args.get('command', '进程'), 60)}"
         if name == "wait_http":
-            return f"正在等待服务就绪 {args.get('url', '?')}"
+            return f"正在等待服务就绪 {_short_text(args.get('url', '?'))}"
         if name == "http_request":
-            return f"正在请求 {args.get('url', '?')}"
+            return f"正在请求 {_short_text(args.get('url', '?'))}"
         if name == "check_port":
             return f"正在检查端口 {args.get('port', '?')}"
         if name == "create_directory":
-            return f"正在创建目录 {args.get('path', '?')}"
+            return f"正在创建目录 {_short_text(args.get('path', '?'))}"
         if name in {"detect_project", "repo_map", "verify_project"}:
             return f"正在分析项目（{name}）"
         if name in {"ensure_venv", "install_dependencies"}:
@@ -1286,8 +1327,15 @@ class LocalAgentRuntime:
         # 只估 system+messages 会让压缩触发偏晚甚至超限——参考 Cline estimateRequestInputTokens）
         tools_payload = json.dumps(tools or [], ensure_ascii=False, default=str)
         input_budget = max(1, int((self.max_context_tokens - output_tokens) * budget_ratio))
-        scale = float(state.get("tokens_scale", 1.0)) if state else 1.0
-        if int(self._estimate_tokens(system, fitted) * scale) + len(tools_payload) <= input_budget:
+        scale = float(state["run"].get("tokens_scale", 1.0)) if state else 1.0
+        estimated_total = int(self._estimate_tokens(system, fitted) * scale) + len(tools_payload)
+        # 软阈值：占用超过窗口 compact_ratio（默认 75%）即主动压缩，留出输出与工具结果余量；
+        # 硬上限（input_budget）仍作最终兜底；force_compact 为用户 /compact 手动触发。
+        force_compact = bool(state and state["run"].get("force_compact"))
+        if state is not None and state["run"].get("force_compact"):
+            state["run"].pop("force_compact", None)
+        soft_limit = int(self.max_context_tokens * self.compact_ratio)
+        if not force_compact and estimated_total <= input_budget and estimated_total <= soft_limit:
             return fitted
 
         target_budget = max(1, int((input_budget - len(tools_payload)) * 0.75))
@@ -1309,7 +1357,7 @@ class LocalAgentRuntime:
         if (
             state is not None
             and self.llm_call is not None
-            and int(state.get("compaction_count", 0)) == 0
+            and int(state["run"].get("compaction_count", 0)) == 0
         ):
             summary = await self._llm_compact_summary(state, system, fitted, input_budget)
             if summary:
@@ -1325,10 +1373,10 @@ class LocalAgentRuntime:
                     compacted = [replacement, *compacted[1:]]
         if state is not None:
             source_count = len(fitted)
-            if source_count > int(state.get("compacted_message_count", 0)):
-                state["compaction_count"] = int(state.get("compaction_count", 0)) + 1
-            state["compacted_message_count"] = max(
-                source_count, int(state.get("compacted_message_count", 0)),
+            if source_count > int(state["run"].get("compacted_message_count", 0)):
+                state["run"]["compaction_count"] = int(state["run"].get("compaction_count", 0)) + 1
+            state["run"]["compacted_message_count"] = max(
+                source_count, int(state["run"].get("compacted_message_count", 0)),
             )
             state["context_handoff"] = asdict(handoff)
             source_sequences = []
@@ -1343,14 +1391,14 @@ class LocalAgentRuntime:
                 if item.get("status", "pending") == "pending"
             ]
             open_call_ids = [
-                call_id for call_id, call in state.get("tool_call_ledger", {}).items()
+                call_id for call_id, call in state["run"].get("tool_call_ledger", {}).items()
                 if call.get("status") not in TERMINAL_TOOL_CALL_STATUSES
             ]
             self._record_event({
                 "task_id": state.get("task_id", ""),
                 "session_id": state.get("session_id", ""),
                 "type": "context_compacted",
-                "compaction_count": state.get("compaction_count", 0),
+                "compaction_count": state["run"].get("compaction_count", 0),
                 "source_message_count": handoff.source_message_count,
                 "summary_version": 1,
                 "source_sequence_start": min(source_sequences) if source_sequences else 1,
@@ -1372,7 +1420,7 @@ class LocalAgentRuntime:
 
         # 摘要器输入有界：只喂能装进完整窗口的尾部消息；单条消息超窗时
         # 仍保留最新一条（截断总比丢光好），由 provider 自行决定
-        scale = float(state.get("tokens_scale", 1.0)) if state else 1.0
+        scale = float(state["run"].get("tokens_scale", 1.0)) if state else 1.0
         budget = max(1, int(input_budget * 0.85))
         summarizer_input: list[dict] = []
         for message in reversed(messages):
@@ -1453,12 +1501,16 @@ class LocalAgentRuntime:
         args: dict,
         reason: str,
     ) -> bool:
-        """AI 审查一个需要确认的工具调用。返回 True=放行，False=拒绝。fail-closed。"""
+        """AI 审查一个需要确认的工具调用。返回 True=放行，False=拒绝。fail-closed。
+
+        guardian 档位是治理层仅有的两处 LLM 接缝之一（另一处是压缩摘要）：
+        这里用温度 0 的模型做安全裁判，不替 Agent 决策，超时/异常一律拒绝。
+        """
         model_context = state.get("model_context", {})
         self._record_event({
             "session_id": state["session_id"],
             "task_id": state["task_id"],
-            "round": state.get("round", 0),
+            "round": state["run"].get("round", 0),
             "type": "approval_guardian_started",
             "tool_name": tool_name,
             "args": args,
@@ -1494,7 +1546,7 @@ class LocalAgentRuntime:
             self._record_event({
                 "session_id": state["session_id"],
                 "task_id": state["task_id"],
-                "round": state.get("round", 0),
+                "round": state["run"].get("round", 0),
                 "type": "approval_guardian_result",
                 "tool_name": tool_name,
                 "approved": approved,
@@ -1506,7 +1558,7 @@ class LocalAgentRuntime:
             self._record_event({
                 "session_id": state["session_id"],
                 "task_id": state["task_id"],
-                "round": state.get("round", 0),
+                "round": state["run"].get("round", 0),
                 "type": "approval_guardian_result",
                 "tool_name": tool_name,
                 "approved": False,
@@ -1521,10 +1573,10 @@ class LocalAgentRuntime:
         base_event: dict,
         approval_decision: bool | None = None,
     ) -> tuple[list[dict], bool]:
-        batch = state["active_batch"]
+        batch = state["run"]["active_batch"]
         batch_id = batch["batch_id"]
         events: list[dict] = []
-        failure_counts = Counter(state.get("failure_counts", {}))
+        failure_counts = Counter(state["run"].get("failure_counts", {}))
         decision_index = batch["next_index"] if approval_decision is not None else None
 
         while batch["next_index"] < len(batch["tool_uses"]):
@@ -1539,7 +1591,7 @@ class LocalAgentRuntime:
             call_id = tool_use["id"]
             stage = self._tool_stage(name)
             stage_budget = state["summary"]["stage_budgets"][stage]
-            if int(stage_budget["used"]) >= int(stage_budget["limit"]):
+            if self.guard.stage_budget_exhausted(stage_budget):
                 message = f"{stage} 阶段预算已用尽，任务未继续执行: {name}"
                 stage_budget["status"] = "exhausted"
                 state["status"] = "incomplete"
@@ -1556,7 +1608,7 @@ class LocalAgentRuntime:
             stage_budget["used"] = int(stage_budget["used"]) + 1
             stage_budget["status"] = "active"
             recovery_key = tool_recovery_key(name, args, Path(state["current_path"]))
-            state["tool_call_ledger"][call_id]["recovery_key"] = recovery_key
+            state["run"]["tool_call_ledger"][call_id]["recovery_key"] = recovery_key
             is_resumed_tool = index == decision_index
             is_guardian_denied = False
             is_boundary_denied = False
@@ -1576,7 +1628,7 @@ class LocalAgentRuntime:
             if is_resumed_tool and approval_decision is False:
                 result = ToolResult.fail("用户拒绝了该操作", error_kind="rejected")
             else:
-                approval_mode = state.get("approval_mode", "confirm")
+                approval_mode = state["run"].get("approval_mode", "confirm")
                 requires_confirmation = (
                     not is_resumed_tool
                     and hasattr(registry, "requires_confirmation")
@@ -1615,7 +1667,7 @@ class LocalAgentRuntime:
                     })
                     requires_confirmation = False
                 elif requires_confirmation and approval_mode == "guardian":
-                    denials = int(state.get("guardian_denials", 0))
+                    denials = int(state["run"].get("guardian_denials", 0))
                     if denials >= self._GUARDIAN_DENIAL_LIMIT:
                         # 熔断：连续拒绝过多，降级为人工审批，避免无限重试危险动作
                         self._record_event({
@@ -1640,7 +1692,7 @@ class LocalAgentRuntime:
                             state, user_intent, name, args, review_reason,
                         )
                         if approved:
-                            state["guardian_denials"] = 0
+                            state["run"]["guardian_denials"] = 0
                             self._record_event({
                                 **base_event,
                                 "type": "approval_guardian",
@@ -1651,7 +1703,7 @@ class LocalAgentRuntime:
                             requires_confirmation = False
                             guardian_approved = True
                         else:
-                            state["guardian_denials"] = denials + 1
+                            state["run"]["guardian_denials"] = denials + 1
                             self._record_event({
                                 **base_event,
                                 "type": "approval_guardian",
@@ -1751,7 +1803,7 @@ class LocalAgentRuntime:
             # 搜索抓取计数（web_fetch）：供 _round_reminder 注入收敛提醒，防止
             # 模型无限抓取挖数据（harness 层限制，不依赖提示词自觉）
             if name == "web_fetch":
-                state["search_fetch_count"] = int(state.get("search_fetch_count", 0)) + 1
+                state["run"]["search_fetch_count"] = int(state["run"].get("search_fetch_count", 0)) + 1
 
             cancelled = self._cancelled_event(state, base_event)
             if cancelled:
@@ -1761,7 +1813,7 @@ class LocalAgentRuntime:
             if result.requires_confirmation:
                 self._transition_tool_call(state, call_id, "awaiting_approval")
                 state["status"] = "waiting_approval"
-                state["failure_counts"] = dict(failure_counts)
+                state["run"]["failure_counts"] = dict(failure_counts)
                 self._save_task(state)
                 events.append({
                     **base_event,
@@ -1801,7 +1853,7 @@ class LocalAgentRuntime:
             if result.success:
                 state.pop("step_back", None)
                 for failed_call_id, failure in list(
-                    state.setdefault("unrecovered_failures", {}).items()
+                    state["run"].setdefault("unrecovered_failures", {}).items()
                 ):
                     same_lineage = bool(
                         recovery_key
@@ -1813,14 +1865,14 @@ class LocalAgentRuntime:
                     )
                     if not same_lineage and not corrected_schema:
                         continue
-                    state["tool_call_ledger"][failed_call_id]["recovered_by_call_id"] = call_id
+                    state["run"]["tool_call_ledger"][failed_call_id]["recovered_by_call_id"] = call_id
                     if self.task_store is not None and hasattr(
                         self.task_store, "mark_agent_tool_call_recovered"
                     ):
                         self.task_store.mark_agent_tool_call_recovered(
                             state["task_id"], failed_call_id, call_id,
                         )
-                    del state["unrecovered_failures"][failed_call_id]
+                    del state["run"]["unrecovered_failures"][failed_call_id]
                     events.append({
                         **base_event,
                         "type": "tool_recovered",
@@ -1833,7 +1885,7 @@ class LocalAgentRuntime:
                 # rejected（含 Guardian fail-closed）是安全拦截而非工具失败：
                 # 不计入失败恢复，避免模型重复重试被拒的危险操作触发"重复失败停止"
                 if result.error_kind != "rejected":
-                    state.setdefault("unrecovered_failures", {})[call_id] = {
+                    state["run"].setdefault("unrecovered_failures", {})[call_id] = {
                         "tool_name": name,
                         "recovery_key": recovery_key,
                         "error_kind": result.error_kind,
@@ -1872,7 +1924,7 @@ class LocalAgentRuntime:
             if not result.success and result.error_kind == "invalid_input":
                 validation = result.data.get("validation", {})
                 lineage = f"{name}:{validation.get('path', '$')}"
-                repair_counts = state.setdefault("schema_repair_counts", {})
+                repair_counts = state["run"].setdefault("schema_repair_counts", {})
                 repair_counts[lineage] = int(repair_counts.get(lineage, 0)) + 1
                 if repair_counts[lineage] > 1:
                     message = f"工具参数自动修复已用尽: {name} {validation.get('path', '$')}"
@@ -1890,14 +1942,14 @@ class LocalAgentRuntime:
                     self._save_task(state)
                     return events, True
             if name in _DIAGNOSTIC_TOOLS:
-                state["diagnostic_tool_count"] = int(state.get("diagnostic_tool_count", 0)) + 1
+                state["run"]["diagnostic_tool_count"] = int(state["run"].get("diagnostic_tool_count", 0)) + 1
                 observation = self._diagnostic_observation_key(name, args)
-                observations = state.setdefault("diagnostic_observations", [])
+                observations = state["run"].setdefault("diagnostic_observations", [])
                 if observation not in observations:
                     observations.append(observation)
-                state["diagnostic_unique_count"] = len(observations)
+                state["run"]["diagnostic_unique_count"] = len(observations)
             elif result.success:
-                state["material_tool_seen"] = True
+                state["run"]["material_tool_seen"] = True
                 state["summary"]["successful_tools"] = list(dict.fromkeys([
                     *state["summary"].get("successful_tools", []),
                     name,
@@ -1909,10 +1961,12 @@ class LocalAgentRuntime:
                     ensure_ascii=False, sort_keys=True, default=str,
                 )
                 failure_counts[signature] += 1
-                if failure_counts[signature] >= self.max_identical_failures:
+                # 先同步进 state 再判定：guard 只读治理集群，本地 Counter 不能成为第二真相源
+                state["run"]["failure_counts"] = dict(failure_counts)
+                if self.guard.failure_over_budget(state["run"], signature):
                     error = f"工具调用重复失败 {self.max_identical_failures} 次，已停止: {name}"
                     state["status"] = "failed"
-                    state["failure_counts"] = dict(failure_counts)
+                    state["run"]["failure_counts"] = dict(failure_counts)
                     self._save_task(state)
                     events.append({**base_event, "type": "error", "content": error})
                     events.append({**base_event, "type": "done", "content": error, "status": "failed"})
@@ -1929,8 +1983,8 @@ class LocalAgentRuntime:
             self._save_task(state)
 
         state["messages"].append({"role": "user", "content": batch["results"]})
-        state["active_batch"] = None
-        state["failure_counts"] = dict(failure_counts)
+        state["run"]["active_batch"] = None
+        state["run"]["failure_counts"] = dict(failure_counts)
         self._save_task(state)
         return events, False
 
@@ -1944,19 +1998,15 @@ class LocalAgentRuntime:
         return {**base_event, "type": "done", "content": state["final_text"], "status": "cancelled"}
 
     def _maybe_replan_after_diagnostics(self, state: dict, base_event: dict) -> dict | None:
-        count = int(state.get("diagnostic_unique_count", 0))
-        if (
-            state.get("replanned")
-            or state.get("material_tool_seen")
-            or count < self.diagnostic_tool_budget
-        ):
+        count = int(state["run"].get("diagnostic_unique_count", 0))
+        if not self.guard.replan_needed(state["run"]):
             return None
 
         message = f"诊断操作已达到 {count} 次，已停止继续扩散读取并重新规划。"
         replan_step = "基于现有证据重新规划，并优先执行最小改动与验证"
-        state["replanned"] = True
-        state["replan_round"] = int(state.get("round", 0))
-        state["round_limit"] = self.max_rounds + self.replan_extra_rounds
+        state["run"]["replanned"] = True
+        state["run"]["replan_round"] = int(state["run"].get("round", 0))
+        state["run"]["round_limit"] = self.max_rounds + self.replan_extra_rounds
         if replan_step not in state["plan"]:
             state["plan"].append(replan_step)
         state["messages"].append({
@@ -1970,9 +2020,9 @@ class LocalAgentRuntime:
         return {
             **base_event,
             "type": "budget_warning",
-            "diagnostic_tool_count": int(state.get("diagnostic_tool_count", count)),
+            "diagnostic_tool_count": int(state["run"].get("diagnostic_tool_count", count)),
             "diagnostic_unique_count": count,
-            "round_limit": state["round_limit"],
+            "round_limit": state["run"]["round_limit"],
             "message": message,
             "plan": state["plan"],
         }
@@ -2323,7 +2373,7 @@ class LocalAgentRuntime:
             "recovery_key": recovery_key,
             "recovered_by_call_id": None,
         }
-        state.setdefault("tool_call_ledger", {})[call["id"]] = record
+        state["run"].setdefault("tool_call_ledger", {})[call["id"]] = record
         if self.task_store is not None and hasattr(self.task_store, "create_agent_tool_call"):
             self.task_store.create_agent_tool_call(
                 task_id=state["task_id"],
@@ -2344,7 +2394,7 @@ class LocalAgentRuntime:
         result: dict | None = None,
         error_kind: str | None = None,
     ) -> None:
-        record = state["tool_call_ledger"][call_id]
+        record = state["run"]["tool_call_ledger"][call_id]
         record["status"] = status
         if result is not None:
             record["result"] = result
@@ -2364,7 +2414,7 @@ class LocalAgentRuntime:
             "error": error,
             "error_kind": "interrupted",
         }
-        for call_id, record in state.get("tool_call_ledger", {}).items():
+        for call_id, record in state["run"].get("tool_call_ledger", {}).items():
             if record.get("status") in TERMINAL_TOOL_CALL_STATUSES:
                 continue
             self._transition_tool_call(
@@ -2387,8 +2437,9 @@ class LocalAgentRuntime:
         if self.task_store is not None:
             stored = self.task_store.get_agent_task(task_id)
             if stored is not None:
-                return stored
-        return self._task_cache.get(task_id)
+                return normalize_state(stored)
+        cached = self._task_cache.get(task_id)
+        return normalize_state(cached) if cached is not None else None
 
     def _record_tool_run(self, task_id: str, name: str, args: dict, result: dict) -> None:
         if self.task_store is not None:
@@ -2420,7 +2471,7 @@ class LocalAgentRuntime:
         event = {
             "session_id": state["session_id"],
             "task_id": state["task_id"],
-            "round": state.get("round", 0),
+            "round": state["run"].get("round", 0),
             "phase": phase,
             "model": model_context.get("id", ""),
             "protocol": model_context.get("protocol", ""),
@@ -2773,6 +2824,10 @@ class LocalAgentRuntime:
         )
         return f"""你是一个通用本地操作 Agent。当前工作区根目录：{workspace_root}
 
+# 语言策略（Language Policy）
+- 内部思考（thinking / reasoning / 自我分析）一律用英文，无论用户说什么语言——英文推理更贴近模型训练分布且更省 token。
+- 面向用户的一切输出（最终回复、旁白、计划、验收陈述）一律用用户的语言（当前为中文）；代码、命令、路径保持原样。
+
 # 环境上下文
 - 平台：{os_name}（{platform.machine()}）
 {shell_line}
@@ -2798,8 +2853,15 @@ class LocalAgentRuntime:
         由调用方注入消息尾部（anthropic 协议回退 system 追加）。
         """
         parts = []
-        round_limit = int(state.get("round_limit", self.max_rounds))
-        current = int(state.get("round", 0))
+        round_limit = int(state["run"].get("round_limit", self.max_rounds))
+        current = int(state["run"].get("round", 0))
+        # 自动计划门（首轮注入，plan 未批准时提示模型可自主请求计划审批）
+        if current <= 1 and not state["run"].get("plan_gate_resolved") and not state.get("plan_mode"):
+            parts.append(
+                "（计划协作：若该任务复杂——预计超过 3 步、涉及多文件修改或高风险操作——"
+                "你可以在本轮回复的末尾单独一行输出 [[PLAN_REQUEST]]，"
+                "Harness 会把你的执行计划提交用户批准后再继续；简单任务无需输出。）"
+            )
         if round_limit > 0 and current >= max(2, round_limit // 2):
             parts.append(
                 f"（轮次预算：已用 {current}/{round_limit} 轮，剩余不足一半。"
@@ -2814,11 +2876,11 @@ class LocalAgentRuntime:
                 "停止重复该调用；列出 3-5 种可能的原因并按可能性排序，选择与之前不同的方法。）"
             )
         # 探索推动：诊断调用已多但从未动手实施时，提醒直接开始修改
-        diagnostic_count = int(state.get("diagnostic_tool_count", 0))
+        diagnostic_count = int(state["run"].get("diagnostic_tool_count", 0))
         if (
-            not state.get("material_tool_seen")
+            not state["run"].get("material_tool_seen")
             and diagnostic_count >= 8
-            and int(state.get("round", 0)) >= 4
+            and int(state["run"].get("round", 0)) >= 4
         ):
             parts.append(
                 f"（进度提醒：你已执行 {diagnostic_count} 次读取/搜索类调用。"
@@ -2828,7 +2890,7 @@ class LocalAgentRuntime:
             )
         # 搜索收敛提醒（web_fetch 抓取次数预算）：搜索类任务中模型可能无限抓取挖数据，
         # harness 层计数注入收敛指令（大厂「harness 限制而非提示词」）
-        fetch_count = int(state.get("search_fetch_count", 0))
+        fetch_count = int(state["run"].get("search_fetch_count", 0))
         if fetch_count >= 8:
             parts.append(
                 f"（搜索收敛：你已抓取 {fetch_count} 次网页。停止继续抓取，基于已有搜索结果回答；"
@@ -2845,9 +2907,9 @@ class LocalAgentRuntime:
                     state.get("acceptance_criteria", []),
                     state.get("requirement_context"),
                 ),
-                reconcile_tool_messages(state["messages"], state.get("tool_call_ledger", {})),
+                reconcile_tool_messages(state["messages"], state["run"].get("tool_call_ledger", {})),
             )
-            budget = int(state.get("tokens_scale", 1.0)) * estimate
+            budget = int(state["run"].get("tokens_scale", 1.0)) * estimate
             total_budget = max(1, self.max_context_tokens - self.max_output_tokens)
             # 仅在上下文接近上限（≥85%）时提醒，避免未压缩历史估算造成的误触发
             if budget >= total_budget * 0.85:
@@ -2913,10 +2975,78 @@ class LocalAgentRuntime:
             return
         try:
             messages = reconcile_tool_messages(
-                state["messages"], state.get("tool_call_ledger", {}),
+                state["messages"], state["run"].get("tool_call_ledger", {}),
             )
             estimate = self._estimate_tokens(system, messages)
         except Exception:
             return
         if estimate > 0:
-            state["tokens_scale"] = round(min(2.0, max(0.5, estimate / input_tokens)), 3)
+            state["run"]["tokens_scale"] = round(min(2.0, max(0.5, estimate / input_tokens)), 3)
+
+    def _build_context_usage_event(
+        self, state: dict, system: str, response: dict, tools: list | None = None,
+    ) -> dict | None:
+        """组装上下文容量明细：窗口、占用（真实 usage 优先）、分类估算、缓存命中率。"""
+        try:
+            usage = response.get("usage_metadata") or {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            cache_hit = int(usage.get("cache_hit_tokens") or 0)
+            scale = float(state["run"].get("tokens_scale", 1.0))
+            try:
+                messages = reconcile_tool_messages(
+                    state["messages"], state["run"].get("tool_call_ledger", {}),
+                )
+            except Exception:
+                messages = state.get("messages", [])
+            sys_tokens = int(self._estimate_tokens(system, []) * scale)
+            msg_tokens = int(self._estimate_tokens("", messages) * scale)
+            mcp_names = set()
+            try:
+                from agent.mcp_client import cached_mcp_tools
+                mcp_names = {str(t.get("name") or "") for t in cached_mcp_tools()}
+            except Exception:
+                pass
+            mcp_chars = sys_chars = 0
+            for t in tools or []:
+                name = str((t.get("function") or {}).get("name") or t.get("name") or "")
+                chars = len(json.dumps(t, ensure_ascii=False, default=str))
+                if name in mcp_names:
+                    mcp_chars += chars
+                else:
+                    sys_chars += chars
+            mcp_tokens = mcp_chars // 4
+            tool_tokens = sys_chars // 4
+            est_total = sys_tokens + msg_tokens + mcp_tokens + tool_tokens
+            used = input_tokens if input_tokens > 0 else est_total
+            breakdown = {
+                "history": msg_tokens,
+                "tools_system": tool_tokens,
+                "tools_mcp": mcp_tokens,
+                "system_prompt": sys_tokens,
+            }
+            if input_tokens > 0:
+                breakdown["other"] = max(0, used - est_total)
+            return {
+                "window": self.max_context_tokens,
+                "used": used,
+                "breakdown": breakdown,
+                "cache_hit_tokens": cache_hit,
+                "cache_hit_rate": (round(cache_hit / input_tokens, 4) if input_tokens > 0 and cache_hit else None),
+                "compactions": int(state["run"].get("compaction_count", 0)),
+            }
+        except Exception:
+            return None
+
+    def request_compact(self, task_id: str) -> dict:
+        """用户 /compact：标记任务下一轮强制压缩（运行中立即生效；结束后在继续对话时生效）。"""
+        state = self._load_task(task_id)
+        if state is None:
+            return {"ok": False, "error": "任务不存在或已结束"}
+        state["run"]["force_compact"] = True
+        if self.task_store is not None:
+            try:
+                self.task_store.save_agent_task(state)
+            except Exception:
+                pass
+        self._task_cache[task_id] = state
+        return {"ok": True, "message": "将在下一轮对话时压缩上下文"}

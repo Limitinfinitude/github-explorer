@@ -22,7 +22,8 @@ if mode == "block":
     sys.stderr.write("blocked by policy")
     sys.exit(2)
 if mode == "record":
-    with open(sys.argv[2], "a", encoding="utf-8") as f:
+    # 每事件独立日志：多个 hook 子进程并发 append 同一文件在 Windows 上会交错
+    with open(sys.argv[2] + "." + payload.get("event", "x"), "a", encoding="utf-8") as f:
         f.write(payload.get("event", "") + "|" + str(payload.get("tool_name") or payload.get("status") or "") + "\\n")
 sys.exit(0)
 """
@@ -157,7 +158,7 @@ def test_pre_tool_hook_allows_when_exit_zero(tmp_path: Path):
 
     assert events[-1]["status"] == "completed"
     assert events[-1]["type"] == "done"
-    log = (tmp_path / "log.txt").read_text(encoding="utf-8")
+    log = (tmp_path / "log.txt.pre_tool").read_text(encoding="utf-8")
     assert "pre_tool|run_command" in log
 
 
@@ -205,7 +206,11 @@ def test_session_start_and_end_hooks_receive_payload(tmp_path: Path):
     asyncio.run(runner.drain())
 
     assert events[-1]["status"] == "completed"
-    lines = log.read_text(encoding="utf-8").splitlines()
-    statuses = [line.split("|") for line in lines]
-    assert any(event == "session_start" for event, _ in statuses)
-    assert any(event == "session_end" and status == "completed" for event, status in statuses)
+    # HOOK_SCRIPT 按事件分文件写（并发 append 同一文件在 Windows 上会交错）
+    start_lines = (tmp_path / "log.txt.session_start").read_text(encoding="utf-8").splitlines()
+    end_lines = (tmp_path / "log.txt.session_end").read_text(encoding="utf-8").splitlines()
+    assert any(event == "session_start" for event, *_ in (line.split("|") for line in start_lines))
+    assert any(
+        event == "session_end" and status == "completed"
+        for event, status in (line.split("|") for line in end_lines)
+    )

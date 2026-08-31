@@ -56,7 +56,7 @@ def test_runtime_emits_plan_tool_change_and_done_without_intent_classifier(tmp_p
     events = collect(runtime.run("session", "创建 src 目录"))
     event_types = [event["type"] for event in events]
 
-    assert event_types == ["plan", "narration", "tool_call", "tool_result", "file_changed", "finalization", "token", "done"]
+    assert event_types == ["context_usage", "plan", "narration", "tool_call", "tool_result", "file_changed", "context_usage", "finalization", "token", "done"]
     assert "目录已创建。" in events[-1]["content"]
     assert "## 文件变更" in events[-1]["content"]
 
@@ -571,7 +571,7 @@ def test_runtime_plain_chat_skips_execution_plan_when_no_tool_is_used(tmp_path: 
 
     events = collect(runtime.run("session", "你好"))
 
-    assert [event["type"] for event in events] == ["token", "done"]
+    assert [event["type"] for event in events] == ["context_usage", "token", "done"]
     assert "你好，有什么可以帮你？" in events[-1]["content"]
     assert "## 完成结果" not in events[-1]["content"]
     assert "## 文件变更" not in events[-1]["content"]
@@ -630,7 +630,7 @@ def test_capability_question_skips_repo_map_and_tool_schemas(tmp_path: Path):
 
     assert context.calls == 0
     assert captured["tools"] == []
-    assert [event["type"] for event in events] == ["token", "done"]
+    assert [event["type"] for event in events] == ["context_usage", "token", "done"]
 
 
 def test_runtime_prompt_allows_plain_chat_without_tools():
@@ -868,8 +868,8 @@ def test_runtime_compacts_model_input_but_preserves_full_task_messages(tmp_path:
     assert len(stored["messages"]) == 3
     assert stored["messages"][-1]["content"] == "latest request"
     assert stored["context_handoff"]["goal"] == "latest request"
-    assert stored["compaction_count"] == 1
-    assert stored["compacted_message_count"] == 3
+    assert stored["run"]["compaction_count"] == 1
+    assert stored["run"]["compacted_message_count"] == 3
     assert any("ContextHandoff" in str(message["content"]) for message in captured["messages"])
     # captured 是 fit 后 + harness 注入（reminder），不包含完整原始历史；对比原始历史长度
     assert len(captured["messages"]) <= len(stored["messages"])
@@ -1255,10 +1255,10 @@ def test_runtime_pauses_when_tool_requires_confirmation(tmp_path: Path):
 
     events = collect(runtime.run("session", "删除 old"))
 
-    assert [event["type"] for event in events] == ["plan", "narration", "tool_call", "approval_required", "done"]
+    assert [event["type"] for event in events] == ["context_usage", "plan", "narration", "tool_call", "approval_required", "done"]
     assert events[3]["tool_name"] == "delete_path"
-    assert events[2]["call_id"] == events[3]["call_id"] == "tool-1"
-    assert events[2]["batch_id"] == events[3]["batch_id"]
+    assert events[3]["call_id"] == events[4]["call_id"] == "tool-1"
+    assert events[3]["batch_id"] == events[4]["batch_id"]
     assert events[-1]["status"] == "waiting_approval"
 
 
@@ -1286,11 +1286,11 @@ def test_runtime_resumes_same_task_after_confirmation(tmp_path: Path):
 
     assert paused[-1]["status"] == "waiting_approval"
     assert [event["task_id"] for event in resumed] == ["task-1"] * len(resumed)
-    assert [event["type"] for event in resumed] == ["tool_result", "finalization", "token", "done"]
+    assert [event["type"] for event in resumed] == ["tool_result", "context_usage", "finalization", "token", "done"]
     assert resumed[-1]["status"] == "completed"
-    assert [event["type"] for event in paused] == ["plan", "narration", "tool_call", "approval_required", "done"]
-    assert paused[2]["call_id"] == paused[3]["call_id"] == resumed[0]["call_id"] == "tool-1"
-    assert paused[2]["batch_id"] == paused[3]["batch_id"] == resumed[0]["batch_id"]
+    assert [event["type"] for event in paused] == ["context_usage", "plan", "narration", "tool_call", "approval_required", "done"]
+    assert paused[3]["call_id"] == paused[4]["call_id"] == resumed[0]["call_id"] == "tool-1"
+    assert paused[3]["batch_id"] == paused[4]["batch_id"] == resumed[0]["batch_id"]
     assert calls == [{"path": "old"}]
 
 
@@ -1492,8 +1492,8 @@ def test_runtime_can_resume_interrupted_task_from_persisted_state(tmp_path: Path
     assert events[-1]["status"] == "completed"
     state = store.get_agent_task("resume-task")
     assert state["status"] == "completed"
-    assert state["resume_available"] is False
-    assert state["resume_count"] == 1
+    assert state["run"]["resume_available"] is False
+    assert state["run"]["resume_count"] == 1
     assert any(event["type"] == "task_resumed" for event in store.get_agent_events("resume-task"))
 
 

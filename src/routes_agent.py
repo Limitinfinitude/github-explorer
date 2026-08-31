@@ -14,6 +14,10 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+# 组合根唯一实例：Memory 在 agent 包导入时创建；运行时经 task_store 注入，
+# 路由层的直接使用收敛到此单点（禁止在函数体内再散布 import）。
+from agent.memory import memory
+
 router_agent = APIRouter()
 
 
@@ -27,6 +31,7 @@ class LocalChatRequest(BaseModel):
     agent_mode: bool = False
     thinking_effort: Optional[str] = None
     approval_mode: Optional[str] = None
+    plan_mode: Optional[bool] = None
 
 
 def _input_encoding_issue(message: str) -> dict[str, object] | None:
@@ -102,7 +107,6 @@ def get_local_agent_runtime():
         from agent.llm import call_llm_with_tools, stream_llm_with_tools
         from agent.runtime.runtime import LocalAgentRuntime
         from agent.runtime.tooling import build_tool_registry
-        from agent.memory import memory
 
         services = get_local_agent_services()
         memory.reconcile_interrupted_runtime()
@@ -117,12 +121,23 @@ def get_local_agent_runtime():
         def hook_config_provider():
             return parse_hook_configs(memory.get_preference("hooks_config"))
 
+        def _model_context_window_tokens() -> int:
+            """活跃模型的上下文窗口（model_configs.context_window），缺省 128k。"""
+            import os
+            from model_config import DEFAULT_CONTEXT_WINDOW_TOKENS, parse_context_window
+            try:
+                raw = os.environ.get("LLM_CONTEXT_WINDOW_TOKENS")
+                return parse_context_window(int(raw)) if raw else DEFAULT_CONTEXT_WINDOW_TOKENS
+            except Exception:
+                return DEFAULT_CONTEXT_WINDOW_TOKENS
+
         _local_agent_runtime = LocalAgentRuntime(
             services.workspaces,
             lambda session_id: build_tool_registry(session_id, services),
             call_llm_with_tools,
             llm_stream_call=stream_llm_with_tools,
             max_rounds=32,
+            max_context_tokens=_model_context_window_tokens(),
             task_store=memory,
             context_engine=services.context,
             hook_runner=HookRunner(hook_config_provider),
@@ -134,7 +149,6 @@ def get_local_agent_runtime():
 def get_agent_task_supervisor():
     global _agent_task_supervisor
     if _agent_task_supervisor is None:
-        from agent.memory import memory
         from agent.runtime.supervisor import AgentTaskSupervisor
 
         _agent_task_supervisor = AgentTaskSupervisor(get_local_agent_runtime(), memory)
@@ -142,7 +156,6 @@ def get_agent_task_supervisor():
 
 
 def resolve_agent_workspace(session_id: str, requested_path: str | None = None):
-    from agent.memory import memory
 
     services = get_local_agent_services()
     stored = memory.get_workspace_state(session_id)
@@ -206,7 +219,6 @@ async def run_local_agent_once(
 
 
 def require_agent_workspace(session_id: str, requested_path: str | None = None):
-    from agent.memory import memory
 
     stored = memory.get_workspace_state(session_id)
     if stored is None and requested_path:
@@ -229,7 +241,6 @@ async def local_agent_chat_stream(request: LocalChatRequest):
     from agent.prompts import CHAT_SYSTEM_PROMPT, CLASSIFY_PROMPT
     from agent.tool_defs import get_tools, execute_tool, get_state, critique_and_retry
     from agent.tools import get_system_info
-    from agent.memory import memory
 
     async def event_generator():
         try:
@@ -569,7 +580,6 @@ async def local_agent_chat_stream(request: LocalChatRequest):
 @router_agent.post("/api/agent/tasks/start", status_code=202)
 async def start_agent_task(request: LocalChatRequest):
     from agent.llm import get_model, get_protocol
-    from agent.memory import memory
 
     issue = _input_encoding_issue(request.message)
     if issue:
@@ -591,6 +601,7 @@ async def start_agent_task(request: LocalChatRequest):
                 "thinking_effort": request.thinking_effort or os.environ.get("LLM_THINKING_EFFORT", "off"),
             },
             approval_mode=approval_mode,
+            plan_mode=bool(request.plan_mode),
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -620,7 +631,6 @@ class ApprovalModeUpdate(BaseModel):
 
 @router_agent.get("/api/settings/approval-mode")
 async def get_approval_mode():
-    from agent.memory import memory
 
     mode = memory.get_preference("approval_mode") or "confirm"
     if mode not in {"confirm", "auto", "open", "guardian", "full"}:
@@ -630,7 +640,6 @@ async def get_approval_mode():
 
 @router_agent.put("/api/settings/approval-mode")
 async def set_approval_mode(request: ApprovalModeUpdate):
-    from agent.memory import memory
 
     memory.set_preference("approval_mode", request.mode)
     return {"mode": request.mode}
@@ -642,7 +651,6 @@ class HooksConfigUpdate(BaseModel):
 
 @router_agent.get("/api/settings/hooks")
 async def get_hooks_config():
-    from agent.memory import memory
     from agent.runtime.hooks import HOOK_EVENTS, parse_hook_configs
 
     configs = parse_hook_configs(memory.get_preference("hooks_config"))
@@ -654,7 +662,6 @@ async def get_hooks_config():
 
 @router_agent.put("/api/settings/hooks")
 async def set_hooks_config(request: HooksConfigUpdate):
-    from agent.memory import memory
     from agent.runtime.hooks import parse_hook_configs, serialize_hook_configs
 
     configs = parse_hook_configs(request.hooks)
@@ -665,7 +672,6 @@ async def set_hooks_config(request: HooksConfigUpdate):
 
 @router_agent.get("/api/agent/tasks/{task_id}/events")
 async def stream_agent_task_events(task_id: str, after_sequence: int = 0):
-    from agent.memory import memory
 
     if memory.get_agent_task(task_id) is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -683,7 +689,6 @@ async def stream_agent_task_events(task_id: str, after_sequence: int = 0):
 @router_agent.post("/api/agent/tasks/{task_id}/resume", status_code=202)
 async def resume_agent_task(task_id: str, request: ResumeTaskRequest):
     from agent.llm import get_model, get_protocol
-    from agent.memory import memory
 
     state = memory.get_agent_task(task_id)
     if state is None or state.get("session_id") != request.session_id:
@@ -760,7 +765,6 @@ class ChatMessagePayload(BaseModel):
 
 @router_agent.post("/api/chats/{session_id}/messages")
 async def save_chat_message(session_id: str, payload: ChatMessagePayload):
-    from agent.memory import memory
 
     if len(payload.content) > 200_000:
         raise HTTPException(status_code=413, detail="消息内容过大")
@@ -770,7 +774,6 @@ async def save_chat_message(session_id: str, payload: ChatMessagePayload):
 
 @router_agent.get("/api/chats/{session_id}")
 async def get_chat_messages(session_id: str):
-    from agent.memory import memory
 
     return {"session_id": session_id, "messages": memory.get_chat_messages(session_id)}
 
@@ -778,14 +781,12 @@ async def get_chat_messages(session_id: str):
 # 获取项目状态
 @router_agent.get("/api/agent/projects")
 async def get_projects():
-    from agent.memory import memory
     return {"projects": memory.get_all_projects()}
 
 
 # 获取对话历史
 @router_agent.get("/api/agent/history/{session_id}")
 async def get_history(session_id: str):
-    from agent.memory import memory
     projected = memory.get_agent_chat_history(session_id)
     return {"history": projected or memory.get_history(session_id)}
 
@@ -793,13 +794,11 @@ async def get_history(session_id: str):
 # 获取操作日志
 @router_agent.get("/api/agent/logs")
 async def get_logs(repo: str = None):
-    from agent.memory import memory
     return {"logs": memory.get_action_logs(repo)}
 
 
 @router_agent.post("/api/agent/workspace")
 async def bind_agent_workspace(request: WorkspaceRequest):
-    from agent.memory import memory
 
     services = get_local_agent_services()
     workspace = services.workspaces.bind(request.session_id, request.path)
@@ -854,7 +853,6 @@ async def create_agent_folder(request: FolderCreateRequest):
 
 @router_agent.get("/api/agent/workspace/default")
 async def get_default_agent_workspace():
-    from agent.memory import memory
 
     configured = memory.get_preference("default_workspace_root")
     if configured and Path(configured).is_dir():
@@ -864,7 +862,6 @@ async def get_default_agent_workspace():
 
 @router_agent.put("/api/agent/workspace/default")
 async def set_default_agent_workspace(request: DefaultWorkspaceRequest):
-    from agent.memory import memory
 
     path = Path(request.path).expanduser()
     if not path.is_absolute():
@@ -882,7 +879,6 @@ async def set_default_agent_workspace(request: DefaultWorkspaceRequest):
 @router_agent.get("/api/agent/workspace/{session_id}")
 async def get_agent_workspace(session_id: str):
     services = get_local_agent_services()
-    from agent.memory import memory
 
     workspace, source = resolve_agent_workspace(session_id)
     state = memory.get_workspace_state(session_id) or {"root": str(workspace.root), "current_path": str(workspace.root)}
@@ -907,7 +903,6 @@ async def list_agent_traces(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
 ):
-    from agent.memory import memory
 
     return {"traces": memory.list_agent_traces(
         max(1, min(limit, 100)),
@@ -956,7 +951,6 @@ def _project_history(memory, project_id: str):
 
 @router_agent.get("/api/projects")
 async def list_project_workspaces():
-    from agent.memory import memory
     from agent.runtime.project_projection import build_project_summary
 
     return {"projects": build_project_summary(_project_task_states(memory))}
@@ -968,12 +962,22 @@ async def list_project_overviews():
 
     只从 task state 提取（stage 推断只依赖 summary，与 activity 等价），
     不构建完整 overview，保证 60+ 项目也在 1s 内返回。
+    kind 区分正式项目 / 临时工作区（简单任务不该套项目仪式）；
+    archived 为用户手动归档（前端折叠展示）。
     """
-    from agent.memory import memory
-    from agent.runtime.project_projection import _project_message, _stage_for_task, _stage_status, project_id_for_workspace
+    from agent.runtime.project_projection import (
+        _project_message, _stage_for_task, _stage_status,
+        detect_workspace_kind, project_id_for_workspace, project_session_id_for_workspace,
+    )
+
+    try:
+        archived = set(json.loads(memory.get_preference("archived_projects") or "[]"))
+    except (TypeError, ValueError):
+        archived = set()
 
     tasks = _project_task_states(memory)
     rows = []
+    kind_cache: dict[str, str] = {}
     for state in tasks:
         root = str(state.get("workspace_root") or "")
         if not root:
@@ -981,6 +985,8 @@ async def list_project_overviews():
         summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
         verification = summary.get("verification") if isinstance(summary.get("verification"), list) else []
         status = str(state.get("status") or "")
+        if root not in kind_cache:
+            kind_cache[root] = detect_workspace_kind(root)
         rows.append({
             "project_id": project_id_for_workspace(root),
             "workspace_root": root,
@@ -991,6 +997,9 @@ async def list_project_overviews():
             "failed": status == "failed",
             "verification_count": len(verification),
             "updated_at": state.get("updated_at") or "",
+            "kind": kind_cache[root],
+            "session_id": project_session_id_for_workspace(root),
+            "archived": project_id_for_workspace(root) in archived,
         })
     # 同一项目多个任务取最新一条，按更新时间倒序
     seen: set[str] = set()
@@ -1003,10 +1012,28 @@ async def list_project_overviews():
     return {"projects": deduped}
 
 
+class ProjectArchiveRequest(BaseModel):
+    archived: bool
+
+
+@router_agent.post("/api/projects/{project_id}/archive")
+async def archive_project(project_id: str, request: ProjectArchiveRequest):
+    """归档 / 取消归档一个项目（preference 持久化，前端折叠展示）。"""
+    try:
+        current = set(json.loads(memory.get_preference("archived_projects") or "[]"))
+    except (TypeError, ValueError):
+        current = set()
+    if request.archived:
+        current.add(project_id)
+    else:
+        current.discard(project_id)
+    memory.set_preference("archived_projects", json.dumps(sorted(current)))
+    return {"project_id": project_id, "archived": request.archived}
+
+
 @router_agent.get("/api/projects/{project_id}/overview")
 async def get_project_overview(project_id: str):
     """Read-only project journey summary backed by persisted agent facts."""
-    from agent.memory import memory
     from agent.runtime.project_projection import build_project_overview
 
     task = _resolve_project_task(memory, project_id)
@@ -1026,7 +1053,6 @@ async def get_project_overview(project_id: str):
 @router_agent.get("/api/projects/{project_id}/evidence")
 async def get_project_evidence(project_id: str):
     """Read-only developer evidence layer; no Agent work is started."""
-    from agent.memory import memory
     from agent.runtime.project_projection import build_project_evidence
 
     task = _resolve_project_task(memory, project_id)
@@ -1046,7 +1072,6 @@ async def get_project_evidence(project_id: str):
 @router_agent.post("/api/projects/{project_id}/actions/{action}", status_code=202)
 async def start_project_action(project_id: str, action: str):
     from agent.llm import get_model, get_protocol
-    from agent.memory import memory
     from agent.runtime.project_projection import (
         project_action_prompt,
         project_session_id_for_workspace,
@@ -1092,7 +1117,6 @@ async def start_project_action(project_id: str, action: str):
 @router_agent.get("/api/projects/{project_id}/memories")
 async def get_project_memories(project_id: str, limit: int = 20, verified_only: bool = False):
     """Read-only project facts; no Agent work is started."""
-    from agent.memory import memory
 
     task = _resolve_project_task(memory, project_id)
     workspace_root = str((task or {}).get("workspace_root") or "")
@@ -1112,7 +1136,6 @@ async def get_project_memories(project_id: str, limit: int = 20, verified_only: 
 @router_agent.get("/api/projects/{project_id}/report")
 async def get_project_report(project_id: str):
     """Combined Markdown report backed by persisted project facts."""
-    from agent.memory import memory
     from agent.runtime.project_projection import (
         build_project_evidence,
         build_project_overview,
@@ -1152,13 +1175,14 @@ async def get_project_report(project_id: str):
     }
 
 
-@router_agent.post("/api/projects/import", status_code=202)
+@router_agent.post("/api/projects/import")
 async def import_project(request: ProjectImportRequest):
-    """Bind a local directory as a project workspace and start project inspection."""
-    from agent.llm import get_model, get_protocol
-    from agent.memory import memory
+    """Bind a local directory as a project workspace. 不自动启动体检——想做什么由用户开口。
+
+    导入只建立绑定并返回会话信息；前端打开对话后主动询问用户意图，
+    体检/跑起来/导读/验证仍是工作台动作按钮里的显式选择。
+    """
     from agent.runtime.project_projection import (
-        project_action_prompt,
         project_id_for_workspace,
         project_session_id_for_workspace,
     )
@@ -1183,36 +1207,32 @@ async def import_project(request: ProjectImportRequest):
     session_id = project_session_id_for_workspace(str(path))
     workspace, _ = resolve_agent_workspace(session_id, str(path))
     project_id = project_id_for_workspace(str(workspace.root))
-    try:
-        task_id = get_agent_task_supervisor().start(
-            session_id,
-            project_action_prompt("inspect"),
-            model_context={
-                "id": get_model(),
-                "protocol": get_protocol(),
-                "base_url": os.environ.get("LLM_BASE_URL", ""),
-            },
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "project_id": project_id,
         "session_id": session_id,
-        "task_id": task_id,
         "workspace": str(workspace.root),
-        "status": "pending",
+        "status": "ready",
     }
 
 
-@router_agent.post("/api/projects/import-github", status_code=202)
+@router_agent.delete("/api/projects/{project_id}")
+async def remove_project(project_id: str):
+    """移除一个项目：删除其全部本地运行记录（事件/工具/变更/指标/会话消息），不碰磁盘文件夹。
+
+    刚导入、还没跑过任务的项目也允许移除（清理工作区绑定与空会话）。
+    """
+    removed = memory.forget_agent_project(project_id)
+    if not removed.get("agent_tasks") and not removed.get("sessions"):
+        raise HTTPException(status_code=404, detail="项目不存在或已移除")
+    return {"project_id": project_id, "removed": removed}
+
+
+@router_agent.post("/api/projects/import-github")
 async def import_github_project(request: GithubImportRequest):
-    """克隆 GitHub 仓库到默认工作区并启动项目体检（探索页一键带回）。"""
+    """克隆 GitHub 仓库到默认工作区（探索页一键带回）。不自动体检——下一步由用户选择。"""
     import subprocess
 
-    from agent.llm import get_model, get_protocol
-    from agent.memory import memory
     from agent.runtime.project_projection import (
-        project_action_prompt,
         project_id_for_workspace,
         project_session_id_for_workspace,
     )
@@ -1236,35 +1256,21 @@ async def import_github_project(request: GithubImportRequest):
             raise HTTPException(status_code=400, detail=f"克隆失败: {exc}") from exc
         if proc.returncode != 0:
             raise HTTPException(status_code=400, detail=f"克隆失败: {(proc.stderr or proc.stdout)[-200:]}")
-    # 注册项目并启动体检（复用本地导入流程）
+    # 注册项目（不自动体检——下一步由用户选择）
     session_id = project_session_id_for_workspace(str(target))
     workspace, _ = resolve_agent_workspace(session_id, str(target))
     project_id = project_id_for_workspace(str(workspace.root))
-    try:
-        task_id = get_agent_task_supervisor().start(
-            session_id,
-            project_action_prompt("inspect"),
-            model_context={
-                "id": get_model(),
-                "protocol": get_protocol(),
-                "base_url": os.environ.get("LLM_BASE_URL", ""),
-            },
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "project_id": project_id,
         "session_id": session_id,
-        "task_id": task_id,
         "workspace": str(workspace.root),
-        "status": "pending",
+        "status": "ready",
     }
 
 
 @router_agent.post("/api/projects/memories/clear")
 async def clear_project_memories(request: ProjectMemoriesClearRequest):
     """清除一个项目工作区的全部记忆（评测隔离 / 用户清理）。"""
-    from agent.memory import memory
 
     raw = str(request.workspace or "").strip().strip("\"'")
     if not raw:
@@ -1285,7 +1291,6 @@ async def search_agent_memory(
     limit: int = 8,
     verified_only: bool = False,
 ):
-    from agent.memory import memory
 
     return {
         "memories": memory.search_project_memories(
@@ -1299,7 +1304,6 @@ async def search_agent_memory(
 
 @router_agent.get("/api/agent/observability")
 async def get_observability_status():
-    from agent.memory import memory
     from agent.runtime.metrics import aggregate_observability
 
     traces = memory.list_agent_traces(500)
@@ -1316,7 +1320,6 @@ async def get_observability_status():
 
 @router_agent.get("/api/agent/evaluation-report")
 async def get_evaluation_report(limit: int = 100):
-    from agent.memory import memory
     from agent.runtime.reporting import build_evaluation_report
 
     return build_evaluation_report(memory, limit=limit)
@@ -1335,7 +1338,6 @@ async def approve_agent_operation(request: ApprovalRequest):
 
 @router_agent.post("/api/agent/approval/stream")
 async def approve_agent_operation_stream(request: ApprovalRequest):
-    from agent.memory import memory
 
     async def event_generator():
         ensure_local_agent_workspace(request.session_id)
@@ -1350,7 +1352,6 @@ async def approve_agent_operation_stream(request: ApprovalRequest):
 
 @router_agent.get("/api/agent/tasks/{task_id}")
 async def get_agent_task(task_id: str):
-    from agent.memory import memory
 
     task = memory.get_agent_task(task_id)
     if task is None:
@@ -1360,11 +1361,17 @@ async def get_agent_task(task_id: str):
 
 @router_agent.get("/api/agent/tasks/{task_id}/artifacts/{artifact_id}")
 async def get_agent_artifact(task_id: str, artifact_id: str):
-    from agent.memory import memory
     artifact = memory.get_agent_artifact(task_id, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact 不存在")
     return artifact
+
+
+@router_agent.post("/api/agent/tasks/{task_id}/compact")
+async def compact_agent_task(task_id: str):
+    """手动 /compact：标记该任务下一轮强制压缩上下文。"""
+    runtime = get_local_agent_runtime()
+    return runtime.request_compact(task_id)
 
 
 @router_agent.post("/api/agent/tasks/{task_id}/cancel")
@@ -1374,7 +1381,6 @@ async def cancel_agent_task(task_id: str, request: CancelTaskRequest):
 
 @router_agent.get("/api/agent/sessions/{session_id}/active-task")
 async def get_active_agent_task(session_id: str):
-    from agent.memory import memory
 
     task = memory.get_latest_nonterminal_agent_task(session_id)
     if task is None:
@@ -1385,7 +1391,6 @@ async def get_active_agent_task(session_id: str):
 @router_agent.get("/api/agent/token-usage")
 async def get_token_usage(days: int = 7, top: int = 10):
     """Token 消耗统计：按天/按任务聚合 + 最近 5 小时窗口（对应 provider 限额）。"""
-    from agent.memory import memory
 
     return memory.get_token_usage(days=days, top=top)
 

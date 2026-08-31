@@ -15,7 +15,11 @@ memory_module = importlib.import_module("agent.memory")
 
 def make_client(monkeypatch, tmp_path: Path, test_memory: Memory | None = None):
     services = LocalAgentServices.create()
-    monkeypatch.setattr(memory_module, "memory", test_memory or Memory(tmp_path / "routes-memory.db"))
+    test_memory = test_memory or Memory(tmp_path / "routes-memory.db")
+    # routes_agent 已改为模块级显式绑定 memory（组合根单点），
+    # 测试替换实例需要同时替换消费方模块上的绑定。
+    monkeypatch.setattr(memory_module, "memory", test_memory)
+    monkeypatch.setattr(routes_agent, "memory", test_memory, raising=False)
     monkeypatch.setattr(routes_agent, "get_local_agent_services", lambda: services, raising=False)
     monkeypatch.setattr(routes_agent, "_agent_task_supervisor", None, raising=False)
     app = FastAPI()
@@ -32,7 +36,7 @@ def test_task_start_and_event_replay_routes_are_separate(monkeypatch, tmp_path: 
     captured = {}
 
     class FakeSupervisor:
-        def start(self, session_id, message, *, history=None, model_context=None, task_id=None, approval_mode="confirm"):
+        def start(self, session_id, message, *, history=None, model_context=None, task_id=None, approval_mode="confirm", plan_mode=False):
             captured.update(session_id=session_id, message=message, history=history)
             local_memory.save_agent_task({
                 "task_id": "task-started", "session_id": session_id,
@@ -441,7 +445,7 @@ def test_agent_mode_stream_uses_local_runtime_without_intent_step(monkeypatch, t
     captured = {}
 
     class FakeRuntime:
-        async def run(self, session_id, user_message, history=None, task_id=None, model_context=None):
+        async def run(self, session_id, user_message, history=None, task_id=None, model_context=None, plan_mode=False):
             captured["model_context"] = model_context
             yield {"type": "plan", "steps": ["execute"], "session_id": session_id, "task_id": "task"}
             yield {"type": "done", "content": "ok", "status": "completed", "session_id": session_id, "task_id": "task"}
@@ -487,7 +491,7 @@ def test_agent_mode_stream_loads_persisted_agent_task_history(monkeypatch, tmp_p
         def register_task(self, session_id, task_id):
             return None
 
-        async def run(self, session_id, user_message, history=None, task_id=None, model_context=None):
+        async def run(self, session_id, user_message, history=None, task_id=None, model_context=None, plan_mode=False):
             captured["history"] = history
             yield {
                 "type": "done", "content": "ok", "status": "completed",
@@ -650,7 +654,7 @@ def test_project_action_starts_shared_runtime_in_stable_project_session(monkeypa
     captured = {}
 
     class FakeSupervisor:
-        def start(self, session_id, message, *, history=None, model_context=None, task_id=None):
+        def start(self, session_id, message, *, history=None, model_context=None, task_id=None, plan_mode=False):
             captured.update(session_id=session_id, message=message)
             return "project-task"
 

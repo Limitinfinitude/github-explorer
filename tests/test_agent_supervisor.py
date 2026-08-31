@@ -21,7 +21,7 @@ class ControlledRuntime:
             "summary": {},
         })
 
-    async def run(self, session_id, user_message, history=None, task_id=None, model_context=None, approval_mode="confirm"):
+    async def run(self, session_id, user_message, history=None, task_id=None, model_context=None, approval_mode="confirm", plan_mode=False):
         state = self.store.get_agent_task(task_id)
         state.update(user_message=user_message, status="running")
         self.store.save_agent_task(state)
