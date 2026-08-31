@@ -3,6 +3,7 @@
 /api/explain, /api/clone, /api/launch-instructions/, /api/image/
 """
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dataclasses import asdict
 
@@ -11,6 +12,10 @@ from fastapi.responses import FileResponse
 import httpx
 
 router_search = APIRouter()
+
+
+def _days_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def repo_to_dict(repo):
@@ -70,7 +75,20 @@ async def _enrich_trending_repos(repos: list[dict], limit: int = 8) -> None:
                     "open_issues": payload.get("open_issues_count"),
                     "pushed_at": payload.get("pushed_at"),
                     "license": (payload.get("license") or {}).get("spdx_id") if isinstance(payload.get("license"), dict) else "",
+                    "archived": bool(payload.get("archived")),
                 })
+                # issues 消化率：近 90 天关闭/新增比——比绝对数更能反映治理活性
+                # （home-assistant 3392 开单但天天消化 vs jakevdp 227 开单但 795 天无人管）
+                try:
+                    closed_q = f"repo:{full} is:issue is:closed closed:>={_days_ago(90)}"
+                    opened_q = f"repo:{full} is:issue created:>={_days_ago(90)}"
+                    closed_data = await client._request("GET", "/search/issues", params={"q": closed_q, "per_page": 1})
+                    opened_data = await client._request("GET", "/search/issues", params={"q": opened_q, "per_page": 1})
+                    closed_count = int(closed_data.get("total_count", 0))
+                    opened_count = max(1, int(opened_data.get("total_count", 0)))
+                    repo["issue_close_ratio_90d"] = round(closed_count / opened_count, 2)
+                except Exception:
+                    pass  # 限流/失败不阻断：消化率缺失时卡片仍可用
             except Exception:
                 pass  # 详情失败不阻断：保留 trending 原有字段
             return repo

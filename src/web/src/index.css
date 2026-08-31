@@ -1040,6 +1040,16 @@ button { cursor: pointer; }
 .explore-drawer__actions { padding-top: 12px; border-top: 1px solid var(--border-faint); }
 .explore-drawer__actions a { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 12px; color: var(--blue); border: 1px solid var(--border-2); border-radius: 6px; font-size: 11px; text-decoration: none; }
 .explore-drawer__actions a:hover { background: var(--hover); border-color: var(--border-strong); }
+
+/* 已归档项目：标灰降级（高 star 死项目不装成健康项目） */
+.explore-repo--archived { opacity: .62; }
+.explore-repo--archived:hover { opacity: .85; }
+.explore-repo__archived { padding: 1px 7px; color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning); border-radius: 9px; font-size: 9px; white-space: nowrap; }
+.explore-repo__governance { font-size: 9px; }
+.explore-repo__governance.is-good { color: var(--success); }
+.explore-repo__governance.is-bad { color: var(--error); }
+.explore-repo__bring--archived { color: var(--muted-2); background: transparent; border: 1px dashed var(--border-2); cursor: default; }
+.explore-drawer__archived-banner { margin: 12px 0 0; padding: 9px 12px; color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning); border-radius: 8px; font-size: 10.5px; line-height: 1.6; }
 .explore-bring__spinner { width: 12px; height: 12px; border: 2px solid var(--border-strong); border-top-color: transparent; border-radius: 50%; animation: explore-spin .8s linear infinite; }
 @keyframes explore-spin { to { transform: rotate(360deg); } }
 .explore-repo:hover { background: var(--surface-2); border-color: var(--border-2); }

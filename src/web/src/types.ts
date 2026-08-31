@@ -177,6 +177,10 @@ export interface Repo {
   owner_avatar?: string
   open_issues?: number
   license?: string
+  /** 已归档（GitHub archived）——高 star 死项目的硬信号，卡片标灰降级 */
+  archived?: boolean
+  /** 近 90 天 issue 关闭/新增比——治理活性指示，>1 = 在消化，<0.5 = 积压 */
+  issue_close_ratio_90d?: number
 }
 
 export interface WorkspaceProfile {

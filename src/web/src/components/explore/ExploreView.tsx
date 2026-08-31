@@ -34,8 +34,9 @@ function RepoCard({ repo, isLocal, onBring, onOpenDetail }: {
   onOpenDetail: (repo: Repo) => void
 }) {
   const href = repo.html_url || repo.url || '#'
+  const archived = Boolean(repo.archived)
   return (
-    <article className="explore-repo" onClick={() => onOpenDetail(repo)} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') onOpenDetail(repo) }}>
+    <article className={`explore-repo ${archived ? 'explore-repo--archived' : ''}`} onClick={() => onOpenDetail(repo)} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') onOpenDetail(repo) }}>
       <div className="explore-repo__topline">
         {repo.owner_avatar
           ? <img className="explore-repo__avatar" src={repo.owner_avatar} alt="" loading="lazy" />
@@ -43,6 +44,7 @@ function RepoCard({ repo, isLocal, onBring, onOpenDetail }: {
         <a href={href} target="_blank" rel="noreferrer" className="explore-repo__name" onClick={e => e.stopPropagation()}>
           {repo.full_name}<ExternalLink size={12} />
         </a>
+        {archived && <span className="explore-repo__archived" title="GitHub 已归档（项目不再维护，star 数不代表现状）">已归档</span>}
         {isLocal && <span className="explore-repo__local"><Check size={11} />已导入</span>}
       </div>
       <p className="explore-repo__description">{repo.description || '暂无仓库描述'}</p>
@@ -59,13 +61,22 @@ function RepoCard({ repo, isLocal, onBring, onOpenDetail }: {
         {repo.language && <span className="explore-repo__language"><i style={{ background: languageColor(repo.language) }} />{repo.language}</span>}
         {repo.license && <span className="explore-repo__license">{repo.license}</span>}
         {typeof repo.open_issues === 'number' && repo.open_issues > 0 && <span>{repo.open_issues} issues</span>}
+        {typeof repo.issue_close_ratio_90d === 'number' && (
+          <span
+            className={`explore-repo__governance ${repo.issue_close_ratio_90d >= 1 ? 'is-good' : repo.issue_close_ratio_90d < 0.5 ? 'is-bad' : ''}`}
+            title={`近 90 天 issue 关闭/新增比 ${repo.issue_close_ratio_90d}——治理活性指示（>1 在消化，<0.5 在积压）`}
+          >
+            消化 {repo.issue_close_ratio_90d >= 1 ? '良好' : repo.issue_close_ratio_90d < 0.5 ? '积压' : '一般'}
+          </span>
+        )}
         {repo.pushed_at && <span className="explore-repo__time"><Clock3 size={11} />{formatRelativeTime(repo.pushed_at)}</span>}
       </div>
-      {!isLocal && (
+      {!isLocal && !archived && (
         <button type="button" className="explore-repo__bring" onClick={e => { e.stopPropagation(); onBring(repo) }}>
           <Download size={13} />带回工作区
         </button>
       )}
+      {archived && <span className="explore-repo__bring explore-repo__bring--archived">项目已归档，不建议带回</span>}
     </article>
   )
 }
@@ -112,8 +123,10 @@ function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () => void 
           {repo.language && <div><small>语言</small><strong><i style={{ background: languageColor(repo.language), display: 'inline-block', width: 9, height: 9, borderRadius: '50%', marginRight: 5 }} />{repo.language}</strong></div>}
           {repo.license && <div><small>许可</small><strong>{repo.license}</strong></div>}
           {typeof repo.open_issues === 'number' && <div><small>Open issues</small><strong>{repo.open_issues}</strong></div>}
+          {typeof repo.issue_close_ratio_90d === 'number' && <div><small>治理消化</small><strong className={repo.issue_close_ratio_90d >= 1 ? 'trace-ok' : repo.issue_close_ratio_90d < 0.5 ? 'trace-fail' : ''}>{repo.issue_close_ratio_90d >= 1 ? '良好' : repo.issue_close_ratio_90d < 0.5 ? '积压' : '一般'}（{repo.issue_close_ratio_90d}）</strong></div>}
           {repo.pushed_at && <div><small>最近更新</small><strong>{formatRelativeTime(repo.pushed_at)}</strong></div>}
         </div>
+        {repo.archived && <div className="explore-drawer__archived-banner">此项目已被 GitHub 归档（不再维护）。star 数只代表历史热度，不代表当前健康度——不建议作为依赖带回。</div>}
         {(repo.topics ?? []).length > 0 && (
           <div className="explore-drawer__topics">
             {(repo.topics ?? []).map(topic => <span key={topic}>{topic}</span>)}
