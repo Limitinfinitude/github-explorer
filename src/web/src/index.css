@@ -999,6 +999,47 @@ button { cursor: pointer; }
 .explore-bring { flex-wrap: wrap; gap: 10px; }
 .explore-bring__open { min-height: 22px; padding: 0 9px; display: inline-flex; align-items: center; color: var(--blue); background: transparent; border: 1px solid var(--border-strong); border-radius: 5px; font-size: 10px; font-weight: 600; }
 .explore-bring__open:hover { background: var(--hover); }
+
+/* 探索卡片升级：avatar / 语言色点 / topics 可点 / license / 时间 */
+.explore-repo { position: relative; cursor: pointer; }
+.explore-repo__avatar { width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%; }
+.explore-repo__avatar--fallback { display: inline-grid; place-items: center; color: var(--text); background: var(--surface-3); font-size: 9px; font-weight: 700; }
+.explore-repo__name { flex: 1; min-width: 0; }
+.explore-repo__language { display: inline-flex; align-items: center; gap: 4px; }
+.explore-repo__language i { width: 9px; height: 9px; display: inline-block; border-radius: 50%; }
+.explore-repo__license { color: var(--muted-2); font-size: 9px; }
+.explore-repo__time { display: inline-flex; align-items: center; gap: 3px; color: var(--muted-2); }
+.explore-topic { min-height: 18px; padding: 0 7px; color: var(--blue); background: var(--accent-soft); border: 0; border-radius: 9px; font-size: 9px; cursor: default; }
+.explore-topic__more { color: var(--muted-2); font-size: 9px; }
+
+/* 发现 preset chips */
+.explore-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.explore-presets span { color: var(--muted); font-size: 10px; }
+.explore-presets button { min-height: 24px; padding: 0 10px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 12px; font-size: 10px; cursor: pointer; }
+.explore-presets button:hover { color: var(--blue); border-color: var(--accent); background: var(--accent-soft); }
+
+/* 详情抽屉：从右侧滑入，返回不丢列表上下文 */
+.explore-drawer { position: fixed; inset: 0; z-index: 60; }
+.explore-drawer__backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); border: 0; }
+.explore-drawer__panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(460px, 92vw); display: flex; flex-direction: column; padding: 16px; background: var(--canvas-deep); border-left: 1px solid var(--border-2); box-shadow: -12px 0 32px rgba(0, 0, 0, .45); overflow-y: auto; animation: explore-drawer-in .18s ease-out; }
+@keyframes explore-drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.explore-drawer__head { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border-faint); }
+.explore-drawer__head img { width: 28px; height: 28px; border-radius: 50%; }
+.explore-drawer__head > div { flex: 1; min-width: 0; }
+.explore-drawer__head strong { display: block; color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.explore-drawer__head small { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; }
+.explore-drawer__facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border-faint); }
+.explore-drawer__facts > div { padding: 7px 10px; background: var(--surface-2); border: 1px solid var(--border-faint); border-radius: 7px; }
+.explore-drawer__facts small { display: block; color: var(--muted-2); font-size: 9px; margin-bottom: 3px; }
+.explore-drawer__facts strong { color: var(--text); font-size: 12px; }
+.explore-drawer__topics { display: flex; flex-wrap: wrap; gap: 5px; padding: 10px 0; border-bottom: 1px solid var(--border-faint); }
+.explore-drawer__topics span { padding: 2px 8px; color: var(--blue); background: var(--accent-soft); border-radius: 9px; font-size: 9px; }
+.explore-drawer__readme { flex: 1; padding: 12px 0; min-height: 120px; }
+.explore-drawer__readme pre { margin: 0; color: var(--text-2); font: 10.5px/1.75 var(--font-body, inherit); white-space: pre-wrap; word-break: break-word; }
+.explore-drawer__readme .muted { color: var(--muted-2); font-size: 10px; }
+.explore-drawer__actions { padding-top: 12px; border-top: 1px solid var(--border-faint); }
+.explore-drawer__actions a { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 12px; color: var(--blue); border: 1px solid var(--border-2); border-radius: 6px; font-size: 11px; text-decoration: none; }
+.explore-drawer__actions a:hover { background: var(--hover); border-color: var(--border-strong); }
 .explore-bring__spinner { width: 12px; height: 12px; border: 2px solid var(--border-strong); border-top-color: transparent; border-radius: 50%; animation: explore-spin .8s linear infinite; }
 @keyframes explore-spin { to { transform: rotate(360deg); } }
 .explore-repo:hover { background: var(--surface-2); border-color: var(--border-2); }

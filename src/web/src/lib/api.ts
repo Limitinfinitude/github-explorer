@@ -475,8 +475,8 @@ export const api = {
     return res.json()
   },
 
-  async searchRepos(q: string, lang: string): Promise<Repo[]> {
-    const params = new URLSearchParams({ q, lang })
+  async searchRepos(q: string, lang: string, hint = ''): Promise<Repo[]> {
+    const params = new URLSearchParams({ q, lang, hint })
     const res = await fetch(`/api/search?${params}`)
     if (!res.ok) throw new Error(`搜索失败：HTTP ${res.status}`)
     const data = await res.json()
@@ -491,6 +491,12 @@ export const api = {
     const data = await res.json()
     if (data.error) throw new Error(data.error)
     return data.repos ?? []
+  },
+
+  async getRepoReadme(owner: string, repo: string): Promise<{ readme: string | null }> {
+    const res = await fetch(`/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme?max_chars=1400`)
+    if (!res.ok) throw new Error(`读取 README 失败：HTTP ${res.status}`)
+    return res.json()
   },
 
   async getModels() {

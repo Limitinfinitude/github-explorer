@@ -31,3 +31,18 @@ export function relativeMessageTime(value: string, now = Date.now()): string {
     hour: '2-digit', minute: '2-digit',
   })
 }
+
+/** 给探索/项目等展示用的「相对时间」：天/周/月，中文单位，跨年时精确到日。 */
+export function formatRelativeTime(value: string, now = Date.now()): string {
+  if (!value) return ''
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
+  const timestamp = Date.parse(hasZone ? value : `${value.replace(' ', 'T')}Z`)
+  if (Number.isNaN(timestamp)) return ''
+  const days = Math.floor(Math.max(0, now - timestamp) / 86_400_000)
+  if (days === 0) return '今天'
+  if (days === 1) return '昨天'
+  if (days < 7) return `${days} 天前`
+  if (days < 30) return `${Math.floor(days / 7)} 周前`
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`
+  return new Date(timestamp).toLocaleDateString('zh-CN')
+}

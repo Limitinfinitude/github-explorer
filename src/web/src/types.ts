@@ -173,6 +173,10 @@ export interface Repo {
   url?: string
   stars_today?: number
   trending_period?: string
+  /** trending enrichment 补全的详情字段 */
+  owner_avatar?: string
+  open_issues?: number
+  license?: string
 }
 
 export interface WorkspaceProfile {
