@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, BookMarked, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Upload, Waypoints } from 'lucide-react'
+import { Activity, Archive, ArchiveRestore, BookMarked, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, FolderPlus, FolderTree, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Trash2, Upload, Waypoints } from 'lucide-react'
 import { api } from '../../lib/api'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
 import { processIdentityLabel, qualityState, terminalReasonLabel } from '../../lib/projectInsights'
+import { DirTree } from '../layout/DirTree'
 import type { ProjectEvidence, ProjectEvidenceFilter, ProjectMatrixRow, ProjectMemory, ProjectOverview, ProjectSummary } from '../../types'
 
 const STAGES = [
@@ -236,8 +237,10 @@ function FailurePatterns({ patterns }: { patterns: ProjectOverview['failure_patt
 
 export function ProjectWorkspaceView({
   onOpenProjectConversation,
+  onOpenActivity,
 }: {
   onOpenProjectConversation: (sessionId: string, title: string, userMessage?: string, project?: { projectId: string; workspace: string }) => void
+  onOpenActivity: () => void
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [matrix, setMatrix] = useState<ProjectMatrixRow[] | null>(null)
@@ -254,7 +257,81 @@ export function ProjectWorkspaceView({
   const [showDetails, setShowDetails] = useState(false)
   const [importPath, setImportPath] = useState('')
   const [importing, setImporting] = useState(false)
+  const [showImportTree, setShowImportTree] = useState(false)
+  const [importTreeReady, setImportTreeReady] = useState(false)
+  const [importTreeError, setImportTreeError] = useState('')
+  const [showScratch, setShowScratch] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('')
+  const [browserRoot, setBrowserRoot] = useState('')
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [flash, setFlash] = useState('')
   const importInputRef = useRef<HTMLInputElement>(null)
+
+  // 操作成功反馈：2.6 秒后自动消失
+  useEffect(() => {
+    if (!flash) return
+    const timer = window.setTimeout(() => setFlash(''), 2600)
+    return () => window.clearTimeout(timer)
+  }, [flash])
+
+  // 导入浏览用临时会话：仅用于目录树浏览/新建文件夹，不产生对话
+  const IMPORT_BROWSER_SESSION = 'project-import-browser'
+
+  /** 绑定临时浏览会话到默认工作目录，返回浏览根。幂等。 */
+  async function ensureBrowserSession(): Promise<string> {
+    if (importTreeReady && browserRoot) return browserRoot
+    const defaultWs = await api.getDefaultWorkspace()
+    const bound = await api.bindWorkspace(IMPORT_BROWSER_SESSION, defaultWs.path)
+    const root = String(bound.root || bound.workspace || defaultWs.path)
+    setBrowserRoot(root)
+    setImportTreeReady(true)
+    return root
+  }
+
+  async function toggleImportTree() {
+    const next = !showImportTree
+    setShowImportTree(next)
+    if (!next || importTreeReady) return
+    setImportTreeError('')
+    try {
+      await ensureBrowserSession()
+    } catch (err) {
+      setImportTreeError(err instanceof Error ? err.message : '目录树初始化失败')
+    }
+  }
+
+  async function toggleNewProject() {
+    const next = !showNewProject
+    setShowNewProject(next)
+    if (!next) return
+    setImportTreeError('')
+    try {
+      await ensureBrowserSession()
+    } catch (err) {
+      setImportTreeError(err instanceof Error ? err.message : '初始化失败')
+    }
+  }
+
+  async function createNewProject() {
+    const name = newProjectName.trim()
+    if (!name || creatingProject) return
+    setCreatingProject(true); setImportTreeError('')
+    try {
+      const root = await ensureBrowserSession()
+      // 新建位置：目录树里选中的文件夹优先，否则落在默认工作目录下
+      const parent = importPath.trim() && importPath.trim() !== root ? importPath.trim() : root
+      const fullPath = parent.endsWith('/') || parent.endsWith('\\') ? `${parent}${name}` : `${parent}/${name}`
+      await api.createFolder(IMPORT_BROWSER_SESSION, fullPath)
+      setShowNewProject(false); setNewProjectName('')
+      await importProject(fullPath)
+    } catch (err) {
+      setImportTreeError(err instanceof Error ? err.message : '创建项目文件夹失败')
+    } finally {
+      setCreatingProject(false)
+    }
+  }
 
   async function refreshMatrix(force = false) {
     // 有缓存先直接显示，后台静默刷新（切换视图回来秒开）
@@ -341,6 +418,113 @@ export function ProjectWorkspaceView({
   const activeProcess = overview?.active_processes.find(process => process.status === 'running') || overview?.active_processes[0]
   const quality = overview ? qualityState(overview.quality_metrics) : null
   const projectTitle = overview?.workspace_root.split(/[\\/]/).filter(Boolean).pop() || '项目'
+  // 旅程轨道和指标网格只在有真实执行事实时展示——空文件夹上摆六段旅程是噪音
+  const hasFacts = Boolean(overview && (
+    (overview.summary.changed_file_count ?? 0) > 0 ||
+    (overview.summary.verification_count ?? 0) > 0 ||
+    (overview.summary.process_count ?? 0) > 0 ||
+    (overview.quality_metrics.acceptance_total ?? 0) > 0
+  ))
+
+  // 矩阵三分：正式项目 / 临时工作区（折叠降级）/ 已归档
+  const allRows = useMemo(() => matrix || [], [matrix])
+  const projectRows = useMemo(() => allRows.filter(row => row.kind !== 'scratch' && !row.archived), [allRows])
+  const scratchRows = useMemo(() => allRows.filter(row => row.kind === 'scratch' && !row.archived), [allRows])
+  const archivedRows = useMemo(() => allRows.filter(row => row.archived), [allRows])
+
+  function workspaceBasename(root: string) {
+    return root.split(/[\\/]/).filter(Boolean).pop() || '项目'
+  }
+
+  async function toggleArchive(row: ProjectMatrixRow) {
+    setError(''); setActionError('')
+    try {
+      await api.archiveProject(row.project_id, !row.archived)
+      setFlash(row.archived ? `已取消归档 ${workspaceBasename(row.workspace_root)}` : `已归档 ${workspaceBasename(row.workspace_root)}`)
+      await refreshMatrix(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '归档操作失败')
+    }
+  }
+
+  function removeRow(row: ProjectMatrixRow) {
+    const name = workspaceBasename(row.workspace_root)
+    if (!window.confirm(
+      `移除「${name}」将删除它的全部本地运行记录（任务/事件/工具/变更/对话消息）。\n磁盘文件夹不受影响。确定移除？`,
+    )) return
+    void (async () => {
+      setError(''); setActionError('')
+      try {
+        await api.removeProject(row.project_id)
+        if (selectedProjectId === row.project_id) backToMatrix()
+        setFlash(`已移除 ${name}`)
+        await refreshMatrix(true)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '移除失败')
+      }
+    })()
+  }
+
+  // 打开项目卡：空态与矩阵视图共用（选择已有文件夹 / 新建项目文件夹）
+  const openCard = (
+    <section className="project-open" aria-label="打开项目">
+      <div className="project-open__head">
+        <FolderOpen size={16} />
+        <strong>打开项目</strong>
+        <span>选择已有文件夹，或新建一个项目文件夹——导入后立即开始项目体检</span>
+      </div>
+      <div className="project-open__actions">
+        <button type="button" className={showImportTree ? 'is-active' : ''} onClick={() => void toggleImportTree()}>
+          <FolderTree size={13} />浏览目录树
+        </button>
+        <button type="button" className={showNewProject ? 'is-active' : ''} onClick={() => void toggleNewProject()}>
+          <FolderPlus size={13} />新建项目文件夹
+        </button>
+      </div>
+      {showImportTree && (importTreeError ? <div className="workspace-error">{importTreeError}</div> : importTreeReady && (
+        <DirTree
+          sessionId={IMPORT_BROWSER_SESSION}
+          value={importPath}
+          onSelect={path => setImportPath(path)}
+        />
+      ))}
+      {showNewProject && (importTreeError ? <div className="workspace-error">{importTreeError}</div> : importTreeReady && (
+        <div className="project-open__new">
+          <small>将在 <code>{importPath.trim() && importPath.trim() !== browserRoot ? importPath : browserRoot}</code> 下创建（在目录树里选中位置可更改）</small>
+          <div>
+            <input
+              value={newProjectName}
+              onChange={event => setNewProjectName(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter') void createNewProject() }}
+              placeholder="项目文件夹名称，例如 my-app"
+              autoFocus
+              spellCheck={false}
+              aria-label="新项目文件夹名称"
+            />
+            <button type="button" disabled={!newProjectName.trim() || creatingProject} onClick={() => void createNewProject()}>
+              {creatingProject ? '创建中…' : '创建并导入'}
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="project-open__path">
+        <input
+          ref={importInputRef}
+          value={importPath}
+          onChange={event => setImportPath(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter') void importProject(importPath) }}
+          placeholder="或直接粘贴目录绝对路径，例如 C:\projects\demo"
+          spellCheck={false}
+          aria-label="项目目录绝对路径"
+        />
+        <button type="button" className="project-import__primary" disabled={!importPath.trim() || importing} onClick={() => void importProject(importPath)}>
+          <Upload size={14} />{importing ? '正在导入并体检…' : '导入并体检'}
+        </button>
+      </div>
+      <small>路径不存在时，只要父目录存在就会自动创建。</small>
+      {error && <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div>}
+    </section>
+  )
 
   async function startAction(action: string) {
     if (!overview || actionPending) return
@@ -385,7 +569,8 @@ export function ProjectWorkspaceView({
       setImportPath('')
       await refreshMatrix()
       const name = result.workspace.split(/[\\/]/).filter(Boolean).pop() || '项目'
-      onOpenProjectConversation(result.session_id, `${name} 项目`, '项目体检已启动', {
+      // 不再自动开跑体检：把选择权交还用户（主动问想做什么）
+      onOpenProjectConversation(result.session_id, `${name} 项目`, `「${name}」已打开。想在这里做什么？直接说就行；也可以回工作台用动作按钮（体检 / 跑起来 / 导读 / 验证）。`, {
         projectId: result.project_id,
         workspace: result.workspace,
       })
@@ -410,29 +595,8 @@ export function ProjectWorkspaceView({
         </div>
       </header>
       {lastUpdated && <div className="project-workspace__updated"><Clock size={11} /> 更新于 {new Date(lastUpdated).toLocaleTimeString()}</div>}
-      {loading ? <div className="project-state">正在读取项目…</div> : error && !matrix ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : !matrix || matrix.length === 0 ? (
-        <div className="project-import">
-          <div className="project-import__icon"><FolderOpen size={20} /></div>
-          <strong>导入一个本地项目</strong>
-          <p>选择一个本地目录作为实验材料，工作台会立即启动「项目体检」，并在之后保留运行、证据与实验记录。</p>
-          <div className="project-import__form">
-            <input
-              ref={importInputRef}
-              value={importPath}
-              onChange={event => setImportPath(event.target.value)}
-              onKeyDown={event => { if (event.key === 'Enter') void importProject(importPath) }}
-              placeholder="粘贴目录绝对路径，例如 C:\projects\demo"
-              spellCheck={false}
-              aria-label="项目目录绝对路径"
-            />
-            <button type="button" className="project-import__primary" disabled={!importPath.trim() || importing} onClick={() => void importProject(importPath)}>
-              <Upload size={14} />{importing ? '正在导入并体检…' : '导入并体检'}
-            </button>
-          </div>
-          <small>也可以在设置中配置「默认工作目录」，或先在对话里导入 GitHub 仓库。</small>
-          {error && <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div>}
-        </div>
-      ) : selectedProjectId && overview ? (
+      {flash && <div className="project-flash" role="status">{flash}</div>}
+      {loading ? <div className="project-state">正在读取项目…</div> : error && !matrix ? <div className="project-state project-state--error"><CircleAlert size={16} />{error}</div> : selectedProjectId && overview ? (
         <>
           <div className="project-detail-nav">
             <button type="button" className="project-back" onClick={backToMatrix}><ChevronLeft size={14} />返回项目矩阵</button>
@@ -457,15 +621,23 @@ export function ProjectWorkspaceView({
             ) })}
             {actionError && <div className="project-actions__error" role="alert"><CircleAlert size={14} />{actionError}</div>}
           </section>
-          <section className="project-stage-rail" aria-label="项目旅程">
-            {STAGES.map(stage => { const Icon = stage.icon; const current = stage.id === activeStage; return <div key={stage.id} className={`project-stage ${current ? 'is-current' : ''}`}><Icon size={15} /><span>{stage.label}</span></div> })}
-          </section>
-          <section className="project-summary-grid">
-            <div><small>当前阶段</small><strong>{STAGES.find(stage => stage.id === activeStage)?.label || '项目体检'}</strong></div>
-            <div><small>下一步</small><strong>{overview.next_action}</strong></div>
-            <div><small>改动产出</small><strong>{overview.summary.changed_file_count ? `${overview.summary.changed_file_count} 个文件` : '尚未改动文件'}{overview.summary.process_count ? ` · ${overview.summary.process_count} 个服务` : ''}</strong></div>
-            <div><small>验证</small><strong>{overview.summary.verification_count ? `${overview.summary.verification_count} 项` : '尚未验证'}</strong></div>
-          </section>
+          {hasFacts && (
+            <section className="project-stage-rail" aria-label="项目旅程">
+              {STAGES.map(stage => { const Icon = stage.icon; const current = stage.id === activeStage; return <div key={stage.id} className={`project-stage ${current ? 'is-current' : ''}`}><Icon size={15} /><span>{stage.label}</span></div> })}
+            </section>
+          )}
+          {hasFacts ? (
+            <section className="project-summary-grid">
+              <div><small>当前阶段</small><strong>{STAGES.find(stage => stage.id === activeStage)?.label || '项目体检'}</strong></div>
+              <div><small>下一步</small><strong>{overview.next_action}</strong></div>
+              <div><small>改动产出</small><strong>{overview.summary.changed_file_count ? `${overview.summary.changed_file_count} 个文件` : '尚未改动文件'}{overview.summary.process_count ? ` · ${overview.summary.process_count} 个服务` : ''}</strong></div>
+              <div><small>验证</small><strong>{overview.summary.verification_count ? `${overview.summary.verification_count} 项` : '尚未验证'}</strong></div>
+            </section>
+          ) : (
+            <section className="project-summary-grid project-summary-grid--empty" aria-label="执行事实">
+              <div><small>执行事实</small><strong>还没有——用上方动作开工，或打开项目对话直接说想做什么</strong></div>
+            </section>
+          )}
           <section className="project-details" aria-label="运行详情">
             <button type="button" className="project-details__toggle" onClick={() => setShowDetails(v => !v)} aria-expanded={showDetails}>
               <Waypoints size={14} /><span>运行详情</span><small>服务 / 完成度 / 验收 / 预算 / 成本</small><ChevronDown size={14} className={showDetails ? 'is-open' : ''} />
@@ -495,26 +667,102 @@ export function ProjectWorkspaceView({
           <ProjectMemoriesDrawer projectId={projectId} />
         </>
       ) : (
-        <section className="project-matrix" aria-label="项目矩阵">
-          <div className="project-matrix__heading">
-            <h2>{matrix.length} 个项目</h2>
-            <span>点开项目查看详情与动作</span>
-          </div>
-          {matrix.map(row => (
-            <button key={row.project_id} type="button" className="project-matrix-row" onClick={() => void openProject(row.project_id)}>
-              <span className={`project-matrix-row__status project-status--${row.stage_status}`}>{statusLabel(row.stage_status)}</span>
-              <span className="project-matrix-row__name">{row.workspace_root.split(/[\\/]/).filter(Boolean).pop() || '项目'}</span>
-              <span className="project-matrix-row__message">{row.message || '尚无任务'}</span>
-              <span className="project-matrix-row__meta">
-                {row.stage && <em>{STAGES.find(stage => stage.id === row.stage)?.label || row.stage}</em>}
-                {row.verification_count > 0 && <em>{row.verification_count} 项验证</em>}
-                {row.failed && <em className="is-failed">失败</em>}
-                {row.updated_at && <time>{formatLocalTimestamp(row.updated_at)}</time>}
-              </span>
-              <ChevronRight size={14} className="project-matrix-row__chevron" />
-            </button>
-          ))}
-        </section>
+        <>
+          {openCard}
+          {matrix && matrix.length > 0 && (<>
+          <section className="project-matrix" aria-label="项目矩阵">
+            <div className="project-matrix__heading">
+              <h2>{projectRows.length} 个项目</h2>
+              <span>点开项目查看详情与动作</span>
+            </div>
+            {projectRows.length === 0 && <div className="project-state">还没有正式项目——导入一个本地目录，或在上方直接说任务。</div>}
+            {projectRows.map(row => (
+              <button key={row.project_id} type="button" className="project-matrix-row" onClick={() => void openProject(row.project_id)}>
+                <span className={`project-matrix-row__status project-status--${row.stage_status}`}>{statusLabel(row.stage_status)}</span>
+                <span className="project-matrix-row__name">{workspaceBasename(row.workspace_root)}</span>
+                <span className="project-matrix-row__message">{row.message || '尚无任务'}</span>
+                <span className="project-matrix-row__meta">
+                  {row.stage && <em>{STAGES.find(stage => stage.id === row.stage)?.label || row.stage}</em>}
+                  {row.verification_count > 0 && <em>{row.verification_count} 项验证</em>}
+                  {row.failed && <em className="is-failed">失败</em>}
+                  {row.updated_at && <time>{formatLocalTimestamp(row.updated_at)}</time>}
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="project-matrix-row__remove"
+                  title="移除（删除本地运行记录，文件夹不动）"
+                  aria-label={`移除项目 ${workspaceBasename(row.workspace_root)}`}
+                  onClick={event => { event.stopPropagation(); removeRow(row) }}
+                  onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); removeRow(row) } }}
+                >
+                  <Trash2 size={13} />
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="project-matrix-row__archive"
+                  title="归档（从项目列表隐藏，可恢复）"
+                  aria-label={`归档项目 ${workspaceBasename(row.workspace_root)}`}
+                  onClick={event => { event.stopPropagation(); void toggleArchive(row) }}
+                  onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); void toggleArchive(row) } }}
+                >
+                  <Archive size={13} />
+                </span>
+                <ChevronRight size={14} className="project-matrix-row__chevron" />
+              </button>
+            ))}
+          </section>
+          {scratchRows.length > 0 && (
+            <section className="project-scratch" aria-label="临时工作区">
+              <button type="button" className="project-scratch__toggle" onClick={() => setShowScratch(v => !v)} aria-expanded={showScratch}>
+                <TerminalSquare size={13} />
+                <span>临时工作区</span>
+                <small>{scratchRows.length} 个 · 简单任务，无需项目仪式</small>
+                <ChevronDown size={14} className={showScratch ? 'is-open' : ''} />
+              </button>
+              {showScratch && scratchRows.map(row => (
+                <div key={row.project_id} className="project-scratch-row">
+                  <strong>{workspaceBasename(row.workspace_root)}</strong>
+                  <span className="project-scratch-row__message">{row.message || '尚无任务'}</span>
+                  <time>{row.updated_at ? formatLocalTimestamp(row.updated_at) : ''}</time>
+                  <div className="project-scratch-row__actions">
+                    <button
+                      type="button"
+                      onClick={() => onOpenProjectConversation(row.session_id || '', `${workspaceBasename(row.workspace_root)} 任务`, undefined, { projectId: row.project_id, workspace: row.workspace_root })}
+                    >
+                      <MessageSquare size={12} />继续对话
+                    </button>
+                    <button type="button" onClick={onOpenActivity}><Activity size={12} />查看记录</button>
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
+          {archivedRows.length > 0 && (
+            <section className="project-archived" aria-label="已归档">
+              <button type="button" className="project-scratch__toggle" onClick={() => setShowArchived(v => !v)} aria-expanded={showArchived}>
+                <Archive size={13} />
+                <span>已归档</span>
+                <small>{archivedRows.length} 个 · 不再出现在项目列表</small>
+                <ChevronDown size={14} className={showArchived ? 'is-open' : ''} />
+              </button>
+              {showArchived && archivedRows.map(row => (
+                <div key={row.project_id} className="project-scratch-row">
+                  <strong>{workspaceBasename(row.workspace_root)}</strong>
+                  <span className="project-scratch-row__message">{row.message || '尚无任务'}</span>
+                  <time>{row.updated_at ? formatLocalTimestamp(row.updated_at) : ''}</time>
+                  <div className="project-scratch-row__actions">
+                    <button type="button" onClick={() => void toggleArchive(row)}><ArchiveRestore size={12} />取消归档</button>
+                    <button type="button" onClick={() => removeRow(row)}><Trash2 size={12} />移除</button>
+                    <button type="button" onClick={onOpenActivity}><Activity size={12} />查看记录</button>
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
+          </>)}
+        </>
       )}
     </div>
   )

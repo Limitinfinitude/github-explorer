@@ -78,6 +78,7 @@ export function Sidebar({
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState('')
   const [imported, setImported] = useState('')
+  const [projectQuery, setProjectQuery] = useState('')
 
   // 切换到某个项目对话时，自动展开它所属的项目
   useEffect(() => {
@@ -115,7 +116,7 @@ export function Sidebar({
       const result = await api.importProject(path)
       setImportPath('')
       setAddingProject(false)
-      setImported(`${projectName({ project_id: result.project_id, workspace_root: result.workspace, latest_task_id: result.task_id, task_count: 1 })} 已添加，体检已启动`)
+      setImported(`${projectName({ project_id: result.project_id, workspace_root: result.workspace, latest_task_id: result.task_id, task_count: 1 })} 已添加`)
       setExpanded(prev => (prev.has(result.project_id) ? prev : new Set([...prev, result.project_id])))
       onProjectImported?.()
     } catch (err) {
@@ -126,6 +127,13 @@ export function Sidebar({
   }
 
   const looseChats = chats.filter(chat => !chat.projectId)
+  // 项目过滤：按名称或路径匹配（项目多了以后靠它找）
+  const query = projectQuery.trim().toLowerCase()
+  const visibleProjects = query
+    ? projects.filter(project =>
+        projectName(project).toLowerCase().includes(query)
+        || project.workspace_root.toLowerCase().includes(query))
+    : projects
 
   return (
     <>
@@ -187,20 +195,35 @@ export function Sidebar({
               aria-label="项目目录绝对路径"
             />
             <button type="button" disabled={!importPath.trim() || importing} onClick={() => void doImport()}>
-              <Upload size={12} />{importing ? '正在导入并体检…' : '导入并体检'}
+              <Upload size={12} />{importing ? '正在导入…' : '导入'}
             </button>
             {importError && <span className="is-error">{importError}</span>}
             {imported && <span>{imported}</span>}
           </div>
         )}
         <nav className={`sidebar-projects ${collapsed.projects ? 'is-collapsed-view' : ''}`} aria-label="项目栏">
+              {!collapsed.projects && projects.length > 8 && (
+                <div className="sidebar-project-search">
+                  <input
+                    value={projectQuery}
+                    onChange={event => setProjectQuery(event.target.value)}
+                    onKeyDown={event => { if (event.key === 'Escape') setProjectQuery('') }}
+                    placeholder={`搜索 ${projects.length} 个项目…`}
+                    spellCheck={false}
+                    aria-label="搜索项目"
+                  />
+                </div>
+              )}
+              {visibleProjects.length === 0 && query && (
+                <p className="sidebar-project-search__empty">没有匹配「{projectQuery}」的项目</p>
+              )}
               {projects.length === 0 && (
                 <button type="button" className="sidebar-projects__empty" onClick={() => { onOpenProjectView(); onClose() }}>
                   还没有项目，去工作台导入
                 </button>
               )}
-              {/* 折叠时只显示最近 8 个项目（降低初始堆叠），展开显示全部 */}
-              {(collapsed.projects ? projects.slice(0, 8) : projects).map(project => {
+              {/* 折叠时只显示最近 8 个项目（降低初始堆叠），展开显示全部；搜索时忽略折叠限制 */}
+              {(collapsed.projects && !query ? projects.slice(0, 8) : visibleProjects).map(project => {
                 const id = project.project_id
                 const conversations = chats.filter(chat => chat.projectId === id)
                 const isOpen = expanded.has(id)

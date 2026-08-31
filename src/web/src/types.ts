@@ -40,6 +40,23 @@ export interface Model {
   base_url?: string
   has_key?: boolean
   thinking_effort?: 'off' | 'high' | 'max'
+  context_window?: string
+  context_window_tokens?: number
+}
+
+export interface ContextUsage {
+  window: number
+  used: number
+  breakdown: {
+    history: number
+    tools_system: number
+    tools_mcp: number
+    system_prompt: number
+    other?: number
+  }
+  cache_hit_tokens?: number
+  cache_hit_rate?: number | null
+  compactions: number
 }
 
 export interface CustomModelInput {
@@ -342,6 +359,12 @@ export interface ProjectMatrixRow {
   failed: boolean
   verification_count: number
   updated_at: string
+  /** 工作区身份：正式项目（有 git/清单标记）享受项目仪式；临时工作区折叠降级。 */
+  kind?: 'project' | 'scratch'
+  /** 该工作区的项目会话 id（临时工作区「继续对话」用）。 */
+  session_id?: string
+  /** 用户手动归档（评测克隆仓等噪音），折叠到已归档组。 */
+  archived?: boolean
 }
 
 export interface ProjectFailurePattern {
@@ -477,6 +500,7 @@ export type SSEEvent =
   | { type: 'acceptance'; success: boolean; items: AgentAcceptanceItem[]; task_id: string }
   | { type: 'process_started'; process_id: string; data: { status?: AgentProcess['status']; pid?: number; cwd?: string }; task_id: string }
   | { type: 'budget_warning'; diagnostic_tool_count: number; round_limit: number; message: string; plan?: string[]; task_id: string }
+  | { type: 'context_usage'; window: number; used: number; breakdown: ContextUsage['breakdown']; cache_hit_tokens?: number; cache_hit_rate?: number | null; compactions: number }
   | { type: 'approval_required'; tool_name: string; args: Record<string, unknown>; reason: string; task_id: string }
   | { type: 'token'; content: string }
   | { type: 'done'; content: string; status?: 'completed' | 'incomplete' | 'waiting_approval' | 'failed' | 'blocked' | 'cancelled' }

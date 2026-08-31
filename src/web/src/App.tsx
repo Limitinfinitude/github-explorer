@@ -100,6 +100,8 @@ export default function App() {
     setActiveView('chat')
   }, [openSession])
 
+  const handleOpenActivity = useCallback(() => setActiveView('activity'), [])
+
   const handleSelectModel = useCallback((id: string) => {
     setCurrentModel(id)
     api.selectModel(id).catch(() => {})
@@ -152,9 +154,12 @@ export default function App() {
             onOpenMenu={() => setSidebarOpen(true)}
           />
         ) : activeView === 'project' ? (
-          <ProjectWorkspaceView onOpenProjectConversation={handleOpenProjectConversation} />
+          <ProjectWorkspaceView
+            onOpenProjectConversation={handleOpenProjectConversation}
+            onOpenActivity={handleOpenActivity}
+          />
         ) : activeView === 'explore' ? (
-          <ExploreView />
+          <ExploreView onOpenProjects={() => setActiveView('project')} />
         ) : activeView === 'activity' ? (
           <ActivityView />
         ) : activeView === 'settings' ? (

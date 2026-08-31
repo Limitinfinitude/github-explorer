@@ -46,13 +46,14 @@ function RepoCard({ repo, isLocal, onBring }: { repo: Repo; isLocal: boolean; on
   )
 }
 
-export function ExploreView() {
+export function ExploreView({ onOpenProjects }: { onOpenProjects?: () => void }) {
   const [period, setPeriod] = useState(7)
   const [lang, setLang] = useState('')
   const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
+  const [searchedQuery, setSearchedQuery] = useState('')
   const [mode, setMode] = useState<'trending' | 'search'>('trending')
   const [localRepos, setLocalRepos] = useState<Set<string>>(new Set())
   const [bringBusy, setBringBusy] = useState('')
@@ -75,7 +76,7 @@ export function ExploreView() {
     try {
       await api.importGithub(url)
       const name = repo.full_name.split('/').pop() || ''
-      setBringMessage(`「${name}」已克隆到工作区，体检已启动。可到项目工作台查看。`)
+      setBringMessage(`「${name}」已克隆到工作区。打开项目工作台选择下一步（体检 / 跑起来 / 导读 / 验证）。`)
       setLocalRepos(current => new Set(current).add(name))
     } catch (err) {
       setBringMessage(err instanceof Error ? err.message : '导入失败')
@@ -111,6 +112,7 @@ export function ExploreView() {
     const nextQuery = query.trim()
     if (!nextQuery) return
     setMode('search')
+    setSearchedQuery(nextQuery)
     const key = cacheKey('search', period, lang, nextQuery)
     const cached = exploreCache.get(key)
     if (cached) {
@@ -124,6 +126,21 @@ export function ExploreView() {
       .then(next => { exploreCache.set(key, next); setRepos(next) })
       .catch(err => { setRepos([]); setError(err instanceof Error ? err.message : '搜索暂时不可用') })
       .finally(() => setLoading(false))
+  }
+
+  // 错误重试：趋势榜重拉，搜索模式重发上次关键词
+  function retry() {
+    if (mode === 'search' && searchedQuery) {
+      const key = cacheKey('search', period, lang, searchedQuery)
+      exploreCache.delete(key)
+      setLoading(true); setError('')
+      api.searchRepos(searchedQuery, lang)
+        .then(next => { exploreCache.set(key, next); setRepos(next) })
+        .catch(err => { setRepos([]); setError(err instanceof Error ? err.message : '搜索暂时不可用') })
+        .finally(() => setLoading(false))
+      return
+    }
+    void loadTrending(true)
   }
 
   function resetSearch() {
@@ -158,10 +175,12 @@ export function ExploreView() {
       </section>
 
       <section className="explore-filters">
-        <div className="explore-filter-group">
-          <span>时间范围</span>
-          {PERIODS.map(item => <button type="button" key={item.value} onClick={() => setPeriod(item.value)} className={period === item.value ? 'is-active' : ''}>{item.label}</button>)}
-        </div>
+        {mode === 'trending' && (
+          <div className="explore-filter-group">
+            <span>时间范围</span>
+            {PERIODS.map(item => <button type="button" key={item.value} onClick={() => setPeriod(item.value)} className={period === item.value ? 'is-active' : ''}>{item.label}</button>)}
+          </div>
+        )}
         <div className="explore-filter-group">
           <span>语言</span>
           {LANGS.map(item => <button type="button" key={item} onClick={() => setLang(item)} className={lang === item ? 'is-active' : ''}>{item || '全部'}</button>)}
@@ -173,7 +192,7 @@ export function ExploreView() {
         {loading ? (
           <div className="explore-grid">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="explore-skeleton" />)}</div>
         ) : error ? (
-          <div className="explore-state explore-state--error"><strong>暂时无法读取 GitHub</strong><span>{error}</span><button type="button" onClick={() => void loadTrending(true)}><RefreshCw size={14} />重试</button></div>
+          <div className="explore-state explore-state--error"><strong>暂时无法读取 GitHub</strong><span>{error}</span><button type="button" onClick={retry}><RefreshCw size={14} />重试</button></div>
         ) : repos.length === 0 ? (
           <div className="explore-state"><strong>{mode === 'search' ? '没有匹配结果' : '暂无趋势数据'}</strong><span>{mode === 'search' ? '换一个关键词或移除语言筛选试试。' : '稍后刷新，或切换语言范围。'}</span></div>
         ) : (
@@ -181,7 +200,12 @@ export function ExploreView() {
         )}
       </section>
       {bringBusy && <div className="explore-bring"><span className="explore-bring__spinner" />正在克隆 {bringBusy} 并启动体检…</div>}
-      {bringMessage && <div className="explore-bring explore-bring--done">{bringMessage}</div>}
+      {bringMessage && (
+        <div className="explore-bring explore-bring--done">
+          <span>{bringMessage}</span>
+          {!bringBusy && onOpenProjects && <button type="button" className="explore-bring__open" onClick={onOpenProjects}>打开项目工作台 →</button>}
+        </div>
+      )}
     </div>
   )
 }

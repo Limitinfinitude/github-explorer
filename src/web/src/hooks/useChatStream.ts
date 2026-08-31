@@ -2,6 +2,7 @@ import { useRef, useState, useCallback, useEffect } from 'react'
 import { api } from '../lib/api'
 import type {
   Step, CmdBlockData, SSEEvent, AgentFileChange, AgentRunSummary,
+  ContextUsage,
   AgentVerification, AgentProcess, AgentApproval,
   AgentAcceptanceItem, ThinkingSegment,
 } from '../types'
@@ -25,6 +26,7 @@ export type StreamState = {
   acceptance: AgentAcceptanceItem[]
   processes: AgentProcess[]
   approval: AgentApproval | null
+  contextUsage: ContextUsage | null
 }
 
 type DoneHandler = (
@@ -61,6 +63,7 @@ function initialState(workspace: string): StreamState {
     acceptance: [],
     processes: [],
     approval: null,
+    contextUsage: null,
   }
 }
 
@@ -325,6 +328,21 @@ export function useChatStream(
               processes: [...current.processes.filter(item => item.processId !== process.processId), process],
             }
           })
+        } else if (e.type === 'context_usage') {
+          commit(cur => ({ ...cur, contextUsage: {
+            window: Number(e.window || 0),
+            used: Number(e.used || 0),
+            breakdown: {
+              history: Number(e.breakdown?.history || 0),
+              tools_system: Number(e.breakdown?.tools_system || 0),
+              tools_mcp: Number(e.breakdown?.tools_mcp || 0),
+              system_prompt: Number(e.breakdown?.system_prompt || 0),
+              other: Number(e.breakdown?.other || 0),
+            },
+            cache_hit_tokens: Number(e.cache_hit_tokens || 0),
+            cache_hit_rate: e.cache_hit_rate == null ? null : Number(e.cache_hit_rate),
+            compactions: Number(e.compactions || 0),
+          }}))
         } else if (e.type === 'budget_warning') {
           steps.push({ icon: 'activity', text: e.message, done: true, status: 'succeeded' })
           commit(current => ({
@@ -392,7 +410,7 @@ export function useChatStream(
   }, [commit, onDone, onError, onToken, workspace])
   consumeRef.current = consume
 
-  const send = useCallback((message: string, thinkingEffort?: string) => {
+  const send = useCallback((message: string, thinkingEffort?: string, planMode?: boolean) => {
     abortRef.current?.abort()
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -402,7 +420,7 @@ export function useChatStream(
       workspace: current.workspace || workspace,
       isGenerating: true,
     }))
-    void api.startAgentTask(message, sessionId, workspace || undefined, thinkingEffort)
+    void api.startAgentTask(message, sessionId, workspace || undefined, thinkingEffort, planMode)
       .then(started => {
         if (ctrl.signal.aborted) return
         commit(current => ({

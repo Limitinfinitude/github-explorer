@@ -31,7 +31,7 @@ function DirNode({
   const [loading, setLoading] = useState(false)
 
   async function toggle() {
-    if (entry.type !== 'directory') { onSelect(entry.path); return }
+    if (entry.type !== 'directory') return // 仅文件夹可选中：导入/绑定工作区语义都需要目录
     setOpen(v => !v)
     if (!children && !loading) {
       setLoading(true)
@@ -48,10 +48,10 @@ function DirNode({
     <div>
       <button
         type="button"
-        className={`dirtree-node ${selected === entry.path ? 'is-selected' : ''}`}
+        className={`dirtree-node ${entry.type === 'file' ? 'dirtree-node--file' : ''} ${selected === entry.path ? 'is-selected' : ''}`}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
         onClick={() => void toggle()}
-        title={entry.path}
+        title={entry.type === 'file' ? `${entry.path}（仅文件夹可选中）` : entry.path}
       >
         {entry.type === 'directory'
           ? <ChevronRight size={12} className={`dirtree-node__chevron ${open ? 'is-open' : ''}`} />

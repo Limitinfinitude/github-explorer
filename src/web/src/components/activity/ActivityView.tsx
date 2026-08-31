@@ -3,6 +3,9 @@ import { Activity, AlertTriangle, CheckCircle2, ChevronDown, Clock3, Database, F
 import { api } from '../../lib/api'
 import { localCoverageLabels } from '../../lib/observability'
 import { formatLocalTimestamp } from '../../lib/time'
+import { RecordTimeline } from '../records/RecordTimeline'
+import { ToolCallCard, type ToolCallStatus } from '../records/ToolCallCard'
+import { FactChip, StageBar, StageChip } from '../records/chips'
 import type { AgentEvent, AgentTrace, AgentTraceDetail, ObservabilityStatus } from '../../types'
 
 type TokenUsage = {
@@ -127,58 +130,103 @@ const STAGE_LABELS: Record<string, string> = {
   inspect: '体检', implement: '实施', test: '测试', run: '运行验收',
 }
 
-// 事件时间线中应隐藏的内部噪音事件（无信息量）
-const NOISE_EVENT_TYPES = new Set([
-  'thinking', 'token', 'model_request_started', 'model_request_completed',
-  'model_request_retrying', 'model_request_failed',
-])
-
-// 按 stage 聚合工具调用，形成语义阶段摘要
-function aggregateStages(events: AgentEvent[]): Array<{ stage: string; toolCount: number; failed: number }> {
-  const stages = new Map<string, { toolCount: number; failed: number }>()
+// 按 stage 聚合工具调用，形成语义阶段摘要（次数 / 失败 / 耗时）
+function aggregateStages(events: AgentEvent[]): Array<{ stage: string; toolCount: number; failed: number; durationMs: number }> {
+  const stages = new Map<string, { toolCount: number; failed: number; start: number; end: number }>()
   for (const event of events) {
     if (event.type !== 'tool_call' && event.type !== 'tool_result') continue
     const payload = event.payload as Record<string, unknown> | null | undefined
     const stage = payload && typeof payload.stage === 'string' ? payload.stage : 'implement'
-    const current = stages.get(stage) || { toolCount: 0, failed: 0 }
+    const current = stages.get(stage) || { toolCount: 0, failed: 0, start: 0, end: 0 }
     if (event.type === 'tool_call') current.toolCount += 1
     if (event.type === 'tool_result' && payload?.success === false) current.failed += 1
+    const ts = Date.parse(event.created_at)
+    if (Number.isFinite(ts)) {
+      if (!current.start || ts < current.start) current.start = ts
+      if (ts > current.end) current.end = ts
+    }
     stages.set(stage, current)
   }
-  return Array.from(stages.entries()).map(([stage, stats]) => ({ stage, ...stats }))
+  return Array.from(stages.entries()).map(([stage, stats]) => ({
+    stage,
+    toolCount: stats.toolCount,
+    failed: stats.failed,
+    durationMs: stats.start && stats.end > stats.start ? stats.end - stats.start : 0,
+  }))
+}
+
+function formatDuration(ms: number): string {
+  if (!ms || ms <= 0) return ''
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+}
+
+// 从事件流聚合模型侧质量事实（轮次 / tokens / 平均延迟）
+function modelFacts(events: AgentEvent[]): { rounds: number; tokens: number; avgLatencyMs: number } | null {
+  const completions = events.filter(event => event.type === 'model_request_completed')
+  if (completions.length === 0) return null
+  let tokens = 0
+  let latencySum = 0
+  for (const event of completions) {
+    const usage = event.payload.usage as Record<string, unknown> | undefined
+    if (typeof usage?.total_tokens === 'number') tokens += usage.total_tokens
+    if (typeof event.payload.latency_ms === 'number') latencySum += event.payload.latency_ms
+  }
+  return { rounds: completions.length, tokens, avgLatencyMs: Math.round(latencySum / completions.length) }
 }
 
 function TraceDetails({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<AgentTraceDetail | null>(null)
   const [loading, setLoading] = useState(false)
+  const [tab, setTab] = useState<'overview' | 'timeline' | 'tools' | 'files'>('overview')
+  const [query, setQuery] = useState('')
   const [showRaw, setShowRaw] = useState(false)
 
   useEffect(() => {
-    setLoading(true)
+    setLoading(true); setTab('overview'); setQuery(''); setShowRaw(false)
     api.getTraceDetail(taskId).then(setDetail).catch(() => setDetail(null)).finally(() => setLoading(false))
   }, [taskId])
 
+  const events = detail?.activity.events ?? []
+  // 明细内搜索：时间线按事件全文过滤，工具/文件各自按内容过滤
+  const filteredEvents = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return events
+    return events.filter(event => JSON.stringify({ type: event.type, ...event.payload }).toLowerCase().includes(q))
+  }, [events, query])
+
   if (loading) return <div className="activity-trace__detail muted">正在读取工具明细…</div>
   if (!detail) return <div className="activity-trace__detail muted">暂无明细</div>
-  const stageSummary = aggregateStages(detail.activity.events)
+
+  const facts = modelFacts(events)
+  const stageSummary = aggregateStages(filteredEvents)
+  const toolRunStatus = (run: AgentTraceDetail['activity']['tool_runs'][number]): ToolCallStatus =>
+    run.recovered_by_call_id ? 'recovered' : run.result.success === false ? 'failed' : 'success'
+  const failedToolCount = detail.activity.tool_runs.filter(run => toolRunStatus(run) !== 'success').length
+  const changedFileCount = new Set(detail.activity.changesets.flatMap(change => change.files)).size
+  const q = query.trim().toLowerCase()
+  const toolRuns = q
+    ? detail.activity.tool_runs.filter(run => JSON.stringify({ name: run.tool_name, args: run.args, result: run.result }).toLowerCase().includes(q))
+    : detail.activity.tool_runs
+  const changesets = q
+    ? detail.activity.changesets.filter(change => `${change.files.join('\n')}\n${change.diff}`.toLowerCase().includes(q))
+    : detail.activity.changesets
+
   return (
     <div className="activity-trace__detail">
-      {stageSummary.length > 0 && (
-        <div className="activity-stage-summary" aria-label="阶段摘要">
-          {stageSummary.map(item => (
-            <div key={item.stage} className={`activity-stage-summary__item ${item.failed > 0 ? 'is-failed' : ''}`}>
-              <strong>{STAGE_LABELS[item.stage] || item.stage}</strong>
-              <span>{item.toolCount} 次工具{item.failed > 0 ? ` · ${item.failed} 失败` : ''}</span>
-            </div>
+      <div className="activity-trace__toolbar">
+        <div className="activity-tabs" role="tablist" aria-label="明细分区">
+          {([['overview', '概览'], ['timeline', '时间线'], ['tools', '工具'], ['files', '文件']] as const).map(([id, label]) => (
+            <button key={id} type="button" role="tab" aria-selected={tab === id} className={`activity-tab ${tab === id ? 'is-active' : ''}`} onClick={() => setTab(id)}>{label}</button>
           ))}
         </div>
-      )}
-      {detail.activity.events?.length > 0 && (
+        <input className="activity-trace__search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索事件 / 工具 / 文件…" aria-label="明细搜索" />
+      </div>
+
+      {showRaw ? (
         <>
-          <button type="button" className="activity-event-toggle" onClick={() => setShowRaw(v => !v)} aria-expanded={showRaw}>
-            {showRaw ? '收起详细事件' : `显示全部 ${detail.activity.events.length} 条事件`}
-          </button>
-          {(showRaw ? detail.activity.events : detail.activity.events.filter(event => !NOISE_EVENT_TYPES.has(event.type))).map(event => (
+          <button type="button" className="activity-event-toggle" onClick={() => setShowRaw(false)}>← 返回结构化视图</button>
+          {(q ? filteredEvents : events).map(event => (
             <div key={`${event.sequence}-${event.type}`} className={`activity-event-row activity-event-row--${event.type}`}>
               <span className="activity-event-row__sequence">{String(event.sequence).padStart(2, '0')}</span>
               <strong>{eventLabel(event)}</strong>
@@ -186,25 +234,73 @@ function TraceDetails({ taskId }: { taskId: string }) {
             </div>
           ))}
         </>
-      )}
-      {detail.activity.tool_runs.length > 0 && (
-        <div className="activity-tool-list">
-          {detail.activity.tool_runs.map((run, index) => (
-            <div key={`${run.tool_name}-${index}`} className="activity-tool-row">
-              <span>{run.tool_name}</span>
-              <span className={run.result.success ? 'trace-ok' : run.recovered_by_call_id ? 'trace-recovered' : 'trace-fail'}>
-                {run.result.success ? '成功' : run.recovered_by_call_id ? '已恢复' : '失败'}
-              </span>
-              <time>{formatLocalTimestamp(run.created_at)}</time>
+      ) : tab === 'overview' ? (
+        <>
+          <div className="activity-stage-summary" aria-label="任务事实">
+            {facts && <FactChip label={`模型 ${facts.rounds} 轮`} detail={`${facts.tokens.toLocaleString()} tokens · 平均 ${facts.avgLatencyMs} ms`} />}
+            <FactChip label="工具调用" detail={`${detail.activity.tool_runs.length} 次 · ${failedToolCount} 失败`} tone={failedToolCount > 0 ? 'failed' : undefined} />
+            <FactChip label="文件变更" detail={`${changedFileCount} 个`} />
+          </div>
+          {stageSummary.length > 0 && (
+            <StageBar
+              segments={stageSummary.map(item => ({
+                label: STAGE_LABELS[item.stage] || item.stage,
+                durationMs: item.durationMs,
+                failed: item.failed > 0,
+                title: `${STAGE_LABELS[item.stage] || item.stage}：${item.toolCount} 次工具 · ${formatDuration(item.durationMs) || '不足 1s'}${item.failed > 0 ? ` · ${item.failed} 失败` : ''}`,
+              }))}
+            />
+          )}
+          {stageSummary.length > 0 && (
+            <div className="activity-stage-summary" aria-label="阶段摘要">
+              {stageSummary.map(item => (
+                <StageChip
+                  key={item.stage}
+                  label={STAGE_LABELS[item.stage] || item.stage}
+                  detail={[`${item.toolCount} 次工具`, formatDuration(item.durationMs), item.failed > 0 ? `${item.failed} 失败` : ''].filter(Boolean).join(' · ')}
+                  failed={item.failed > 0}
+                />
+              ))}
             </div>
+          )}
+          {events.length === 0 && <div className="record-timeline__empty">没有事件记录</div>}
+        </>
+      ) : tab === 'timeline' ? (
+        <RecordTimeline events={filteredEvents} />
+      ) : tab === 'tools' ? (
+        <div className="record-tools">
+          {toolRuns.length === 0 ? <div className="record-timeline__empty">没有工具调用</div> : toolRuns.map((run, index) => (
+            <ToolCallCard
+              key={`${run.tool_name}-${index}`}
+              name={run.tool_name}
+              args={run.args}
+              result={run.result}
+              status={toolRunStatus(run)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="record-files">
+          {changesets.length === 0 ? <div className="record-timeline__empty">没有文件变更</div> : changesets.map((change, index) => (
+            <details key={index} className="record-diff">
+              <summary>
+                <code>{change.files.join(', ')}</code>
+                <small>{change.diff.split('\n').length} 行 · {formatLocalTimestamp(change.created_at)}</small>
+              </summary>
+              <pre>
+                {change.diff.split('\n').map((line, lineIndex) => (
+                  <div key={lineIndex} className={line.startsWith('+') && !line.startsWith('+++') ? 'diff-add' : line.startsWith('-') && !line.startsWith('---') ? 'diff-del' : ''}>{line || ' '}</div>
+                ))}
+              </pre>
+            </details>
           ))}
         </div>
       )}
-      {detail.activity.changesets.length > 0 && (
-        <div className="activity-change-list">
-          <label>文件变更</label>
-          {detail.activity.changesets.flatMap(change => change.files).map(file => <code key={file}>{file}</code>)}
-        </div>
+
+      {!showRaw && events.length > 0 && (
+        <button type="button" className="activity-event-toggle" onClick={() => setShowRaw(true)}>
+          原始事件（{events.length} 条）
+        </button>
       )}
     </div>
   )
@@ -271,6 +367,21 @@ export function ActivityView() {
   }, [refresh])
 
   useEffect(() => { refresh() }, [refresh])
+
+  // 有进行中/待确认的任务时静默轮询（不闪 loading），全部终态自动停止
+  const hasLive = traces.some(trace => trace.status === 'running' || trace.status === 'waiting_approval')
+  useEffect(() => {
+    if (!hasLive) return
+    const timer = window.setInterval(async () => {
+      try {
+        const [nextTraces, nextStatus] = await Promise.all([api.getTraces(100, filters), api.getObservability()])
+        setTraces(nextTraces); setObservability(nextStatus)
+      } catch {
+        // 轮询瞬时失败保号上一次快照
+      }
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [hasLive, filters])
 
   // 按项目（workspace）分组，同一项目内按更新时间倒序
   const groupedTraces = useMemo(() => {

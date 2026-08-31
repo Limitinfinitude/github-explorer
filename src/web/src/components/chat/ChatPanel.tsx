@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Bug, ChevronDown, FolderGit2, FolderTree, GitBranch, Link2, Menu, Play, Scan, TerminalSquare } from 'lucide-react'
 import { MessageList } from './MessageList'
 import { InputArea } from './InputArea'
 import { useChatStream } from '../../hooks/useChatStream'
 import { AgentStatusPanel } from './AgentStatusPanel'
 import { DirTree } from '../layout/DirTree'
+import { ContextGauge } from './ContextGauge'
 import { api } from '../../lib/api'
 import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
@@ -37,6 +38,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
   const [workspaceProfile, setWorkspaceProfile] = useState<WorkspaceProfile | null>(null)
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
+  const [planMode, setPlanMode] = useState(false)
   const [thinkingEffort, setThinkingEffort] = useState<'off' | 'high' | 'max'>(() =>
     models.find(m => m.id === currentModel)?.thinking_effort ?? 'off',
   )
@@ -136,12 +138,74 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     }
   }, [chat.sessionId, workspaceDraft])
 
-  const handleSend = useCallback((msg: string) => {
+  // 工作区菜单：点击外部 / Esc 关闭（details 原生没有这两种行为）
+  const switcherRef = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    const el = switcherRef.current
+    if (!el) return
+    const onDocMouseDown = (event: MouseEvent) => {
+      if (el.open && !el.contains(event.target as Node)) el.removeAttribute('open')
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (el.open && event.key === 'Escape') el.removeAttribute('open')
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [])
+
+  const handleSend = useCallback((msg: string, planMode?: boolean) => {
     if (workspaceLoading) return
     setStartTime(Date.now())
     onPushMessage({ id: `msg-${Date.now()}`, role: 'user', content: msg, time: new Date().toISOString() })
-    send(msg, thinkingEffort)
+    send(msg, thinkingEffort, planMode)
   }, [send, onPushMessage, workspaceLoading, thinkingEffort])
+
+  const pushSystemNote = useCallback((text: string) => {
+    onPushMessage({ id: `sys-${Date.now()}`, role: 'assistant', content: text, time: new Date().toISOString() })
+  }, [onPushMessage])
+
+  const handleSlashCommand = useCallback(async (cmd: string, arg?: string) => {
+    if (cmd === 'compact') {
+      const taskId = state.taskId
+      if (!taskId) { pushSystemNote('当前会话没有活跃任务，暂无可压缩的上下文。'); return }
+      try {
+        const res = await api.compactTask(taskId)
+        pushSystemNote(res?.message || '已请求压缩，将在下一轮对话时生效。')
+      } catch (err) {
+        pushSystemNote(`压缩请求失败：${err instanceof Error ? err.message : '未知错误'}`)
+      }
+      return
+    }
+    if (cmd === 'cost') {
+      try {
+        const usage = await api.tokenUsage()
+        const t = usage?.total
+        pushSystemNote(t ? `近 7 天模型用量：调用 ${t.calls ?? '—'} 次，输入 ${((t.input_tokens ?? 0) / 10000).toFixed(1)} 万 tokens，输出 ${((t.output_tokens ?? 0) / 10000).toFixed(1)} 万 tokens。` : '暂无用量数据。')
+      } catch {
+        pushSystemNote('用量查询失败，请稍后重试。')
+      }
+      return
+    }
+    if (cmd === 'plan') {
+      if (arg && arg.trim()) { handleSend(arg.trim(), true); return }
+      setPlanMode(v => {
+        pushSystemNote(v ? '已关闭计划模式。' : '已开启计划模式：下一个任务会先生成计划，经你批准后再执行。')
+        return !v
+      })
+      return
+    }
+    if (cmd === 'init') {
+      handleSend('请扫描当前工作区，生成本项目的 AGENTS.md 说明文件（技术栈、目录结构、构建/测试命令、代码约定），写入工作区根目录。', false)
+      return
+    }
+    if (cmd === 'help') {
+      pushSystemNote(['可用命令：', '/compact — 压缩上下文（下一轮生效）', '/cost — 查看近 7 天模型用量', '/plan — 查看当前任务计划', '/help — 显示本帮助'].join('\n'))
+    }
+  }, [state.taskId, state.plan, chat.messages, pushSystemNote])
 
   const isEmpty = (chat.messages ?? []).length === 0 && !state.isGenerating
 
@@ -151,7 +215,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
         <button type="button" className="mobile-menu-button" onClick={onOpenMenu} title="打开导航" aria-label="打开导航">
           <Menu size={17} />
         </button>
-        <details className="workspace-switcher">
+        <details className="workspace-switcher" ref={switcherRef}>
           <summary className="workspace-switcher__trigger">
             <span className="workspace-switcher__icon"><FolderGit2 size={15} /></span>
             <span className="workspace-switcher__title">
@@ -225,6 +289,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           </div>
         </details>
         <div className="agent-online"><span />本地 Agent</div>
+        <ContextGauge usage={state.contextUsage} />
       </div>
       {isEmpty ? (
         <div className="empty-workbench">
@@ -278,6 +343,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
         onSend={handleSend}
         onStop={stop}
         onSelectModel={onSelectModel}
+        onSlashCommand={(cmd, arg) => { void handleSlashCommand(cmd, arg) }}
+        planMode={planMode}
       />
     </div>
   )

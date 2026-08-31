@@ -29,6 +29,17 @@ async function* readSSE(res: Response): AsyncGenerator<SSEEvent> {
 }
 
 export const api = {
+  async compactTask(taskId: string) {
+    const res = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/compact`, { method: 'POST' })
+    if (!res.ok) throw new Error(`压缩请求失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ ok: boolean; message?: string }>
+  },
+
+  async tokenUsage() {
+    const res = await fetch('/api/agent/token-usage')
+    if (!res.ok) throw new Error(`用量查询失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ total?: { calls?: number; input_tokens?: number; output_tokens?: number } }>
+  },
   async getEncodingHealth() {
     const res = await fetch('/api/agent/health/encoding')
     if (!res.ok) throw new Error(`编码健康检查失败：HTTP ${res.status}`)
@@ -40,11 +51,11 @@ export const api = {
       locale_encoding: string
     }>
   },
-  async startAgentTask(message: string, sessionId: string, workspace?: string, thinkingEffort?: string) {
+  async startAgentTask(message: string, sessionId: string, workspace?: string, thinkingEffort?: string, planMode?: boolean) {
     const res = await fetch('/api/agent/tasks/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, session_id: sessionId, agent_mode: true, workspace, thinking_effort: thinkingEffort }),
+      body: JSON.stringify({ message, session_id: sessionId, agent_mode: true, workspace, thinking_effort: thinkingEffort, plan_mode: planMode }),
     })
     const data = await res.json().catch(() => ({})) as {
       task_id?: string
@@ -310,6 +321,23 @@ export const api = {
       workspace: string
       status: string
     }
+  },
+
+  async archiveProject(projectId: string, archived: boolean) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/archive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived }),
+    })
+    if (!res.ok) throw new Error(`归档操作失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ project_id: string; archived: boolean }>
+  },
+
+  async removeProject(projectId: string) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({})) as { detail?: string; removed?: Record<string, number> }
+    if (!res.ok) throw new Error(data.detail || `移除项目失败：HTTP ${res.status}`)
+    return data as { project_id: string; removed: Record<string, number> }
   },
 
   async getProjectMemories(projectId: string, limit = 20): Promise<ProjectMemory[]> {
