@@ -207,6 +207,14 @@ class Memory:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id)"
         )
+        # 旧库迁移：补 timeline/work_elapsed 列（工作过程时间线持久化）
+        chat_columns = {row[1] for row in cursor.execute("PRAGMA table_info(chat_messages)").fetchall()}
+        for column, definition in (
+            ("timeline_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("work_elapsed", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in chat_columns:
+                cursor.execute(f"ALTER TABLE chat_messages ADD COLUMN {column} {definition}")
         # 热路径：supervisor 互斥检查 / 运行记录列表都按 session_id+updated_at 查 agent_tasks，
         # 实测缺此索引时是 SCAN+临时 B-tree（审计 P1）
         cursor.execute(
@@ -608,6 +616,14 @@ class Memory:
         ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def get_latest_agent_task(self, session_id: str) -> Optional[Dict]:
+        """会话最近一次任务（含终态）：前端切回时恢复已完成任务的工作过程。"""
+        row = self.conn.execute(
+            "SELECT state_json FROM agent_tasks WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
     def get_previous_agent_task(
         self,
         session_id: str,
@@ -898,8 +914,8 @@ class Memory:
         self.conn.execute(
             """INSERT INTO chat_messages
                (session_id, role, content, msg_time, thinking_json, narrations_json,
-                steps_json, cmd_blocks_json, agent_run_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                steps_json, cmd_blocks_json, agent_run_json, timeline_json, work_elapsed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 str(message.get("role", "assistant")),
@@ -910,6 +926,8 @@ class Memory:
                 json.dumps(message.get("steps") or [], ensure_ascii=False, default=str),
                 json.dumps(message.get("cmdBlocks") or [], ensure_ascii=False, default=str),
                 json.dumps(message.get("agentRun") or {}, ensure_ascii=False, default=str),
+                json.dumps(message.get("timeline") or [], ensure_ascii=False, default=str),
+                int(message.get("workElapsed") or 0),
             ),
         )
         self.conn.commit()
@@ -918,12 +936,12 @@ class Memory:
         """读取一个会话的完整聊天消息（按保存顺序）。"""
         rows = self.conn.execute(
             """SELECT role, content, msg_time, thinking_json, narrations_json,
-                      steps_json, cmd_blocks_json, agent_run_json
+                      steps_json, cmd_blocks_json, agent_run_json, timeline_json, work_elapsed
                FROM chat_messages WHERE session_id = ? ORDER BY id""",
             (session_id,),
         ).fetchall()
         messages: List[Dict] = []
-        for role, content, msg_time, thinking_json, narrations_json, steps_json, cmd_blocks_json, agent_run_json in rows:
+        for role, content, msg_time, thinking_json, narrations_json, steps_json, cmd_blocks_json, agent_run_json, timeline_json, work_elapsed in rows:
             messages.append({
                 "role": role,
                 "content": content,
@@ -933,6 +951,8 @@ class Memory:
                 "steps": json.loads(steps_json or "[]"),
                 "cmdBlocks": json.loads(cmd_blocks_json or "[]"),
                 "agentRun": json.loads(agent_run_json or "{}"),
+                "timeline": json.loads(timeline_json or "[]"),
+                "workElapsed": int(work_elapsed or 0),
             })
         return messages
 

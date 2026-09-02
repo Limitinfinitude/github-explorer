@@ -60,6 +60,10 @@ class DefaultWorkspaceRequest(BaseModel):
     path: str
 
 
+class SettingsBrowseRequest(BaseModel):
+    path: str = ""
+
+
 class ApprovalRequest(BaseModel):
     session_id: str
     task_id: str
@@ -111,7 +115,11 @@ def get_local_agent_runtime():
         services = get_local_agent_services()
         memory.reconcile_interrupted_runtime()
         try:
-            memory.prune_agent_events(30)
+            try:
+                retention_days = int(memory.get_preference("event_retention_days") or "30")
+            except (TypeError, ValueError):
+                retention_days = 30
+            memory.prune_agent_events(max(1, retention_days))
         except Exception:
             # 归档清理失败不应阻止服务启动
             pass
@@ -131,6 +139,16 @@ def get_local_agent_runtime():
             except Exception:
                 return DEFAULT_CONTEXT_WINDOW_TOKENS
 
+        def _model_max_output_tokens() -> int:
+            """活跃模型的最大输出 token（model_configs.max_output_tokens），缺省 12k。"""
+            import os
+            from model_config import DEFAULT_MAX_OUTPUT_TOKENS, parse_max_output_tokens
+            try:
+                raw = os.environ.get("LLM_MAX_OUTPUT_TOKENS")
+                return parse_max_output_tokens(int(raw)) if raw else DEFAULT_MAX_OUTPUT_TOKENS
+            except Exception:
+                return DEFAULT_MAX_OUTPUT_TOKENS
+
         _local_agent_runtime = LocalAgentRuntime(
             services.workspaces,
             lambda session_id: build_tool_registry(session_id, services),
@@ -138,6 +156,7 @@ def get_local_agent_runtime():
             llm_stream_call=stream_llm_with_tools,
             max_rounds=32,
             max_context_tokens=_model_context_window_tokens(),
+            max_output_tokens=_model_max_output_tokens(),
             task_store=memory,
             context_engine=services.context,
             hook_runner=HookRunner(hook_config_provider),
@@ -638,11 +657,140 @@ async def get_approval_mode():
     return {"mode": mode}
 
 
+# 设置页目录浏览：拒绝列出的系统敏感根（Windows 系统目录），避免误选
+_BROWSING_BLOCKED_PREFIXES = ("c:/windows", "c:/program files", "c:/program files (x86)", "c:/programdata")
+
+
+@router_agent.post("/api/settings/browse")
+async def browse_settings_directory(request: SettingsBrowseRequest):
+    """列出候选工作目录（供设置页选择路径）。
+
+    path 为空时返回驱动器/主目录作为起点；返回的条目只含目录。
+    与会话工作区的 fs/list 不同：这是设置级的路径选择器，不依赖会话绑定。
+    """
+
+    raw = (request.path or "").strip()
+    candidates: list[dict] = []
+
+    if not raw:
+        # 起点：Windows 盘符 + 用户主目录；其他平台给根与主目录
+        if os.name == "nt":
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                drive = f"{letter}:\\"
+                if Path(drive).exists():
+                    candidates.append({"name": f"{letter}:", "path": drive, "type": "directory"})
+        else:
+            candidates.append({"name": "/", "path": "/", "type": "directory"})
+        home = Path.home()
+        candidates.append({"name": f"主目录 {home.name}", "path": str(home), "type": "directory"})
+        return {"path": "", "entries": candidates, "home": str(home)}
+
+    target = Path(raw).expanduser()
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="请提供绝对路径")
+    try:
+        target = target.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"路径无效: {exc}") from exc
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"不是目录: {target}")
+    normalized = str(target).replace("\\", "/").lower()
+    if any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in _BROWSING_BLOCKED_PREFIXES):
+        raise HTTPException(status_code=400, detail="系统目录不允许作为工作目录")
+
+    try:
+        children = sorted(
+            (entry for entry in target.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name.lower(),
+        )
+    except (OSError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=f"无法读取目录: {exc}") from exc
+
+    entries: list[dict] = []
+    if target.parent != target:
+        entries.append({"name": "..", "path": str(target.parent), "type": "directory"})
+    for entry in children[:400]:
+        # 隐藏/依赖目录意义不大，跳过以保持列表干净
+        if entry.name.startswith((".", "$", "node_modules", "__pycache__")):
+            continue
+        entries.append({"name": entry.name, "path": str(entry), "type": "directory"})
+    return {"path": str(target), "entries": entries, "home": str(Path.home())}
+
+
 @router_agent.put("/api/settings/approval-mode")
 async def set_approval_mode(request: ApprovalModeUpdate):
 
     memory.set_preference("approval_mode", request.mode)
     return {"mode": request.mode}
+
+
+class RuntimePrefsUpdate(BaseModel):
+    event_retention_days: Optional[int] = None
+    compact_ratio: Optional[float] = None
+    mcp_prewarm: Optional[bool] = None
+
+
+@router_agent.get("/api/settings/runtime-prefs")
+async def get_runtime_prefs():
+    """运行偏好：事件保留天数 / 上下文压缩阈值 / MCP 预热。"""
+
+    def _read_int(key: str, default: int) -> int:
+        try:
+            value = int(memory.get_preference(key) or "")
+            return value if value > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    def _read_ratio(key: str, default: float) -> float:
+        try:
+            value = float(memory.get_preference(key) or "")
+            return value if 0.2 <= value <= 0.95 else default
+        except (TypeError, ValueError):
+            return default
+
+    def _read_bool(key: str, default: bool) -> bool:
+        raw = (memory.get_preference(key) or "").casefold()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    return {
+        "event_retention_days": _read_int("event_retention_days", 30),
+        "compact_ratio": _read_ratio("compact_ratio", 0.75),
+        "mcp_prewarm": _read_bool("mcp_prewarm", True),
+    }
+
+
+@router_agent.put("/api/settings/runtime-prefs")
+async def set_runtime_prefs(request: RuntimePrefsUpdate):
+    """保存运行偏好并即时生效（压缩阈值写 env，事件保留在启动清理时生效）。"""
+
+    import os as _os
+
+    changed: dict = {}
+    if request.event_retention_days is not None:
+        if not 1 <= request.event_retention_days <= 365:
+            raise HTTPException(status_code=422, detail="事件保留天数须在 1-365 之间")
+        memory.set_preference("event_retention_days", str(request.event_retention_days))
+        changed["event_retention_days"] = request.event_retention_days
+    if request.compact_ratio is not None:
+        if not 0.2 <= request.compact_ratio <= 0.95:
+            raise HTTPException(status_code=422, detail="压缩阈值须在 0.2-0.95 之间")
+        memory.set_preference("compact_ratio", str(request.compact_ratio))
+        _os.environ["LLM_COMPACT_RATIO"] = str(request.compact_ratio)
+        try:
+            runtime = get_local_agent_runtime()
+            runtime.compact_ratio = request.compact_ratio
+        except Exception:
+            pass
+        changed["compact_ratio"] = request.compact_ratio
+    if request.mcp_prewarm is not None:
+        memory.set_preference("mcp_prewarm", "1" if request.mcp_prewarm else "0")
+        _os.environ["GE_DISABLE_MCP_PREWARM"] = "" if request.mcp_prewarm else "1"
+        changed["mcp_prewarm"] = request.mcp_prewarm
+    return {"ok": True, **changed}
 
 
 class HooksConfigUpdate(BaseModel):
@@ -761,6 +909,9 @@ class ChatMessagePayload(BaseModel):
     steps: Optional[list] = None
     cmdBlocks: Optional[list] = None
     agentRun: Optional[dict] = None
+    # 工作过程时间线与真实耗时（切回/刷新后还原交错顺序）
+    timeline: Optional[list] = None
+    workElapsed: Optional[int] = None
 
 
 @router_agent.post("/api/chats/{session_id}/messages")
@@ -1383,6 +1534,16 @@ async def cancel_agent_task(task_id: str, request: CancelTaskRequest):
 async def get_active_agent_task(session_id: str):
 
     task = memory.get_latest_nonterminal_agent_task(session_id)
+    if task is None:
+        return {"task": None, "activity": {"events": [], "tool_runs": [], "changesets": []}}
+    return {"task": task, "activity": memory.get_agent_task_activity(task["task_id"])}
+
+
+@router_agent.get("/api/agent/sessions/{session_id}/latest-task")
+async def get_latest_agent_task(session_id: str):
+    """会话最近一次任务（含终态）：页面切回时用它恢复「切走期间已完成」的工作过程。"""
+
+    task = memory.get_latest_agent_task(session_id)
     if task is None:
         return {"task": None, "activity": {"events": [], "tool_runs": [], "changesets": []}}
     return {"task": task, "activity": memory.get_agent_task_activity(task["task_id"])}

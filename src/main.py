@@ -94,6 +94,8 @@ class ModelConfigUpdate(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     thinking_effort: Optional[Literal["off", "high", "max"]] = None
+    context_window: Optional[str] = None
+    max_output_tokens: Optional[str] = None
 
 
 class ModelConfigCreate(BaseModel):
@@ -103,6 +105,10 @@ class ModelConfigCreate(BaseModel):
     api_key: str = ""
     base_url: str = ""
     thinking_effort: Literal["off", "high", "max"] = "off"
+    context_window: str = ""
+    max_output_tokens: str = ""
+    # 复用已有模型的密钥：填来源模型 id（此时 api_key 可留空）
+    reuse_key_from: Optional[str] = None
 
 
 class ModelLatencyRequest(BaseModel):
@@ -135,11 +141,12 @@ async def select_model_endpoint(s: SettingsSelectRequest):
     ok = model_config.apply_model(s.model_id)
     if ok:
         model_config._save_active_model_id(s.model_id)
-        # 热更新 runtime 的上下文窗口（新模型的 context_window）
+        # 热更新 runtime 的上下文窗口与最大输出（新模型的 context_window / max_output_tokens）
         try:
             from routes_agent import get_local_agent_runtime
             runtime = get_local_agent_runtime()
             runtime.max_context_tokens = int(os.environ.get("LLM_CONTEXT_WINDOW_TOKENS") or runtime.max_context_tokens)
+            runtime.max_output_tokens = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS") or runtime.max_output_tokens)
         except Exception:
             # runtime 尚未初始化时忽略（首次构造时会读取环境变量）
             pass
@@ -190,6 +197,10 @@ async def update_model_config(model_id: str, s: ModelConfigUpdate):
         configs[model_id]["base_url"] = s.base_url.strip()
     if s.thinking_effort is not None:
         configs[model_id]["thinking_effort"] = s.thinking_effort
+    if s.context_window is not None and s.context_window.strip():
+        configs[model_id]["context_window"] = s.context_window.strip()
+    if s.max_output_tokens is not None and s.max_output_tokens.strip():
+        configs[model_id]["max_output_tokens"] = s.max_output_tokens.strip()
     model_config._save_model_configs(configs)
     if model_id == model_config.get_active_model_id():
         model_config.apply_model(model_id)
@@ -203,6 +214,11 @@ async def create_model_config(s: ModelConfigCreate):
     provider_model = s.model.strip()
     if not name or not provider_model:
         raise HTTPException(status_code=422, detail="模型名称和模型 ID 不能为空")
+    api_key = s.api_key.strip()
+    if not api_key and s.reuse_key_from:
+        source = model_config.MODEL_CONFIGS.get(s.reuse_key_from, {})
+        if source.get("api_key"):
+            api_key = source["api_key"]
     model_id = model_config.new_model_id(name)
     cfg = {
         "id": model_id,
@@ -212,15 +228,31 @@ async def create_model_config(s: ModelConfigCreate):
         "icon": name[:1].upper(),
         "color": "#238636" if s.protocol == "openai" else "#d97757",
         "tags": ["自定义", "OpenAI Compatible" if s.protocol == "openai" else "Anthropic"],
-        "api_key": s.api_key.strip(),
+        "api_key": api_key,
         "base_url": s.base_url.strip(),
         "thinking_effort": s.thinking_effort,
+        "context_window": s.context_window.strip() or "128k",
+        "max_output_tokens": s.max_output_tokens.strip() or "12k",
     }
     model_config.MODEL_CONFIGS[model_id] = cfg
     model_config._save_model_configs(model_config.MODEL_CONFIGS)
     model_config.apply_model(model_id)
     model_config._save_active_model_id(model_id)
     return {"ok": True, "model": model_config.public_model(cfg)}
+
+
+@app.delete("/api/settings/models/{model_id}")
+async def delete_model_config(model_id: str):
+    configs = model_config.MODEL_CONFIGS
+    if model_id not in configs:
+        raise HTTPException(status_code=404, detail="未知模型")
+    if configs[model_id].get("source") == "environment":
+        raise HTTPException(status_code=403, detail="环境变量模型不可删除")
+    if model_id == model_config.get_active_model_id():
+        raise HTTPException(status_code=409, detail="该模型正在使用，先切换到其他模型再删除")
+    del configs[model_id]
+    model_config._save_model_configs(configs)
+    return {"ok": True}
 
 # ========== AI 分析 API（统一 Local Runtime） ==========
 

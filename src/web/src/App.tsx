@@ -107,9 +107,9 @@ export default function App() {
     api.selectModel(id).catch(() => {})
   }, [])
 
-  const handleModelCreated = useCallback(async (id: string) => {
+  const handleModelCreated = useCallback(async (id?: string) => {
     await refreshModels()
-    handleSelectModel(id)
+    if (id) handleSelectModel(id)
   }, [handleSelectModel, refreshModels])
 
   const handlePushMessage = useCallback((msg: Message) => {
@@ -152,6 +152,7 @@ export default function App() {
             onPushMessage={handlePushMessage}
             onSelectModel={handleSelectModel}
             onOpenMenu={() => setSidebarOpen(true)}
+            onModelsChanged={handleModelCreated}
           />
         ) : activeView === 'project' ? (
           <ProjectWorkspaceView
@@ -163,12 +164,7 @@ export default function App() {
         ) : activeView === 'activity' ? (
           <ActivityView />
         ) : activeView === 'settings' ? (
-          <SettingsView
-            models={models}
-            currentModel={currentModel}
-            onSelectModel={handleSelectModel}
-            onModelCreated={handleModelCreated}
-          />
+          <SettingsView onModelsChanged={handleModelCreated} />
         ) : (
           <div className="flex-1 flex items-center justify-center text-faint text-sm">
             请从左侧选择对话或新建

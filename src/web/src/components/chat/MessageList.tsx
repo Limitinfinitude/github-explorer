@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { Message, Step, CmdBlockData, ThinkingSegment } from '../../types'
+import type { Message, Step, CmdBlockData, ThinkingSegment, WorkTimelineItem } from '../../types'
 import { MessageItem } from './MessageItem'
-import { WorkChain } from './WorkChain'
-import { CmdBlock } from './CmdBlock'
-import { ReasoningRow } from './ReasoningRow'
+import WorkProcess from './WorkProcess'
 import { displayResponseContent } from '../../lib/responseDisplay'
+import { preprocessMarkdown } from '../../lib/markdownFix'
 
 interface Props {
   messages: Message[]
@@ -13,16 +12,17 @@ interface Props {
   streamCmdBlocks: CmdBlockData[]
   streamNarration: string[]
   streamThinking: ThinkingSegment[]
+  streamTimeline: WorkTimelineItem[]
+  streamStartedAt: number | null
   streamContent: string
   startTime: number
 }
 
-export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamContent, startTime }: Props) {
+export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamTimeline, streamStartedAt, streamContent, startTime }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const [renderedStreamContent, setRenderedStreamContent] = useState('')
   const [stickToBottom, setStickToBottom] = useState(true)
-  const elapsed = Math.round((Date.now() - startTime) / 1000)
   const displayStreamContent = displayResponseContent(streamContent, false)
 
   // 用户向上翻阅历史时暂停自动滚动，回到底部附近恢复跟随
@@ -47,7 +47,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
     let active = true
     Promise.all([import('marked'), import('dompurify')]).then(([markedModule, purifyModule]) => {
       markedModule.marked.setOptions({ breaks: true, gfm: true })
-      const parsed = markedModule.marked.parse(displayStreamContent)
+      const parsed = markedModule.marked.parse(preprocessMarkdown(displayStreamContent))
       if (active) {
         setRenderedStreamContent(typeof parsed === 'string' ? purifyModule.default.sanitize(parsed) : '')
       }
@@ -69,10 +69,16 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
             <span className="text-[13px] font-semibold text-fg">Explorer</span>
             <span className="text-[11px] text-muted">刚刚</span>
           </div>
-          {streamThinking.length > 0 && (
-            <div className="message-process">
-              <ReasoningRow segments={streamThinking} running />
-            </div>
+          {(streamThinking.length > 0 || streamSteps.length > 0 || streamNarration.length > 0 || streamCmdBlocks.length > 0) && (
+            <WorkProcess
+              running
+              startedAt={streamStartedAt}
+              steps={streamSteps}
+              cmdBlocks={streamCmdBlocks}
+              narrations={streamNarration}
+              thinking={streamThinking}
+              timeline={streamTimeline}
+            />
           )}
           {streamContent ? (
             <div className="assistant-response">
@@ -84,22 +90,13 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
               />
               <span className="streaming-cursor" />
             </div>
-          ) : streamSteps.length === 0 && (
+          ) : streamSteps.length === 0 && streamThinking.length === 0 && streamNarration.length === 0 && (
             <div className="assistant-response flex gap-1 py-2">
               <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
               <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
               <span className="w-1.5 h-1.5 bg-dot rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
           )}
-          {streamSteps.length > 0 && <WorkChain steps={streamSteps} elapsed={elapsed} showSummary />}
-          {streamNarration.length > 0 && (
-            <div className="stream-narration">
-              {streamNarration.map((line, index) => (
-                <div key={index} className="stream-narration__line">{line}</div>
-              ))}
-            </div>
-          )}
-          {streamCmdBlocks.map(b => <CmdBlock key={b.id} block={b} />)}
           </div>
         </div>
       )}

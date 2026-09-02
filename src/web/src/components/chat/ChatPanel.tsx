@@ -9,7 +9,7 @@ import { ContextGauge } from './ContextGauge'
 import { api } from '../../lib/api'
 import { workspaceFromStream } from '../../lib/workspaceState'
 import type {
-  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile, WorkspaceResponse, ThinkingSegment,
+  AgentRunSummary, Chat, Model, Message, Step, CmdBlockData, WorkspaceProfile, WorkspaceResponse, ThinkingSegment, WorkTimelineItem,
 } from '../../types'
 
 interface Props {
@@ -20,6 +20,7 @@ interface Props {
   onPushMessage: (msg: Message) => void
   onSelectModel: (id: string) => void
   onOpenMenu: () => void
+  onModelsChanged?: (selectModelId?: string) => Promise<void> | void
 }
 
 const HINTS = [
@@ -29,7 +30,7 @@ const HINTS = [
 ]
 const noop = () => {}
 
-export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage, onSelectModel, onOpenMenu }: Props) {
+export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage, onSelectModel, onOpenMenu, onModelsChanged }: Props) {
   const [startTime, setStartTime] = useState(Date.now())
   const [workspace, setWorkspace] = useState('')
   const [workspaceDraft, setWorkspaceDraft] = useState('')
@@ -87,6 +88,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     agentRun: AgentRunSummary,
     narrations: string[],
     thinking: ThinkingSegment[],
+    timeline: WorkTimelineItem[],
+    elapsedSec: number,
   ) => {
     onPushMessage({
       id: `msg-${Date.now()}`,
@@ -98,6 +101,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
       thinking: thinking.length ? thinking : undefined,
       narrations: narrations.length ? narrations : undefined,
       agentRun,
+      timeline: timeline.length ? timeline : undefined,
+      workElapsed: elapsedSec,
     })
   }, [onPushMessage])
 
@@ -294,7 +299,10 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
       {isEmpty ? (
         <div className="empty-workbench">
           <div className="empty-workbench__mark"><TerminalSquare size={22} /></div>
-          <h2>准备执行本地任务</h2>
+          <div className="empty-workbench__heading">
+            <h2>准备执行本地任务</h2>
+            <p>描述你要做的事，Agent 会在工作区里读代码、跑命令、验证结果——从下面开始也行。</p>
+          </div>
           <div className="empty-workbench__actions">
             {HINTS.map(h => {
               const Icon = h.icon === 'Scan' ? Scan : h.icon === 'Bug' ? Bug : Play
@@ -304,6 +312,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
                   <span className="task-template__icon"><Icon size={16} /></span>
                   <span className="task-template__text">{h.text}</span>
                   <span className="task-template__hint">{h.hint}</span>
+                  <span className="task-template__go">→</span>
                 </button>
               )
             })}
@@ -317,6 +326,8 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           streamCmdBlocks={state.cmdBlocks}
           streamNarration={state.narrations}
           streamThinking={state.thinking}
+          streamTimeline={state.timeline}
+          streamStartedAt={state.startedAt}
           streamContent={state.partialContent}
           startTime={startTime}
         />
@@ -345,6 +356,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
         onSelectModel={onSelectModel}
         onSlashCommand={(cmd, arg) => { void handleSlashCommand(cmd, arg) }}
         planMode={planMode}
+        onModelsChanged={onModelsChanged}
       />
     </div>
   )

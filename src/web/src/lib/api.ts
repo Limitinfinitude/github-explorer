@@ -169,11 +169,44 @@ export const api = {
     return res.json() as Promise<DefaultWorkspaceResponse>
   },
 
+  /** 设置页目录浏览：path 为空返回盘符/主目录起点，否则列出该目录下的子目录 */
+  async browseSettingsDirectory(path: string = '') {
+    const res = await fetch('/api/settings/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { detail?: string } | null
+      throw new Error(data?.detail || `读取目录失败：HTTP ${res.status}`)
+    }
+    return res.json() as Promise<{ path: string; home: string; entries: Array<{ name: string; path: string; type: 'directory' }> }>
+  },
+
   async getApprovalMode(): Promise<'confirm' | 'auto' | 'open' | 'full'> {
     const res = await fetch('/api/settings/approval-mode')
     if (!res.ok) throw new Error(`读取权限模式失败：HTTP ${res.status}`)
     const data = await res.json() as { mode?: 'confirm' | 'auto' | 'open' | 'full' }
     return data.mode ?? 'confirm'
+  },
+
+  async getRuntimePrefs(): Promise<{ event_retention_days: number; compact_ratio: number; mcp_prewarm: boolean }> {
+    const res = await fetch('/api/settings/runtime-prefs')
+    if (!res.ok) throw new Error(`读取运行偏好失败：HTTP ${res.status}`)
+    return res.json() as Promise<{ event_retention_days: number; compact_ratio: number; mcp_prewarm: boolean }>
+  },
+
+  async setRuntimePrefs(prefs: Partial<{ event_retention_days: number; compact_ratio: number; mcp_prewarm: boolean }>) {
+    const res = await fetch('/api/settings/runtime-prefs', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prefs),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok || !data?.ok) {
+      throw new Error(data?.detail ?? `保存运行偏好失败：HTTP ${res.status}`)
+    }
+    return data as { ok: true; event_retention_days?: number; compact_ratio?: number; mcp_prewarm?: boolean }
   },
 
   async setApprovalMode(mode: 'confirm' | 'auto' | 'open' | 'full') {
@@ -400,6 +433,31 @@ export const api = {
     }>
   },
 
+  /** 会话最近一次任务（含终态）：切回时恢复「切走期间已完成」的工作过程。 */
+  async getLatestTask(sessionId: string) {
+    const res = await fetch(`/api/agent/sessions/${encodeURIComponent(sessionId)}/latest-task`)
+    if (!res.ok) throw new Error(`读取最近任务失败：HTTP ${res.status}`)
+    return res.json() as Promise<{
+      task: null | {
+        task_id: string
+        status: string
+        final_text?: string
+        created_at?: string
+        updated_at?: string
+        summary?: {
+          changed_files?: string[]
+          verification?: Array<{ command: string; success: boolean; returncode?: number; output?: string }>
+          acceptance?: AgentAcceptanceItem[]
+          processes?: Array<Record<string, unknown>>
+        }
+      }
+      activity: {
+        events: Array<{ sequence: number; type: string; payload: Record<string, unknown>; created_at: string }>
+        changesets: Array<{ files: string[]; diff: string }>
+      }
+    }>
+  },
+
   async approveOperation(sessionId: string, taskId: string, approved: boolean) {
     const res = await fetch('/api/agent/approval', {
       method: 'POST',
@@ -526,7 +584,7 @@ export const api = {
     return data as { ok: true; model: Model }
   },
 
-  async createModel(config: CustomModelInput) {
+  async createModel(config: CustomModelInput & { reuse_key_from?: string }) {
     const res = await fetch('/api/settings/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -537,6 +595,15 @@ export const api = {
       throw new Error(data.detail ?? data.error ?? `保存失败：HTTP ${res.status}`)
     }
     return data as { ok: true; model: Model }
+  },
+
+  async deleteModel(modelId: string) {
+    const res = await fetch(`/api/settings/models/${modelId}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) {
+      throw new Error(data?.detail ?? `删除失败：HTTP ${res.status}`)
+    }
+    return data as { ok: true }
   },
 
   async measureModelUrl(baseUrl: string): Promise<ProbeResult> {

@@ -38,6 +38,14 @@ def parse_context_window(value) -> int:
         return DEFAULT_CONTEXT_WINDOW_TOKENS
 
 
+DEFAULT_MAX_OUTPUT_TOKENS = 12_000
+
+
+def parse_max_output_tokens(value) -> int:
+    """解析 max_output_tokens 配置：'12k'→12_000、纯数字按 token；非法/缺省回退 12k。"""
+    return parse_context_window(value) if value else DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def _load_model_configs() -> dict:
     base = {m["id"]: dict(m) for m in DEFAULT_MODEL_CONFIGS}
     if _MODEL_CONFIGS_PATH.exists():
@@ -148,6 +156,7 @@ def public_model(cfg: dict) -> dict:
         "thinking_effort": _normalize_thinking_effort(cfg.get("thinking_effort", "off")),
         "context_window": cfg.get("context_window", "128k"),
         "context_window_tokens": parse_context_window(cfg.get("context_window")),
+        "max_output_tokens": parse_max_output_tokens(cfg.get("max_output_tokens")),
     }
 
 
@@ -190,6 +199,7 @@ def apply_model(model_id: str) -> bool:
     if thinking_effort in {"off", "high", "max"}:
         os.environ["LLM_THINKING_EFFORT"] = thinking_effort
     os.environ["LLM_CONTEXT_WINDOW_TOKENS"] = str(parse_context_window(cfg.get("context_window")))
+    os.environ["LLM_MAX_OUTPUT_TOKENS"] = str(parse_max_output_tokens(cfg.get("max_output_tokens")))
     return True
 
 

@@ -4,10 +4,104 @@ import type {
   Step, CmdBlockData, SSEEvent, AgentFileChange, AgentRunSummary,
   ContextUsage,
   AgentVerification, AgentProcess, AgentApproval,
-  AgentAcceptanceItem, ThinkingSegment,
+  AgentAcceptanceItem, ThinkingSegment, WorkTimelineItem,
 } from '../types'
 import { normalizeProcessStatus, reconcileProcesses } from '../lib/processState'
 import { isRecoverableTaskStatus } from '../lib/taskRecovery'
+
+/** 每会话只补收一次终态任务（防 StrictMode 双挂载重复推消息）。 */
+const terminalReplayDone = new Set<string>()
+function isTerminalReplayDone(sessionId: string): boolean {
+  return terminalReplayDone.has(sessionId)
+}
+function markTerminalReplayDone(sessionId: string): void {
+  terminalReplayDone.add(sessionId)
+}
+
+/** 从存量事件回放终态任务，重建 steps/thinking/narrations/timeline 后走 onDone 入历史。
+ * 场景：页面切走期间任务完成（无人监听流），切回时把结果补进对话。 */
+async function replayTerminalTask(
+  task: { task_id: string; status: string; final_text?: string },
+  _sessionId: string,
+  onDone: DoneHandler,
+  apiRef: typeof api,
+): Promise<void> {
+  try {
+    const { activity } = await apiRef.getLatestTask(_sessionId)
+    const events = activity?.events ?? []
+    const steps: Step[] = []
+    const thinking: ThinkingSegment[] = []
+    const narrations: string[] = []
+    const timeline: WorkTimelineItem[] = []
+    const eventsTyped = events as Array<{ type: string; created_at?: string; payload?: Record<string, unknown> }>
+    for (const stored of eventsTyped) {
+      const type = String(stored.type || '')
+      const payload = (stored.payload ?? {}) as Record<string, unknown>
+      if (type === 'narration') {
+        narrations.push(String(payload.content || ''))
+        timeline.push({ kind: 'note', text: String(payload.content || '') })
+      } else if (type === 'thinking') {
+        const round = Number(payload.round ?? 0)
+        const content = String(payload.content || '')
+        const last = thinking[thinking.length - 1]
+        if (last && last.round === round) {
+          thinking[thinking.length - 1] = { content: last.content + content, round }
+        } else {
+          thinking.push({ content, round })
+          timeline.push({ kind: 'think', round })
+        }
+      } else if (type === 'tool_call') {
+        steps.push({
+          icon: 'tool', text: `${String(payload.name || '')}(...)`, done: false,
+          callId: String(payload.call_id || ''), toolName: String(payload.name || ''),
+          args: payload.args as Record<string, unknown> | undefined, status: 'running',
+        })
+        timeline.push({ kind: 'tool', callId: String(payload.call_id || '') })
+      } else if (type === 'tool_result') {
+        const callId = String(payload.call_id || '')
+        const index = steps.findIndex(item => item.callId === callId)
+        if (index !== -1) {
+          steps[index] = {
+            ...steps[index], done: true,
+            status: payload.success ? 'succeeded' : 'failed',
+            text: `${steps[index].toolName}(...) ${payload.success ? '完成' : '失败'}`,
+            data: (payload.data ?? undefined) as Record<string, unknown> | undefined,
+            output: payload.success ? String(payload.output || '').slice(0, 4000) : undefined,
+            error: payload.error ? String(payload.error) : (payload.success ? undefined : '工具执行失败'),
+          }
+        }
+      }
+    }
+    if (steps.length === 0 && thinking.length === 0) return
+    // 耗时 = 首末事件时间差（不是"现在-创建"：补收时离任务完成可能已隔很久）
+    // created_at 是 "2026-09-01 13:18:25" 空格格式，部分浏览器解析为 NaN——替换空格为 T
+    const times = events
+      .map(ev => new Date(String(ev.created_at || '').replace(' ', 'T')).getTime())
+      .filter(t => !Number.isNaN(t) && t > 0)
+    const elapsedSec = times.length >= 2
+      ? Math.max(1, Math.round((Math.max(...times) - Math.min(...times)) / 1000))
+      : 1
+    onDone(
+      String(task.final_text || ''),
+      steps,
+      [],
+      {
+        taskId: task.task_id,
+        status: task.status as AgentRunSummary['status'],
+        plan: [],
+        repoMap: '',
+        fileChanges: activity.changesets.map(change => ({ files: change.files, diff: change.diff })),
+        verification: null,
+        acceptance: [],
+        processes: [],
+      },
+      narrations,
+      thinking,
+      timeline,
+      elapsedSec,
+    )
+  } catch { /* 补收失败静默：切走完成的任务结果可在运行记录页看到 */ }
+}
 
 export type StreamState = {
   isGenerating: boolean
@@ -15,6 +109,8 @@ export type StreamState = {
   cmdBlocks: CmdBlockData[]
   narrations: string[]
   thinking: ThinkingSegment[]
+  timeline: WorkTimelineItem[]
+  startedAt: number | null
   partialContent: string
   workspace: string
   taskId: string | null
@@ -36,6 +132,8 @@ type DoneHandler = (
   agentRun: AgentRunSummary,
   narrations: string[],
   thinking: ThinkingSegment[],
+  timeline: WorkTimelineItem[],
+  elapsedSec: number,
 ) => void
 
 type StreamConsumer = (
@@ -52,6 +150,8 @@ function initialState(workspace: string): StreamState {
     cmdBlocks: [],
     narrations: [],
     thinking: [],
+    timeline: [],
+    startedAt: null,
     partialContent: '',
     workspace,
     taskId: null,
@@ -108,64 +208,87 @@ export function useChatStream(
   useEffect(() => {
     if (!agentMode) return
     let active = true
-    api.getActiveTask(sessionId).then(({ task, activity }) => {
-      if (!active || !task || !isRecoverableTaskStatus(task.status)) return
-      lastSequenceRef.current = activity.events.reduce(
-        (highest, event) => Math.max(highest, event.sequence),
-        0,
-      )
-      const verification = task.summary?.verification ?? []
-      const processes = (task.summary?.processes ?? []).map(process => ({
-        processId: String(process.process_id),
-        status: normalizeProcessStatus(process.status),
-        pid: typeof process.pid === 'number' ? process.pid : undefined,
-        cwd: typeof process.cwd === 'string' ? process.cwd : undefined,
-        url: typeof process.url === 'string' ? process.url : undefined,
-      }))
-      commit(current => ({
-        ...current,
-        taskId: task.task_id,
-        status: task.status as AgentRunSummary['status'],
-        isGenerating: task.status !== 'waiting_approval',
-        plan: task.plan ?? [],
-        repoMap: task.repo_map ?? '',
-        fileChanges: activity.changesets.map(change => ({ files: change.files, diff: change.diff })),
-        verification: verification.length
-          ? { success: verification.every(check => check.success), checks: verification }
-          : null,
-        acceptance: task.summary?.acceptance ?? [],
-        processes,
-        approval: null,
-      }))
-      if (task.status === 'waiting_approval' && task.active_batch) {
-        const tool = task.active_batch.tool_uses[task.active_batch.next_index]
-        if (!tool) return
-        commit(current => ({
-          ...current,
-          isGenerating: false,
-          approval: {
-            taskId: task.task_id,
-            toolName: tool.name,
-            args: tool.input,
-            reason: '该任务正在等待操作确认',
-          },
-        }))
+    api.getActiveTask(sessionId).then(({ task }) => {
+      if (!active) return
+      // 无进行中任务：查最近一次任务，若为终态且本地历史还没有它的回复，
+      // 说明任务在页面切走期间完成（onDone 没人接），从事件回放补收结果
+      if (!task) {
+        if (isTerminalReplayDone(sessionId)) return
+        void api.getLatestTask(sessionId).then(async ({ task: latest }) => {
+          if (!active || !latest) return
+          const status = String(latest.status || '')
+          if (!['completed', 'incomplete', 'failed', 'cancelled', 'interrupted'].includes(status)) return
+          // 去重：后端消息历史里已有该任务的回复就不补（避免每次进入重复推）
+          try {
+            const stored = await api.getChatMessages(sessionId)
+            if (stored.some(m => m.agentRun?.taskId === latest.task_id)) return
+          } catch { /* 读历史失败不阻断补收 */ }
+          markTerminalReplayDone(sessionId)
+          await replayTerminalTask(latest, sessionId, onDone, api)
+        }).catch(() => {})
         return
       }
-      const ctrl = new AbortController()
-      abortRef.current = ctrl
-      void consumeRef.current?.(
-        api.taskEvents(task.task_id, ctrl.signal, 0),
-        ctrl,
-        true,
-        task.task_id,
-      )
+      if (!isRecoverableTaskStatus(task.status)) return
+      markTerminalReplayDone(sessionId)
+      api.getActiveTask(sessionId).then(({ task: refreshed, activity }) => {
+        if (!active || !refreshed) return
+        lastSequenceRef.current = activity.events.reduce(
+          (highest, event) => Math.max(highest, event.sequence),
+          0,
+        )
+        const verification = refreshed.summary?.verification ?? []
+        const processes = (refreshed.summary?.processes ?? []).map(process => ({
+          processId: String(process.process_id),
+          status: normalizeProcessStatus(process.status),
+          pid: typeof process.pid === 'number' ? process.pid : undefined,
+          cwd: typeof process.cwd === 'string' ? process.cwd : undefined,
+          url: typeof process.url === 'string' ? process.url : undefined,
+        }))
+        commit(current => ({
+          ...current,
+          taskId: refreshed.task_id,
+          status: refreshed.status as AgentRunSummary['status'],
+          isGenerating: refreshed.status !== 'waiting_approval',
+          plan: refreshed.plan ?? [],
+          repoMap: refreshed.repo_map ?? '',
+          fileChanges: activity.changesets.map(change => ({ files: change.files, diff: change.diff })),
+          verification: verification.length
+            ? { success: verification.every(check => check.success), checks: verification }
+            : null,
+          acceptance: refreshed.summary?.acceptance ?? [],
+          processes,
+          approval: null,
+        }))
+        if (refreshed.status === 'waiting_approval' && refreshed.active_batch) {
+          const tool = refreshed.active_batch.tool_uses[refreshed.active_batch.next_index]
+          if (!tool) return
+          commit(current => ({
+            ...current,
+            isGenerating: false,
+            approval: {
+              taskId: refreshed.task_id,
+              toolName: tool.name,
+              args: tool.input,
+              reason: '该任务正在等待操作确认',
+            },
+          }))
+          return
+        }
+        const ctrl = new AbortController()
+        abortRef.current = ctrl
+        void consumeRef.current?.(
+          api.taskEvents(refreshed.task_id, ctrl.signal, 0),
+          ctrl,
+          true,
+          refreshed.task_id,
+        )
+      }).catch(() => {})
     }).catch(() => {})
     return () => {
       active = false
       abortRef.current?.abort()
     }
-  }, [agentMode, sessionId, commit])
+  }, [agentMode, sessionId, commit, onDone])
 
   useEffect(() => {
     if (!agentMode) return
@@ -193,6 +316,8 @@ export function useChatStream(
   ) => {
     const steps = reset ? [] : [...stateRef.current.steps]
     const cmdBlocks = reset ? [] : [...stateRef.current.cmdBlocks]
+    const timeline = reset ? [] : [...stateRef.current.timeline]
+    const startedAt = Date.now()
     let activeCmdId: string | null = null
     let fullContent = ''
     let terminalSeen = false
@@ -203,9 +328,10 @@ export function useChatStream(
         workspace: current.workspace || workspace,
         taskId: seedTaskId,
         isGenerating: true,
+        startedAt,
       }))
     } else {
-      commit(current => ({ ...current, isGenerating: true, approval: null, partialContent: '', narrations: [], thinking: [] }))
+      commit(current => ({ ...current, isGenerating: true, approval: null, partialContent: '', narrations: [], thinking: [], timeline: [], startedAt }))
     }
 
     try {
@@ -223,9 +349,11 @@ export function useChatStream(
           commit(current => ({ ...current, taskId: e.task_id, repoMap: e.content }))
         } else if (e.type === 'step') {
           steps.push({ icon: e.icon || 'activity', text: e.step, done: true })
-          commit(current => ({ ...current, steps: [...steps] }))
+          timeline.push({ kind: 'note', text: e.step })
+          commit(current => ({ ...current, steps: [...steps], timeline: [...timeline] }))
         } else if (e.type === 'narration') {
-          commit(current => ({ ...current, narrations: [...current.narrations, e.content] }))
+          timeline.push({ kind: 'note', text: e.content })
+          commit(current => ({ ...current, narrations: [...current.narrations, e.content], timeline: [...timeline] }))
         } else if (e.type === 'thinking') {
           commit(current => {
             const thinking = [...current.thinking]
@@ -236,15 +364,17 @@ export function useChatStream(
               thinking[thinking.length - 1] = { content: last.content + e.content, round }
             } else {
               thinking.push({ content: e.content, round })
+              timeline.push({ kind: 'think', round })
             }
-            return { ...current, thinking }
+            return { ...current, thinking, timeline: [...timeline] }
           })
         } else if (e.type === 'tool_call') {
           steps.push({
             icon: 'tool', text: `${e.name}(...)`, done: false,
             callId: e.call_id, toolName: e.name, args: e.args, status: 'running',
           })
-          commit(current => ({ ...current, steps: [...steps] }))
+          timeline.push({ kind: 'tool', callId: e.call_id })
+          commit(current => ({ ...current, steps: [...steps], timeline: [...timeline] }))
         } else if (e.type === 'tool_result') {
           let index = steps.findIndex(item => item.callId === e.call_id)
           if (index === -1) {
@@ -256,6 +386,7 @@ export function useChatStream(
               ...steps[index], done: true,
               status: e.success ? 'succeeded' : 'failed',
               text: `${e.name}(...) ${e.success ? '完成' : '失败'}`,
+              data: (e.data ?? undefined) as Record<string, unknown> | undefined,
               output: e.success ? (e.output || '').slice(0, 4000) : undefined,
               error: e.error || (e.success ? undefined : '工具执行失败'),
             }
@@ -281,7 +412,8 @@ export function useChatStream(
           }
           cmdBlocks.push(block)
           activeCmdId = block.id
-          commit(current => ({ ...current, cmdBlocks: [...cmdBlocks] }))
+          timeline.push({ kind: 'cmd', id: block.id })
+          commit(current => ({ ...current, cmdBlocks: [...cmdBlocks], timeline: [...timeline] }))
         } else if (e.type === 'cmd_line') {
           const block = cmdBlocks.find(item => item.id === activeCmdId)
           if (block) {
@@ -376,6 +508,8 @@ export function useChatStream(
           }
           const lastThinking = stateRef.current.thinking
           const lastNarrations = stateRef.current.narrations
+          const lastTimeline = [...timeline]
+          const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
           fullContent = e.content || fullContent
           const completed = commit(current => ({
             ...current,
@@ -383,11 +517,12 @@ export function useChatStream(
             isGenerating: false,
             steps: [...steps],
             cmdBlocks: [...cmdBlocks],
+            timeline: lastTimeline,
             partialContent: '',
             narrations: [],
             thinking: [],
           }))
-          onDone(fullContent, steps, cmdBlocks, summaryOf(completed), lastNarrations, lastThinking)
+          onDone(fullContent, steps, cmdBlocks, summaryOf(completed), lastNarrations, lastThinking, lastTimeline, elapsedSec)
           return
         } else if (e.type === 'error') {
           steps.push({ icon: 'activity', text: e.content, done: true, status: 'failed' })

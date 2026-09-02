@@ -2381,3 +2381,35 @@ def test_boundary_command_hard_blocked_in_auto_and_allowed_in_full(tmp_path: Pat
     results2 = [e for e in events2 if e["type"] == "tool_result"]
     assert results2[0].get("success") is True
     assert executed, "full 档应放行边界命令"
+
+
+def test_exploratory_web_failure_after_success_not_incomplete(tmp_path: Path):
+    """网络探索失败（web_fetch 换源重试后成功）不应把任务压成 incomplete。
+
+    场景：模型先试第三方 API 失败，再抓官方页成功并给出完整回答——
+    final_text 完整即代表用户拿到结果，终态应为 completed。
+    """
+
+    def handler(args):
+        url = str(args.get("url", ""))
+        if "broken-api" in url:
+            return ToolResult.fail(f"网络请求失败: <urlopen error [SSL: EOF]>")
+        return ToolResult.ok(output='{"items": [{"name": "repo"}]}')
+
+    definition = ToolDefinition(
+        name="web_fetch",
+        description="Fetch a URL",
+        input_schema={"type": "object", "properties": {"url": {"type": "string"}}},
+        risk=ToolRisk.READ,
+        handler=handler,
+    )
+    responses = [
+        {"text": "", "tool_uses": [
+            {"id": "t1", "name": "web_fetch", "input": {"url": "https://broken-api.example/trending"}},
+            {"id": "t2", "name": "web_fetch", "input": {"url": "https://github.com/trending"}},
+        ], "stop_reason": "tool_use"},
+        {"text": "以下是今日 Trending 项目清单：repo 等。", "tool_uses": [], "stop_reason": "end_turn"},
+    ]
+    runtime, _ = make_runtime(tmp_path, responses, definition)
+    events = collect(runtime.run("session", "GitHub 今日热门项目"))
+    assert events[-1]["status"] == "completed"

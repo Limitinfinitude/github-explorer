@@ -1,9 +1,9 @@
-import difflib
 import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .diff_engine import format_unified_diff
 from .models import ToolResult
 from .workspace import WorkspaceManager
 
@@ -169,7 +169,8 @@ class EditEngine:
 
     @staticmethod
     def _diff(snapshot: FileSnapshot) -> str:
-        return "".join(difflib.unified_diff(
+        # Histogram 行级 diff（低频锚定，代码可读性优于 difflib），输出 unified diff 同构格式
+        return "".join(format_unified_diff(
             snapshot.before.splitlines(keepends=True),
             snapshot.after.splitlines(keepends=True),
             fromfile=f"a/{snapshot.relative_path}",

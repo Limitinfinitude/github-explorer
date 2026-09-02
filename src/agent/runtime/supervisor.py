@@ -129,7 +129,7 @@ class AgentTaskSupervisor:
     async def _consume(self, session_id: str, message: str, **kwargs) -> None:
         task_id = kwargs["task_id"]
         # 预热 MCP 连接（首次启动可能拉取 npx 包，限时避免拖慢任务；失败不阻断）。
-        # 测试环境通过 GE_DISABLE_MCP_PREWARM 关闭，避免 npx 拖住测试套件。
+        # 测试环境通过 GE_DISABLE_MCP_PREWARM 关闭；用户可在设置页关掉（mcp_prewarm 偏好）。
         if os.environ.get("GE_DISABLE_MCP_PREWARM", "").casefold() not in {"1", "true", "yes"}:
             try:
                 from agent.mcp_client import ensure_mcp_connected

@@ -1027,7 +1027,16 @@ class LocalAgentRuntime:
             or bool(acceptance and all(item["status"] == "passed" for item in acceptance))
         )
         result_ok = successful_evidence and not has_failed_verification
-        critical_failures = {} if result_ok else state["run"].get("unrecovered_failures") or {}
+        # 网络探索类失败（web_fetch/web_search 换源重试）不计入"未恢复失败"：
+        # 信息类任务先试第三方 API 失败、再抓官方页成功是正常探索路径，
+        # 不应把任务压成 incomplete（final_text 完整即代表用户拿到了结果）。
+        _EXPLORATORY_TOOLS = {"web_fetch", "web_search"}
+        unrecovered = {
+            call_id: failure for call_id, failure in
+            (state["run"].get("unrecovered_failures") or {}).items()
+            if failure.get("tool_name") not in _EXPLORATORY_TOOLS
+        }
+        critical_failures = {} if result_ok else unrecovered
         if require_acceptance:
             status = "completed" if (
                 acceptance
@@ -1274,11 +1283,27 @@ class LocalAgentRuntime:
         if name == "create_directory":
             return f"正在创建目录 {_short_text(args.get('path', '?'))}"
         if name in {"detect_project", "repo_map", "verify_project"}:
-            return f"正在分析项目（{name}）"
+            labels = {"detect_project": "识别项目结构", "repo_map": "梳理项目结构", "verify_project": "验证项目"}
+            return f"正在{labels[name]}"
         if name in {"ensure_venv", "install_dependencies"}:
-            return f"正在准备环境（{name}）"
+            labels = {"ensure_venv": "准备虚拟环境", "install_dependencies": "安装依赖"}
+            return f"正在{labels[name]}"
         if name in {"get_process", "list_processes", "stop_process"}:
-            return f"正在处理进程（{name}）"
+            labels = {"get_process": "查询进程状态", "list_processes": "列出进程", "stop_process": "停止进程"}
+            return f"正在{labels[name]}"
+        if name == "web_fetch":
+            return f"正在抓取 {_short_text(args.get('url', '?'), 60)}"
+        if name == "web_search":
+            return f"正在搜索 {_short_text(args.get('query', '?'), 60)}"
+        if name == "clone_repository":
+            return f"正在克隆 {_short_text(args.get('url', '?'), 60)}"
+        if name == "use_skill":
+            return f"正在调用技能 {_short_text(args.get('skill') or args.get('name', ''), 40)}"
+        if name in {"spawn_subagent", "spawn_subagents"}:
+            count = args.get("count") or args.get("subtasks")
+            if isinstance(count, list):
+                return f"正在派出 {len(count)} 个子代理"
+            return "正在派出子代理"
         return f"正在调用 {name}"
 
     @staticmethod

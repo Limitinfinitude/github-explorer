@@ -1,18 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { Message } from '../../types'
-import { WorkChain } from './WorkChain'
-import { CmdBlock } from './CmdBlock'
+import WorkProcess from './WorkProcess'
 import { ReasoningRow } from './ReasoningRow'
 import { AgentStatusPanel } from './AgentStatusPanel'
 import { displayResponseContent } from '../../lib/responseDisplay'
+import { preprocessMarkdown } from '../../lib/markdownFix'
 import { relativeMessageTime } from '../../lib/time'
 
 export function MessageItem({ msg }: { msg: Message }) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [renderedContent, setRenderedContent] = useState('')
   const isUser = msg.role === 'user'
-  const elapsed = msg.steps?.length ? msg.steps.length * 2 : 0
   const displayContent = displayResponseContent(msg.content, Boolean(msg.agentRun))
+  const hasWork = Boolean(msg.agentRun || msg.steps?.length || msg.timeline?.length)
   const hasMaterialAgentRun = Boolean(
     msg.agentRun && (
       (msg.agentRun.fileChanges?.length ?? 0) > 0
@@ -27,7 +27,7 @@ export function MessageItem({ msg }: { msg: Message }) {
     let active = true
     Promise.all([import('marked'), import('dompurify')]).then(([markedModule, purifyModule]) => {
       markedModule.marked.setOptions({ breaks: true, gfm: true })
-      const parsed = markedModule.marked.parse(displayContent)
+      const parsed = markedModule.marked.parse(preprocessMarkdown(displayContent))
       const html = typeof parsed === 'string' ? purifyModule.default.sanitize(parsed) : ''
       if (active) setRenderedContent(html)
     })
@@ -44,12 +44,12 @@ export function MessageItem({ msg }: { msg: Message }) {
   }, [renderedContent, isUser])
 
   return (
-    <div className={`mb-5 px-7 ${isUser ? 'flex flex-col items-end' : ''}`}>
+    <div className={`msg-enter mb-5 px-7 ${isUser ? 'flex flex-col items-end' : ''}`}>
       <div className={`w-full max-w-[860px] ${isUser ? 'flex flex-col items-end' : ''}`}>
       <div className={`flex items-center gap-2 mb-1.5 ${isUser ? 'flex-row-reverse' : ''}`}>
         <div
-          className={`w-[22px] h-[22px] rounded-md flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0 ${
-            isUser ? 'bg-accent' : 'bg-success'
+          className={`msg-avatar w-[22px] h-[22px] rounded-md flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0 ${
+            isUser ? 'msg-avatar--user' : 'msg-avatar--agent'
           }`}
         >
           {isUser ? 'U' : 'E'}
@@ -64,10 +64,16 @@ export function MessageItem({ msg }: { msg: Message }) {
         </div>
       ) : (
         <>
-          {Array.isArray(msg.thinking) && msg.thinking.length > 0 && (
-            <div className="message-process">
-              <ReasoningRow segments={msg.thinking} running={false} />
-            </div>
+          {hasWork && (
+            <WorkProcess
+              running={false}
+              elapsedSec={msg.workElapsed}
+              steps={msg.steps ?? []}
+              cmdBlocks={msg.cmdBlocks ?? []}
+              narrations={msg.narrations ?? []}
+              thinking={msg.thinking ?? []}
+              timeline={msg.timeline}
+            />
           )}
           <div className="assistant-response">
             <div
@@ -78,15 +84,6 @@ export function MessageItem({ msg }: { msg: Message }) {
                 : { children: <p className="whitespace-pre-wrap">{displayContent}</p> })}
             />
           </div>
-          {Array.isArray(msg.narrations) && msg.narrations.length > 0 && (
-            <div className="stream-narration">
-              {msg.narrations.map((line, index) => (
-                <div key={index} className="stream-narration__line">{line}</div>
-              ))}
-            </div>
-          )}
-          {msg.steps && msg.steps.length > 0 && <WorkChain steps={msg.steps} elapsed={elapsed} showSummary />}
-          {msg.cmdBlocks?.map(b => <CmdBlock key={b.id} block={b} />)}
           {msg.agentRun && hasMaterialAgentRun && (
             <AgentStatusPanel
               compact

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Archive, ArchiveRestore, BookMarked, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, Copy, Download, FileCode2, FileText, FolderOpen, FolderPlus, FolderTree, GitBranch, MessageSquare, PackageCheck, Play, RefreshCw, Search, ShieldCheck, TerminalSquare, Trash2, Upload, Waypoints } from 'lucide-react'
 import { api } from '../../lib/api'
+import { useConfirm } from '../common/useConfirm'
 import { evidenceToMarkdown, filterEvidenceEntries } from '../../lib/projectEvidence'
 import { formatLocalTimestamp } from '../../lib/time'
 import { processIdentityLabel, qualityState, terminalReasonLabel } from '../../lib/projectInsights'
@@ -244,6 +245,7 @@ export function ProjectWorkspaceView({
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [matrix, setMatrix] = useState<ProjectMatrixRow[] | null>(null)
+  const { confirm, dialog: confirmDialog } = useConfirm()
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [projectId, setProjectId] = useState('')
   const [overview, setOverview] = useState<ProjectOverview | null>(null)
@@ -449,10 +451,14 @@ export function ProjectWorkspaceView({
 
   function removeRow(row: ProjectMatrixRow) {
     const name = workspaceBasename(row.workspace_root)
-    if (!window.confirm(
-      `移除「${name}」将删除它的全部本地运行记录（任务/事件/工具/变更/对话消息）。\n磁盘文件夹不受影响。确定移除？`,
-    )) return
     void (async () => {
+      const ok = await confirm({
+        title: `移除项目「${name}」？`,
+        message: '将删除它的全部本地运行记录（任务/事件/工具/变更/对话消息）。磁盘文件夹不受影响。',
+        confirmText: '移除',
+        danger: true,
+      })
+      if (!ok) return
       setError(''); setActionError('')
       try {
         await api.removeProject(row.project_id)
@@ -764,6 +770,7 @@ export function ProjectWorkspaceView({
           </>)}
         </>
       )}
+      {confirmDialog}
     </div>
   )
 }

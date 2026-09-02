@@ -29,22 +29,24 @@ function projectName(project: ProjectSummary) {
 }
 
 function SectionTitle({
-  label, collapsed, onToggle, trailing, count,
+  label, collapsed, onToggle, trailing, count, icon,
 }: {
   label: string
   collapsed: boolean
   onToggle: () => void
   trailing?: React.ReactNode
   count?: number
+  icon?: React.ReactNode
 }) {
   return (
     <div className="sidebar-section-title">
       <button type="button" className={`sidebar-section-title__btn ${collapsed ? 'is-collapsed' : ''}`} onClick={onToggle} aria-expanded={!collapsed}>
-        <ChevronDown size={12} />
+        {icon}
         <span>{label}</span>
         {typeof count === 'number' && count > 0 && (
           <em className="sidebar-section-count">{count}</em>
         )}
+        <ChevronDown size={12} className={`sidebar-section-title__chevron ${collapsed ? 'is-collapsed' : ''}`} />
       </button>
       {trailing}
     </div>
@@ -172,6 +174,7 @@ export function Sidebar({
           collapsed={collapsed.projects}
           onToggle={() => setCollapsed(prev => ({ ...prev, projects: !prev.projects }))}
           count={projects.length}
+          icon={<FolderKanban size={13} />}
           trailing={!collapsed.projects && (
             <button
               type="button"
@@ -201,7 +204,7 @@ export function Sidebar({
             {imported && <span>{imported}</span>}
           </div>
         )}
-        <nav className={`sidebar-projects ${collapsed.projects ? 'is-collapsed-view' : ''}`} aria-label="项目栏">
+            <nav className={`sidebar-projects ${collapsed.projects ? 'is-collapsed-view' : ''}`} aria-label="项目栏">
               {!collapsed.projects && projects.length > 8 && (
                 <div className="sidebar-project-search">
                   <input
@@ -214,16 +217,15 @@ export function Sidebar({
                   />
                 </div>
               )}
-              {visibleProjects.length === 0 && query && (
+              {!collapsed.projects && visibleProjects.length === 0 && query && (
                 <p className="sidebar-project-search__empty">没有匹配「{projectQuery}」的项目</p>
               )}
-              {projects.length === 0 && (
+              {!collapsed.projects && projects.length === 0 && (
                 <button type="button" className="sidebar-projects__empty" onClick={() => { onOpenProjectView(); onClose() }}>
                   还没有项目，去工作台导入
                 </button>
               )}
-              {/* 折叠时只显示最近 8 个项目（降低初始堆叠），展开显示全部；搜索时忽略折叠限制 */}
-              {(collapsed.projects && !query ? projects.slice(0, 8) : visibleProjects).map(project => {
+              {!collapsed.projects && (query ? visibleProjects : projects).map(project => {
                 const id = project.project_id
                 const conversations = chats.filter(chat => chat.projectId === id)
                 const isOpen = expanded.has(id)
@@ -277,6 +279,7 @@ export function Sidebar({
           collapsed={collapsed.tasks}
           onToggle={() => setCollapsed(prev => ({ ...prev, tasks: !prev.tasks }))}
           count={looseChats.length}
+          icon={<MessageSquare size={13} />}
         />
         {!collapsed.tasks && (
           <>

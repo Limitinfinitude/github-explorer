@@ -3,6 +3,13 @@ export interface ThinkingSegment {
   round: number
 }
 
+/** 工作过程时间线条目：按事件发生顺序记录「思考/工具/命令/旁白」，渲染时交错还原真实工作流。 */
+export type WorkTimelineItem =
+  | { kind: 'think'; round: number }
+  | { kind: 'tool'; callId: string }
+  | { kind: 'cmd'; id: string }
+  | { kind: 'note'; text: string }
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -14,6 +21,10 @@ export interface Message {
   thinking?: ThinkingSegment[]
   narrations?: string[]
   agentRun?: AgentRunSummary
+  /** 工作过程时间线（与 steps/thinking/narrations 配合还原交错顺序）。 */
+  timeline?: WorkTimelineItem[]
+  /** 任务真实耗时（秒），完成时由流写入。 */
+  workElapsed?: number
 }
 
 export interface Chat {
@@ -42,6 +53,7 @@ export interface Model {
   thinking_effort?: 'off' | 'high' | 'max'
   context_window?: string
   context_window_tokens?: number
+  max_output_tokens?: number
 }
 
 export interface ContextUsage {
@@ -66,6 +78,8 @@ export interface CustomModelInput {
   base_url: string
   api_key: string
   thinking_effort: 'off' | 'high' | 'max'
+  context_window?: string
+  max_output_tokens?: string
 }
 
 export interface ToolCall {
@@ -82,6 +96,7 @@ export interface Step {
   callId?: string
   toolName?: string
   args?: Record<string, unknown>
+  data?: Record<string, unknown>
   output?: string
   error?: string
   status?: 'running' | 'succeeded' | 'failed' | 'rejected' | 'interrupted'
