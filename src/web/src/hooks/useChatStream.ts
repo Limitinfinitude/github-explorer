@@ -187,6 +187,8 @@ export function useChatStream(
   onToken: (text: string) => void,
   onDone: DoneHandler,
   onError: (msg: string) => void,
+  /** 已被用户删除/编辑重发的任务：补收回放时跳过（由 ChatPanel 传入） */
+  isSuppressed?: (taskId: string) => boolean,
 ) {
   const abortRef = useRef<AbortController | null>(null)
   const consumeRef = useRef<StreamConsumer | null>(null)
@@ -218,6 +220,8 @@ export function useChatStream(
           if (!active || !latest) return
           const status = String(latest.status || '')
           if (!['completed', 'incomplete', 'failed', 'cancelled', 'interrupted'].includes(status)) return
+          // 用户主动删除/编辑重发过的任务不再补收
+          if (isSuppressed?.(String(latest.task_id))) return
           // 去重：后端消息历史里已有该任务的回复就不补（避免每次进入重复推）
           try {
             const stored = await api.getChatMessages(sessionId)

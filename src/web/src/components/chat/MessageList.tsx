@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { Message, Step, CmdBlockData, ThinkingSegment, WorkTimelineItem } from '../../types'
-import { MessageItem } from './MessageItem'
+import { MessageItem, type MessageActions } from './MessageItem'
 import WorkProcess from './WorkProcess'
 import { displayResponseContent } from '../../lib/responseDisplay'
 import { preprocessMarkdown } from '../../lib/markdownFix'
@@ -16,9 +16,10 @@ interface Props {
   streamStartedAt: number | null
   streamContent: string
   startTime: number
+  messageActions?: MessageActions
 }
 
-export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamTimeline, streamStartedAt, streamContent, startTime }: Props) {
+export function MessageList({ messages, isGenerating, streamSteps, streamCmdBlocks, streamNarration, streamThinking, streamTimeline, streamStartedAt, streamContent, startTime, messageActions }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const [renderedStreamContent, setRenderedStreamContent] = useState('')
@@ -58,7 +59,7 @@ export function MessageList({ messages, isGenerating, streamSteps, streamCmdBloc
   return (
     <div className="message-list" ref={listRef} onScroll={handleScroll}>
       {messages.map(msg => (
-        <MessageItem key={msg.id} msg={msg} />
+        <MessageItem key={msg.id} msg={msg} actions={messageActions} />
       ))}
 
       {isGenerating && (

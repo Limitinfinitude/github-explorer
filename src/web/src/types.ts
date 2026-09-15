@@ -37,6 +37,8 @@ export interface Chat {
   projectId?: string
   /** 会话绑定的工作区根目录（项目对话 = 项目目录；未绑定前用于首次打开自动绑定）。 */
   workspace?: string
+  /** 已被删除/编辑重发、不再补收的任务 id（避免刷新后"删了又回来"）。 */
+  suppressedTaskIds?: string[]
 }
 
 export interface Model {

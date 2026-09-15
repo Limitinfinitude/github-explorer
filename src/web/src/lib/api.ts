@@ -163,8 +163,34 @@ export const api = {
     return data.messages ?? []
   },
 
-  /** 会话分享：服务端渲染为公开可访问的静态 HTML，返回可分享链接。 */
-  async shareChat(sessionId: string, title: string): Promise<{ url: string; token: string; title: string }> {
+  /** 整表替换会话消息（编辑重发 / 删除 / 重新生成后的服务端同步）。 */
+  async replaceChatMessages(sessionId: string, messages: Message[]): Promise<void> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    })
+    if (!res.ok) throw new Error(`同步消息失败：HTTP ${res.status}`)
+  },
+
+  /** 已删除/编辑重发过的任务：补收回放时跳过，避免"删了又回来"。 */
+  async suppressChatTask(sessionId: string, taskId: string): Promise<void> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/suppress-task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId }),
+    })
+    if (!res.ok) throw new Error(`同步删除状态失败：HTTP ${res.status}`)
+  },
+
+  async getSuppressedTasks(sessionId: string): Promise<string[]> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/suppressed`)
+    if (!res.ok) return []
+    const data = await res.json() as { task_ids?: string[] }
+    return data.task_ids ?? []
+  },
+
+  /** 会话分享：服务端渲染为公开可访问的静态 HTML，返回可分享链接。 */  async shareChat(sessionId: string, title: string): Promise<{ url: string; token: string; title: string }> {
     const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/share`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

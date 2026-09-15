@@ -18,6 +18,9 @@ interface Props {
   currentModel: string
   agentMode: boolean
   onPushMessage: (msg: Message) => void
+  /** 消息级操作：整体替换消息数组（编辑重发/重新生成）与删除单条 */
+  onApplyMessages?: (chatId: number, transform: (msgs: Message[]) => Message[]) => void
+  onDeleteMessage?: (chatId: number, messageId: string) => void
   onSelectModel: (id: string) => void
   onOpenMenu: () => void
   onModelsChanged?: (selectModelId?: string) => Promise<void> | void
@@ -30,7 +33,7 @@ const HINTS = [
 ]
 const noop = () => {}
 
-export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage, onSelectModel, onOpenMenu, onModelsChanged }: Props) {
+export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage, onApplyMessages, onDeleteMessage, onSelectModel, onOpenMenu, onModelsChanged }: Props) {
   const [startTime, setStartTime] = useState(Date.now())
   const [workspace, setWorkspace] = useState('')
   const [workspaceDraft, setWorkspaceDraft] = useState('')
@@ -117,6 +120,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     noop,
     handleDone,
     handleError,
+    taskId => (chat.suppressedTaskIds ?? []).includes(taskId),
   )
 
   useEffect(() => {
@@ -168,6 +172,55 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     onPushMessage({ id: `msg-${Date.now()}`, role: 'user', content: msg, time: new Date().toISOString() })
     send(msg, thinkingEffort, planMode)
   }, [send, onPushMessage, workspaceLoading, thinkingEffort])
+
+  /** 编辑用户消息并重新发送：截断其后内容，把编辑后的内容作为新消息发送。 */
+  const handleEditResend = useCallback((messageId: string, content: string) => {
+    if (!onApplyMessages || workspaceLoading) return
+    setStartTime(Date.now())
+    onApplyMessages(chat.id, msgs => {
+      const index = msgs.findIndex(m => m.id === messageId)
+      const kept = index === -1 ? msgs : msgs.slice(0, index)
+      return [...kept, { id: `msg-${Date.now()}`, role: 'user', content, time: new Date().toISOString() }]
+    })
+    send(content, thinkingEffort)
+  }, [onApplyMessages, chat.id, send, thinkingEffort, workspaceLoading])
+
+  /** 重新生成：截断到该条回复之前，重发它对应的用户消息。 */
+  const handleRegenerate = useCallback((messageId: string) => {
+    if (!onApplyMessages || workspaceLoading) return
+    const msgs = chat.messages ?? []
+    const index = msgs.findIndex(m => m.id === messageId)
+    if (index === -1) return
+    let userIndex = -1
+    for (let i = index - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') { userIndex = i; break }
+    }
+    if (userIndex === -1) return
+    const userMsg = msgs[userIndex]
+    setStartTime(Date.now())
+    onApplyMessages(chat.id, list => {
+      const at = list.findIndex(m => m.id === messageId)
+      if (at === -1) return list
+      let u = -1
+      for (let i = at - 1; i >= 0; i--) {
+        if (list[i].role === 'user') { u = i; break }
+      }
+      if (u === -1) return list
+      return [...list.slice(0, u), { ...list[u], id: `msg-${Date.now()}`, time: new Date().toISOString() }]
+    })
+    send(userMsg.content, thinkingEffort)
+  }, [onApplyMessages, chat.id, chat.messages, send, thinkingEffort, workspaceLoading])
+
+  const handleDeleteMessage = useCallback((messageId: string) => {
+    onDeleteMessage?.(chat.id, messageId)
+  }, [onDeleteMessage, chat.id])
+
+  const messageActions = React.useMemo(() => ({
+    onEditResend: handleEditResend,
+    onRegenerate: handleRegenerate,
+    onDelete: handleDeleteMessage,
+    busy: state.isGenerating,
+  }), [handleEditResend, handleRegenerate, handleDeleteMessage, state.isGenerating])
 
   const pushSystemNote = useCallback((text: string) => {
     onPushMessage({ id: `sys-${Date.now()}`, role: 'assistant', content: text, time: new Date().toISOString() })
@@ -330,6 +383,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
           streamStartedAt={state.startedAt}
           streamContent={state.partialContent}
           startTime={startTime}
+          messageActions={messageActions}
         />
       )}
       {state.approval && (

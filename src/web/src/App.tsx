@@ -15,7 +15,7 @@ const DEFAULT_MODELS: Model[] = [
 ]
 
 export default function App() {
-  const { chats, activeChat, activeChatId, setActiveChatId, newChat, newProjectChat, openSession, deleteChat, pushMessage, hydrateChat } = useChats()
+  const { chats, activeChat, activeChatId, setActiveChatId, newChat, newProjectChat, openSession, deleteChat, pushMessage, hydrateChat, applyMessages, deleteMessage } = useChats()
   const [models, setModels] = useState<Model[]>(DEFAULT_MODELS)
   const [currentModel, setCurrentModel] = useState('claude-sonnet-5')
   const [agentMode] = useState(true)
@@ -150,6 +150,8 @@ export default function App() {
             currentModel={currentModel}
             agentMode={agentMode}
             onPushMessage={handlePushMessage}
+            onApplyMessages={applyMessages}
+            onDeleteMessage={deleteMessage}
             onSelectModel={handleSelectModel}
             onOpenMenu={() => setSidebarOpen(true)}
             onModelsChanged={handleModelCreated}

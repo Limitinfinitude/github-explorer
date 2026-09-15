@@ -741,8 +741,29 @@ button { transition: transform .08s var(--ease-out); }
 .work-process__more { align-self: flex-start; padding: 5px 10px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border-faint); border-radius: 6px; font-size: 10.5px; cursor: pointer; }
 .work-process__more:hover { color: var(--text); border-color: var(--border-2); }
 
-/* ===== 消息进场：轻微上浮淡入（尊重 reduced-motion） ===== */
-@keyframes msgEnter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+/* ===== 消息操作栏（hover 显示）：用户消息=编辑；AI 回复=复制/朗读/重新生成/删除 ===== */
+.msg-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity .12s ease; }
+.msg-actions--user { margin-left: 0; margin-right: 6px; }
+.group:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg-actions button { width: 24px; height: 24px; display: grid; place-items: center; color: var(--muted-2); background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
+.msg-actions button:hover { color: var(--text); background: var(--hover); }
+.msg-actions button.is-ok { color: var(--success); }
+.msg-actions button.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.msg-actions button.is-danger:hover { color: var(--error); background: var(--error-soft); }
+.msg-actions button:disabled { opacity: .4; cursor: default; }
+/* 编辑用户消息：输入框 + 操作条 */
+.msg-edit { width: min(75%, 640px); display: flex; flex-direction: column; gap: 6px; }
+.msg-edit__input { width: 100%; min-height: 64px; padding: 10px 12px; color: var(--fg, var(--text)); background: var(--surface); border: 1px solid var(--border-2); border-radius: 8px; font-size: 14px; line-height: 1.6; resize: none; outline: none; }
+.msg-edit__input:focus { border-color: var(--accent); }
+.msg-edit__bar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.msg-edit__hint { margin-right: auto; color: var(--muted-2); font-size: 10.5px; }
+.msg-edit__cancel { height: 28px; padding: 0 12px; color: var(--muted); background: transparent; border: 1px solid var(--border-2); border-radius: 6px; font-size: 11.5px; cursor: pointer; }
+.msg-edit__cancel:hover { color: var(--text); }
+.msg-edit__send { height: 28px; padding: 0 14px; color: #fff; background: var(--accent); border: 0; border-radius: 6px; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+.msg-edit__send:hover { background: var(--accent-hover); }
+.msg-edit__send:disabled { opacity: .5; cursor: default; }
+
+/* ===== 消息进场：轻微上浮淡入（尊重 reduced-motion） ===== */@keyframes msgEnter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 .msg-enter { animation: msgEnter .3s var(--ease-out); }
 @media (prefers-reduced-motion: reduce) { .msg-enter { animation: none; } }
 

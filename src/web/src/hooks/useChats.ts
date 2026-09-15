@@ -155,10 +155,54 @@ export function useChats() {
     })
   }, [])
 
+  /** 消息级操作（编辑重发/删除/重新生成）：更新本地数组并整体同步服务端。
+   *  被移除的 AI 任务会记入 suppressed：刷新后补收逻辑跳过它，避免"删了又回来"。 */
+  const applyMessages = useCallback((chatId: number, transform: (msgs: Message[]) => Message[]) => {
+    setChats(prev => {
+      const target = prev.find(c => c.id === chatId)
+      if (!target) return prev
+      const nextMessages = transform(target.messages)
+      const keptTaskIds = new Set(
+        nextMessages.map(m => m.agentRun?.taskId).filter((id): id is string => Boolean(id)),
+      )
+      const removedTaskIds = target.messages
+        .map(m => m.agentRun?.taskId)
+        .filter((id): id is string => Boolean(id))
+        .filter(id => !keptTaskIds.has(id))
+      const suppressedTaskIds = removedTaskIds.length
+        ? [...new Set([...(target.suppressedTaskIds ?? []), ...removedTaskIds])]
+        : target.suppressedTaskIds
+      const next = prev.map(c => (
+        c.id === chatId ? { ...c, messages: nextMessages, suppressedTaskIds } : c
+      ))
+      save(next)
+      // 服务端整表覆盖：保证刷新后不复活已删除/已编辑的消息
+      void api.replaceChatMessages(target.sessionId, nextMessages).catch(() => {})
+      for (const taskId of removedTaskIds) {
+        void api.suppressChatTask(target.sessionId, taskId).catch(() => {})
+      }
+      return next
+    })
+  }, [])
+
+  /** 截断到指定消息（不含）——用于编辑重发与重新生成。 */
+  const truncateBefore = useCallback((chatId: number, messageId: string) => {
+    applyMessages(chatId, msgs => {
+      const index = msgs.findIndex(m => m.id === messageId)
+      return index === -1 ? msgs : msgs.slice(0, index)
+    })
+  }, [applyMessages])
+
+  const deleteMessage = useCallback((chatId: number, messageId: string) => {
+    applyMessages(chatId, msgs => msgs.filter(m => m.id !== messageId))
+  }, [applyMessages])
+
   const hydrateChat = useCallback(async (chatId: number, sessionId: string) => {
     // 优先从后端聊天消息恢复（含思考/工具过程），本地缓存丢失时仍有完整副本
     let messages: Message[] = []
+    let suppressedTaskIds: string[] = []
     try {
+      suppressedTaskIds = await api.getSuppressedTasks(sessionId).catch(() => [])
       const stored = await api.getChatMessages(sessionId)
       messages = stored.map((m, index) => ({
         ...m,
@@ -177,12 +221,12 @@ export function useChats() {
         const title = chat.title === '新对话'
           ? (messages.find(message => message.role === 'user')?.content.slice(0, 20) || chat.title)
           : chat.title
-        return { ...chat, messages, title }
+        return { ...chat, messages, title, suppressedTaskIds }
       })
       save(next)
       return next
     })
   }, [])
 
-  return { chats, activeChat, activeChatId, setActiveChatId, newChat, newProjectChat, projectChats, looseChats, openSession, deleteChat, pushMessage, updateLastMessage, hydrateChat }
+  return { chats, activeChat, activeChatId, setActiveChatId, newChat, newProjectChat, projectChats, looseChats, openSession, deleteChat, pushMessage, updateLastMessage, hydrateChat, applyMessages, truncateBefore, deleteMessage }
 }

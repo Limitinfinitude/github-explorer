@@ -207,6 +207,15 @@ class Memory:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id)"
         )
+        # 用户删除/编辑重发后不再补收的任务（recovery 回放时跳过，避免"删了又回来"）
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS chat_suppressed_tasks (
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, task_id)
+            )"""
+        )
         # 旧库迁移：补 timeline/work_elapsed 列（工作过程时间线持久化）
         chat_columns = {row[1] for row in cursor.execute("PRAGMA table_info(chat_messages)").fetchall()}
         for column, definition in (
@@ -931,6 +940,52 @@ class Memory:
             ),
         )
         self.conn.commit()
+
+    def replace_chat_messages(self, session_id: str, messages: List[Dict]) -> int:
+        """整表替换一个会话的聊天消息（编辑重发/删除/重新生成后的同步）。
+
+        返回写入条数。消息量小（单会话几十条），覆盖写比逐条 diff 简单可靠。
+        """
+        with self.conn:
+            self.conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+            for message in messages:
+                self.conn.execute(
+                    """INSERT INTO chat_messages
+                       (session_id, role, content, msg_time, thinking_json, narrations_json,
+                        steps_json, cmd_blocks_json, agent_run_json, timeline_json, work_elapsed)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        str(message.get("role", "assistant")),
+                        str(message.get("content", "")),
+                        str(message.get("time", "")),
+                        json.dumps(message.get("thinking") or [], ensure_ascii=False, default=str),
+                        json.dumps(message.get("narrations") or [], ensure_ascii=False, default=str),
+                        json.dumps(message.get("steps") or [], ensure_ascii=False, default=str),
+                        json.dumps(message.get("cmdBlocks") or [], ensure_ascii=False, default=str),
+                        json.dumps(message.get("agentRun") or {}, ensure_ascii=False, default=str),
+                        json.dumps(message.get("timeline") or [], ensure_ascii=False, default=str),
+                        int(message.get("workElapsed") or 0),
+                    ),
+                )
+        return len(messages)
+
+    def suppress_chat_task(self, session_id: str, task_id: str) -> None:
+        """标记该任务不再补收（用户删除/编辑重发过它的回复）。"""
+        if not task_id:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_suppressed_tasks (session_id, task_id) VALUES (?, ?)",
+            (session_id, task_id),
+        )
+        self.conn.commit()
+
+    def get_suppressed_chat_tasks(self, session_id: str) -> List[str]:
+        rows = self.conn.execute(
+            "SELECT task_id FROM chat_suppressed_tasks WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def get_chat_messages(self, session_id: str) -> List[Dict]:
         """读取一个会话的完整聊天消息（按保存顺序）。"""

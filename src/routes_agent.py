@@ -724,6 +724,54 @@ async def set_approval_mode(request: ApprovalModeUpdate):
     return {"mode": request.mode}
 
 
+# ===== 安全禁令（服务器保护开关）：读写 data/security_policy.json =====
+# guard.security_ban 每次执行命令前热读该文件，改开关即时生效、无需重启。
+def _security_policy_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "data" / "security_policy.json"
+
+
+def _read_security_policy() -> dict:
+    try:
+        data = json.loads(_security_policy_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+class SecurityPolicyUpdate(BaseModel):
+    enabled: bool
+
+
+@router_agent.get("/api/settings/security-policy")
+async def get_security_policy():
+    """查询安全禁令状态与规则说明（只读，供前端/管理面板展示）。"""
+    policy = _read_security_policy()
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "updated_at": policy.get("updated_at", ""),
+        # 规则说明（固定内置，不可经 API 改）
+        "rules": [
+            {"id": "secret_file", "label": "禁止读取密钥/凭据文件（~/.ssh、.env、id_rsa、token 等）"},
+            {"id": "env_probe", "label": "禁止探测环境变量中的密钥（API Key/Token/密码）"},
+            {"id": "remote_exec", "label": "禁止从远程下载并执行脚本（防注入）"},
+            {"id": "exfil_upload", "label": "禁止向外部上传/外传数据（scp/curl -T/远程 git push）"},
+            {"id": "sabotage", "label": "禁止系统级破坏操作（服务/防火墙/用户/根目录删除）"},
+        ],
+    }
+
+
+@router_agent.put("/api/settings/security-policy")
+async def set_security_policy(request: SecurityPolicyUpdate):
+    """开/关安全禁令（管理面板调用；GE 本身无登录，靠 nginx 鉴权保护此端点）。"""
+    import datetime
+
+    path = _security_policy_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    policy = {"enabled": bool(request.enabled), "updated_at": datetime.datetime.now().isoformat(timespec="seconds")}
+    path.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "enabled": policy["enabled"]}
+
+
 class RuntimePrefsUpdate(BaseModel):
     event_retention_days: Optional[int] = None
     compact_ratio: Optional[float] = None
@@ -927,6 +975,40 @@ async def save_chat_message(session_id: str, payload: ChatMessagePayload):
 async def get_chat_messages(session_id: str):
 
     return {"session_id": session_id, "messages": memory.get_chat_messages(session_id)}
+
+
+class ChatMessagesReplacePayload(BaseModel):
+    """整表替换：编辑重发 / 删除消息 / 重新生成后的服务端同步。"""
+    messages: list[ChatMessagePayload] = []
+
+
+@router_agent.put("/api/chats/{session_id}/messages")
+async def replace_chat_messages(session_id: str, payload: ChatMessagesReplacePayload):
+    if len(payload.messages) > 2000:
+        raise HTTPException(status_code=413, detail="消息数量过多")
+    total = sum(len(m.content or "") for m in payload.messages)
+    if total > 5_000_000:
+        raise HTTPException(status_code=413, detail="消息内容过大")
+    saved = memory.replace_chat_messages(
+        session_id, [m.model_dump(exclude_none=True) for m in payload.messages]
+    )
+    return {"ok": True, "messages": saved}
+
+
+class SuppressTaskPayload(BaseModel):
+    task_id: str
+
+
+@router_agent.get("/api/chats/{session_id}/suppressed")
+async def get_suppressed_tasks(session_id: str):
+    """已被用户删除/编辑重发、不再补收的任务 id 列表。"""
+    return {"task_ids": memory.get_suppressed_chat_tasks(session_id)}
+
+
+@router_agent.post("/api/chats/{session_id}/suppress-task")
+async def suppress_chat_task(session_id: str, payload: SuppressTaskPayload):
+    memory.suppress_chat_task(session_id, payload.task_id)
+    return {"ok": True}
 
 
 # 获取项目状态
