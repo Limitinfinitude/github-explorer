@@ -3,6 +3,7 @@ import type { Chat, Message } from '../types'
 import { api } from '../lib/api'
 import { historyToMessages } from '../lib/chatHistory'
 import { appendNewChat, appendProjectChat, ensureSessionChat } from '../lib/chatState'
+import { removeTurn } from '../lib/turnRange'
 import type { ChatMeta } from '../lib/chatState'
 
 const STORAGE_KEY = 'explorer_chats'
@@ -193,8 +194,9 @@ export function useChats() {
     })
   }, [applyMessages])
 
+  /** 删除消息：按"轮"删除——连同这一轮的用户提问与全部回复一起删除。 */
   const deleteMessage = useCallback((chatId: number, messageId: string) => {
-    applyMessages(chatId, msgs => msgs.filter(m => m.id !== messageId))
+    applyMessages(chatId, msgs => removeTurn(msgs, messageId))
   }, [applyMessages])
 
   const hydrateChat = useCallback(async (chatId: number, sessionId: string) => {

@@ -153,8 +153,13 @@ export function MessageItem({ msg, actions }: { msg: Message; actions?: MessageA
                 </button>
               </>
             )}
-            <button type="button" title="删除这条消息" aria-label="删除这条消息"
-              className="is-danger" onClick={() => actions?.onDelete(msg.id)}>
+            <button
+              type="button"
+              title={isUser ? '删除这轮对话（提问与回复一起删除）' : '删除这轮对话（连同用户提问一起删除）'}
+              aria-label={isUser ? '删除这轮对话' : '删除这轮对话（连同用户提问）'}
+              className="is-danger"
+              onClick={() => actions?.onDelete(msg.id)}
+            >
               <Trash2 size={12} />
             </button>
           </div>
