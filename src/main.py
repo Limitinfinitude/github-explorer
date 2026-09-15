@@ -74,9 +74,11 @@ async def index():
 
 from routes_search import router_search
 from routes_agent import router_agent
+from routes_share import router_share
 
 app.include_router(router_search)
 app.include_router(router_agent)
+app.include_router(router_share)
 
 # ========== 多模型配置系统（独立模块） ==========
 

@@ -163,6 +163,20 @@ export const api = {
     return data.messages ?? []
   },
 
+  /** 会话分享：服务端渲染为公开可访问的静态 HTML，返回可分享链接。 */
+  async shareChat(sessionId: string, title: string): Promise<{ url: string; token: string; title: string }> {
+    const res = await fetch(`/api/chats/${encodeURIComponent(sessionId)}/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null) as { detail?: string } | null
+      throw new Error(detail?.detail || `生成分享失败：HTTP ${res.status}`)
+    }
+    return res.json()
+  },
+
   async getDefaultWorkspace() {
     const res = await fetch('/api/agent/workspace/default')
     if (!res.ok) throw new Error(`读取默认工作目录失败：HTTP ${res.status}`)

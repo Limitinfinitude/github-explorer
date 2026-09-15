@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Activity, ChevronDown, Compass, FolderKanban, MessageSquare, Moon, PanelLeftClose, Plus, Settings, Sun, TerminalSquare, Trash2, Upload,
+  Activity, ChevronDown, Compass, FolderKanban, MessageSquare, Moon, PanelLeftClose, Plus, Settings, Share2, Sun, TerminalSquare, Trash2, Upload,
 } from 'lucide-react'
 import { api } from '../../lib/api'
+import { ShareDialog } from '../common/ShareDialog'
 import type { Chat, ProjectSummary, View } from '../../types'
 
 interface Props {
@@ -81,6 +82,22 @@ export function Sidebar({
   const [importError, setImportError] = useState('')
   const [imported, setImported] = useState('')
   const [projectQuery, setProjectQuery] = useState('')
+  const [shareState, setShareState] = useState<{ url?: string; title: string; error?: string } | null>(null)
+  const [sharingId, setSharingId] = useState<number | null>(null)
+
+  // 分享会话：服务端渲染成静态 HTML，弹窗展示公开链接
+  async function handleShare(chat: Chat) {
+    if (sharingId !== null) return
+    setSharingId(chat.id)
+    try {
+      const result = await api.shareChat(chat.sessionId, chat.title)
+      setShareState({ url: result.url, title: result.title || chat.title })
+    } catch (error) {
+      setShareState({ title: chat.title, error: error instanceof Error ? error.message : '生成分享失败' })
+    } finally {
+      setSharingId(null)
+    }
+  }
 
   // 切换到某个项目对话时，自动展开它所属的项目
   useEffect(() => {
@@ -255,6 +272,16 @@ export function Sidebar({
                             <span>{chat.title}</span>
                             <button
                               type="button"
+                              className="sidebar-chat__share"
+                              title="分享为网页"
+                              aria-label="分享为网页"
+                              disabled={sharingId === chat.id}
+                              onClick={event => { event.stopPropagation(); void handleShare(chat) }}
+                            >
+                              <Share2 size={12} />
+                            </button>
+                            <button
+                              type="button"
                               title="删除对话"
                               aria-label="删除对话"
                               onClick={event => { event.stopPropagation(); onDeleteChat(chat.id) }}
@@ -301,6 +328,16 @@ export function Sidebar({
                   <span>{chat.title}</span>
                   <button
                     type="button"
+                    className="sidebar-chat__share"
+                    title="分享为网页"
+                    aria-label="分享为网页"
+                    disabled={sharingId === chat.id}
+                    onClick={event => { event.stopPropagation(); void handleShare(chat) }}
+                  >
+                    <Share2 size={13} />
+                  </button>
+                  <button
+                    type="button"
                     title="删除任务"
                     aria-label="删除任务"
                     onClick={event => { event.stopPropagation(); onDeleteChat(chat.id) }}
@@ -333,6 +370,14 @@ export function Sidebar({
           </button>
         </nav>
       </aside>
+      {shareState && (
+        <ShareDialog
+          url={shareState.url}
+          title={shareState.title}
+          error={shareState.error}
+          onClose={() => setShareState(null)}
+        />
+      )}
     </>
   )
 }
