@@ -4,6 +4,7 @@ import { MessageList } from './MessageList'
 import { InputArea } from './InputArea'
 import { useChatStream } from '../../hooks/useChatStream'
 import { AgentStatusPanel } from './AgentStatusPanel'
+import { useConfirm } from '../common/useConfirm'
 import { DirTree } from '../layout/DirTree'
 import { ContextGauge } from './ContextGauge'
 import { api } from '../../lib/api'
@@ -43,6 +44,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
   const [planMode, setPlanMode] = useState(false)
+  const { confirm, dialog: confirmDialog } = useConfirm()
   const [thinkingEffort, setThinkingEffort] = useState<'off' | 'high' | 'max'>(() =>
     models.find(m => m.id === currentModel)?.thinking_effort ?? 'off',
   )
@@ -211,9 +213,26 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
     send(userMsg.content, thinkingEffort)
   }, [onApplyMessages, chat.id, chat.messages, send, thinkingEffort, workspaceLoading])
 
-  const handleDeleteMessage = useCallback((messageId: string) => {
+  const handleDeleteMessage = useCallback(async (messageId: string) => {
+    const msgs = chat.messages ?? []
+    const index = msgs.findIndex(m => m.id === messageId)
+    if (index === -1) return
+    // 提示将删除的范围：这轮提问 + 全部回复
+    let start = index
+    while (start > 0 && msgs[start].role !== 'user') start -= 1
+    let end = msgs[start].role === 'user' ? start + 1 : index + 1
+    while (msgs[start].role === 'user' && end < msgs.length && msgs[end].role !== 'user') end += 1
+    const count = msgs[start].role === 'user' ? end - start : 1
+    const ok = await confirm({
+      title: '删除这轮对话',
+      message: `将删除这轮的用户提问与全部回复（共 ${count} 条消息），删除后无法恢复。`,
+      confirmText: '删除',
+      cancelText: '取消',
+      danger: true,
+    })
+    if (!ok) return
     onDeleteMessage?.(chat.id, messageId)
-  }, [onDeleteMessage, chat.id])
+  }, [confirm, onDeleteMessage, chat.id, chat.messages])
 
   const messageActions = React.useMemo(() => ({
     onEditResend: handleEditResend,
@@ -412,6 +431,7 @@ export function ChatPanel({ chat, models, currentModel, agentMode, onPushMessage
         planMode={planMode}
         onModelsChanged={onModelsChanged}
       />
+      {confirmDialog}
     </div>
   )
 }
